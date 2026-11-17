@@ -1009,3 +1009,9 @@ Entry template:
 - NOT verified: any real provider, the visible UI (settings tab layout, bubbles, composer hint, confirmation dialog), keyboard flow in groups, Windows/Linux. Not done: streaming, Keychain storage, AI messages in search, persona/name customisation.
 - Test hygiene note: an early version of the worker test wrote two rows into the repo-root `zalo_history.db` (relative path); the rows were deleted and `run_ai_ask` now takes a `db_path`.
 - Status: done pending owner's local test; pushed to `main`.
+
+## 2026-11-17 — Incoming calls fixed, @AI pre-read, release v0.4.0  (agent: Claude Code, claude-sonnet-5-5)
+- Incoming call UI: the event reached the GUI but the call window (a separate OS viewport) opened behind the main window that `show_app` was focusing → now always-on-top + focused while ringing. Log instrumentation (`[call] GuiTx.send / check_events / GUI received`) kept. Verified live by the owner.
+- Phone said Zalo-next "does not support video calls": `voicecall` endpoints now send the PC pair `zpw_ver=693&zpw_type=24` by default (`call.rs::voicecall_zpw`, `ZCALL_ZPW` override kept; `re-notes/48`). Verified live (call accepted). Still open: phone camera not shown in Zalo-next, our video blurry/delayed → `tasks/video-call-quality.md`.
+- @AI pre-read (`docs/AI_TRO_LY.md` §11), notification regression root cause (helper binaries deleted by the ff-merge, rebuilt), release 0.4.0 (CHANGELOG, Cargo.toml/lock).
+- Verification: 464 tests pass, release build ok. NOT verified: Windows/Linux packages (CI), pre-read with a real model, Homebrew cask auto-update at release.

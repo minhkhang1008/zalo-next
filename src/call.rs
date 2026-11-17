@@ -330,6 +330,20 @@ pub fn normalize_voicecall_data(raw: Value) -> Value {
     }
 }
 
+/// `zpw_ver` / `zpw_type` query for the `voicecall` endpoints. The official Zalo PC sends
+/// `693` / `24` there (the rest of its API uses `694` / `30`); when we sent `694` / `30` the phone
+/// answered "this Zalo version does not support video calls" for every incoming video call. With
+/// the PC pair the phone accepts video (confirmed 2026-11-17, owner test; see
+/// `re-notes/48_voicecall_zpw_pair.md`). `ZCALL_ZPW=ver:type` still overrides it for experiments.
+pub(crate) fn voicecall_zpw(override_env: Option<&str>) -> String {
+    let (ver, ty) = override_env
+        .and_then(|v| v.split_once(':'))
+        .map(|(v, t)| (v.trim(), t.trim()))
+        .filter(|(v, t)| !v.is_empty() && !t.is_empty())
+        .unwrap_or(("693", "24"));
+    format!("zpw_ver={ver}&zpw_type={ty}")
+}
+
 async fn voicecall_get(s: &Session, endpoint_path: &str, payload: &Value) -> Result<Value> {
     if s.login.is_none() {
         bail!("chưa đăng nhập");
@@ -337,17 +351,7 @@ async fn voicecall_get(s: &Session, endpoint_path: &str, payload: &Value) -> Res
     let encoded = s.encoded_params(payload)?;
     let host = voice_call_domain(s).trim_end_matches('/').to_string();
     trace_line("VCALL", format!("{host}{endpoint_path}"));
-    // `ZCALL_ZPW=ver:type` overrides `zpw_ver`/`zpw_type` **for voicecall only**. The captured
-    // official desktop sends `693&24` on these endpoints while the rest of its API surface uses
-    // `694&30`, so this knob tests whether the backend keys the invite/media decision on the pair.
-    let zpw = std::env::var("ZCALL_ZPW")
-        .ok()
-        .filter(|v| v.contains(':'))
-        .map(|v| {
-            let (ver, ty) = v.split_once(':').unwrap();
-            format!("zpw_ver={}&zpw_type={}", ver.trim(), ty.trim())
-        })
-        .unwrap_or_else(|| s.common_params());
+    let zpw = voicecall_zpw(std::env::var("ZCALL_ZPW").ok().as_deref());
     let url = format!(
         "{}{endpoint_path}?{}&params={encoded}",
         voice_call_domain(s).trim_end_matches('/'),
@@ -4621,14 +4625,20 @@ impl CallBridge {
                                     {
                                         let title = format!(
                                             "{} {}",
-                                            if is_video { "📹 Cuộc gọi video đến" } else { "📞 Cuộc gọi đến" },
+                                            if is_video {
+                                                "📹 Cuộc gọi video đến"
+                                            } else {
+                                                "📞 Cuộc gọi đến"
+                                            },
                                             if is_group { "(nhóm)" } else { "" }
                                         )
                                         .trim()
                                         .to_string();
                                         let body = format!("{caller_name} đang gọi cho bạn. Mở Zalo-next để bắt máy.");
                                         tokio::spawn(async move {
-                                            let _ = crate::native_notifications::notify(&title, &body).await;
+                                            let _ =
+                                                crate::native_notifications::notify(&title, &body)
+                                                    .await;
                                         });
                                     }
                                 }
@@ -5470,5 +5480,25 @@ mod tests {
             !got_connected,
             "Call must not connect on intermediate status 5"
         );
+    }
+}
+
+#[cfg(test)]
+mod voicecall_zpw_tests {
+    use super::voicecall_zpw;
+
+    #[test]
+    fn defaults_to_the_pc_pair_and_accepts_a_valid_override() {
+        assert_eq!(voicecall_zpw(None), "zpw_ver=693&zpw_type=24");
+        assert_eq!(voicecall_zpw(Some("694:30")), "zpw_ver=694&zpw_type=30");
+        assert_eq!(voicecall_zpw(Some(" 700 : 25 ")), "zpw_ver=700&zpw_type=25");
+        // Malformed overrides fall back to the safe default instead of sending garbage.
+        for bad in ["", "693", ":24", "693:", "abc"] {
+            assert_eq!(
+                voicecall_zpw(Some(bad)),
+                "zpw_ver=693&zpw_type=24",
+                "{bad:?}"
+            );
+        }
     }
 }
