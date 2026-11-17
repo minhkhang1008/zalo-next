@@ -4677,7 +4677,7 @@ mod tests {
                 .unwrap()
                 .as_nanos(),
         ));
-        assert_eq!(super::AppSettings::load_from(&path).theme_mode, "light");
+        assert_eq!(super::AppSettings::load_from(&path).theme_mode, "dark");
         for mode in ["dark", "light", "dark"] {
             let settings = super::AppSettings {
                 theme_mode: mode.into(),

@@ -21,6 +21,7 @@ use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
 use crate::session::Session;
 
+mod appearance;
 mod background;
 mod doc_preview_ui;
 #[cfg(target_os = "macos")]
@@ -559,6 +560,18 @@ struct AppSettings {
     // 3. Giao diện
     theme_mode: String, // "light" | "dark" | "system"
     use_avatar_as_wallpaper: bool,
+    /// UI font key (`default` = bundled Be Vietnam Pro; see `theme::available_font_choices`).
+    font_family: String,
+    /// UI zoom factor (1.0 = 100%), applied with `Context::set_zoom_factor`.
+    font_scale: f32,
+    animations_enabled: bool,
+    /// Multiplier for egui's transition speed (0.75 slow, 1.0 standard, 1.5 fast).
+    animation_speed: f32,
+    /// `#RRGGBB` overrides chosen in Settings → Giao diện; `None` keeps the theme default.
+    custom_primary_color: Option<String>,
+    custom_accent_color: Option<String>,
+    custom_bubble_out_bg: Option<String>,
+    custom_bubble_in_bg: Option<String>,
     // 4. Thông báo
     enable_notifications: bool,
     play_notification_sound: bool,
@@ -626,8 +639,16 @@ impl Default for AppSettings {
             friend_src_qr: true,
             friend_src_group: true,
             friend_src_card: true,
-            theme_mode: "light".into(),
+            theme_mode: "dark".into(),
             use_avatar_as_wallpaper: false,
+            font_family: "default".into(),
+            font_scale: 1.0,
+            animations_enabled: true,
+            animation_speed: 1.0,
+            custom_primary_color: None,
+            custom_accent_color: None,
+            custom_bubble_out_bg: None,
+            custom_bubble_in_bg: None,
             enable_notifications: true,
             play_notification_sound: true,
             quick_messages_enabled: true,
@@ -659,6 +680,24 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// UI zoom clamped to a usable range; NaN / non-positive values fall back to 100%.
+    fn normalized_font_scale(&self) -> f32 {
+        if self.font_scale.is_finite() && self.font_scale > 0.0 {
+            self.font_scale.clamp(0.5, 3.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Animation speed multiplier clamped to 0.5x..2x; invalid values fall back to 1x.
+    fn normalized_animation_speed(&self) -> f32 {
+        if self.animation_speed.is_finite() && self.animation_speed > 0.0 {
+            self.animation_speed.clamp(0.5, 2.0)
+        } else {
+            1.0
+        }
+    }
+
     fn load() -> Self {
         Self::load_from(std::path::Path::new("app_settings.json"))
     }
@@ -734,6 +773,9 @@ pub struct ZaloGuiApp {
     // Theme state
     dark_mode: bool,
     theme_dirty: bool,
+    /// Palette for the current theme + custom colours. `palette()` hands out this copy so
+    /// `theme.json` is read from disk only when `refresh_cached_palette` runs, not every frame.
+    cached_palette: ThemePalette,
 
     // Session state
     is_logged_in: bool,
@@ -1028,8 +1070,8 @@ impl ZaloGuiApp {
         dev_mode: bool,
         initial_threads: Vec<Thread>,
     ) -> Self {
-        setup_custom_fonts(&cc.egui_ctx);
         let mut loaded_settings = AppSettings::load();
+        setup_custom_fonts_with_choice(&cc.egui_ctx, &loaded_settings.font_family);
         if session.proxy_url.is_none() && !loaded_settings.proxy_url.trim().is_empty() {
             let _ = session.set_proxy(Some(&loaded_settings.proxy_url));
         } else if let Some(ref p) = session.proxy_url {
@@ -1045,9 +1087,20 @@ impl ZaloGuiApp {
             loaded_settings.block_delivered,
             loaded_settings.block_seen,
         );
-        let dark_mode = loaded_settings.theme_mode != "light";
+        // The OS theme may not be known before the first frame; `update` re-checks it for "system".
+        let dark_mode = resolve_dark_mode(
+            &loaded_settings.theme_mode,
+            cc.egui_ctx.input(|i| i.raw.system_theme),
+        );
         let (drop_thumb_tx, drop_thumb_rx) = std::sync::mpsc::channel();
-        ThemePalette::load_with_custom_override(dark_mode).apply_to_ctx(&cc.egui_ctx);
+        let cached_palette = ThemePalette::resolve(dark_mode, &loaded_settings);
+        cached_palette.apply_to_ctx(
+            &cc.egui_ctx,
+            loaded_settings.animations_enabled,
+            loaded_settings.normalized_animation_speed(),
+        );
+        cc.egui_ctx
+            .set_zoom_factor(loaded_settings.normalized_font_scale());
 
         let (tx, rx) = channel();
 
@@ -1112,6 +1165,7 @@ impl ZaloGuiApp {
             video_tools_busy: false,
             dark_mode,
             theme_dirty: false,
+            cached_palette,
             is_logged_in,
             user_name,
             user_uin,
@@ -1323,7 +1377,12 @@ impl ZaloGuiApp {
     }
 
     fn palette(&self) -> ThemePalette {
-        ThemePalette::load_with_custom_override(self.dark_mode)
+        self.cached_palette
+    }
+
+    /// Rebuild the cached palette after the theme, custom colours or `theme.json` changed.
+    fn refresh_cached_palette(&mut self) {
+        self.cached_palette = ThemePalette::resolve(self.dark_mode, &self.settings);
     }
 
     pub(super) fn reload_custom_sticker_packs(&mut self) -> usize {
@@ -2944,8 +3003,26 @@ impl eframe::App for ZaloGuiApp {
             self.settings_modal_open = true;
             self.settings_tab = SettingsTab::Privacy;
         }
+        // "Hệ thống" follows the OS appearance live; light/dark are fixed.
+        let want_dark = resolve_dark_mode(
+            &self.settings.theme_mode,
+            ctx.input(|i| i.raw.system_theme),
+        );
+        if want_dark != self.dark_mode {
+            self.dark_mode = want_dark;
+            self.theme_dirty = true;
+        }
         if self.theme_dirty {
-            self.palette().apply_to_ctx(ctx);
+            self.refresh_cached_palette();
+            self.cached_palette.apply_to_ctx(
+                ctx,
+                self.settings.animations_enabled,
+                self.settings.normalized_animation_speed(),
+            );
+            let zoom = self.settings.normalized_font_scale();
+            if (ctx.zoom_factor() - zoom).abs() > f32::EPSILON {
+                ctx.set_zoom_factor(zoom);
+            }
             self.theme_dirty = false;
         }
 
@@ -3892,10 +3969,10 @@ mod tests {
     }
 
     #[test]
-    fn theme_defaults_to_light_and_preserves_saved_choice() {
+    fn theme_defaults_to_dark_and_preserves_saved_choice() {
         let settings: super::AppSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(settings.theme_mode, "light");
-        for mode in ["light", "dark"] {
+        assert_eq!(settings.theme_mode, "dark");
+        for mode in ["light", "dark", "system"] {
             let settings: super::AppSettings =
                 serde_json::from_value(serde_json::json!({"theme_mode": mode})).unwrap();
             let restored: super::AppSettings =

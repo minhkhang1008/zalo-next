@@ -65,72 +65,74 @@ pub(super) struct ThemePalette {
 
 impl ThemePalette {
     pub(super) fn dark() -> Self {
-        // Based on Zalo PC dark tokens (chat.zalo.me, 2026-11-11), with a darker canvas and
-        // lighter gray bubbles (2026-11-12, owner request) so messages stand out from the background.
+        // Atom-style dark palette shared with upstream ctdozlite v0.1.2 (easier on the eyes than
+        // the earlier Zalo PC tokens). `bg_app` stays darker than the sidebar so the nav rail and
+        // title bar keep their own layer instead of blending into the conversation list.
         Self {
             is_dark: true,
-            bg_app: Color32::from_rgb(0x12, 0x14, 0x16), // #121416 nav rail / title bar
-            bg_sidebar: Color32::from_rgb(0x1B, 0x1E, 0x22), // #1B1E22 conversation list, header
-            bg_chat_canvas: Color32::from_rgb(0x12, 0x14, 0x17), // #121417 message area (darker)
+            bg_app: Color32::from_rgb(0x18, 0x1B, 0x1F), // #181B1F nav rail / title bar
+            bg_sidebar: Color32::from_rgb(0x22, 0x26, 0x2B), // #22262B conversation list, header
+            bg_chat_canvas: Color32::from_rgb(0x1D, 0x20, 0x25), // #1D2025 message area
             bg_elevated: Color32::from_rgb(0x28, 0x2D, 0x33), // #282D33 cards, popovers
-            bg_hover: Color32::from_rgb(0x26, 0x2A, 0x2F), // hover over #1B1E22
+            bg_hover: Color32::from_rgb(0x2E, 0x33, 0x3A), // #2E333A hover
             bg_selected: Color32::from_rgb(0x1F, 0x34, 0x4D), // #1F344D selected row
-            bg_input: Color32::from_rgb(0x10, 0x12, 0x15), // #101215 search / input well
-            border: Color32::from_rgb(0x2E, 0x32, 0x37), // #2E3237 divider
-            text_primary: Color32::from_rgb(0xDF, 0xE2, 0xE7), // #DFE2E7
-            text_secondary: Color32::from_rgb(0x9F, 0xAC, 0xBC), // #9FACBC
-            text_muted: Color32::from_rgb(0x73, 0x82, 0x96), // #738296 placeholder
-            primary: Color32::from_rgb(0x00, 0x68, 0xFF), // #0068FF accent blue
-            primary_hover: Color32::from_rgb(0x66, 0xA6, 0xFF), // #66A6FF selected tab / links
-            accent_online: Color32::from_rgb(0x4B, 0xC3, 0x77), // #4BC377
-            danger: Color32::from_rgb(0xE9, 0x49, 0x49), // #E94949 badge / errors
-            warning: Color32::from_rgb(0xFF, 0xCD, 0x29), // #FFCD29
-            bubble_out_bg: Color32::from_rgb(0x34, 0x3D, 0x4A), // #343D4A gray with a blue tint (own)
-            bubble_out_text: Color32::from_rgb(0xDF, 0xE2, 0xE7),
-            bubble_out_meta: Color32::from_rgb(0x9F, 0xAC, 0xBC),
-            bubble_in_bg: Color32::from_rgb(0x30, 0x34, 0x3A), // #30343A neutral gray
-            bubble_in_border: Color32::from_rgb(0x30, 0x34, 0x3A), // borderless, shadow only
-            bubble_in_text: Color32::from_rgb(0xDF, 0xE2, 0xE7),
-            bubble_in_meta: Color32::from_rgb(0x9F, 0xAC, 0xBC),
-            nav_icon: Color32::from_rgb(0xDF, 0xE2, 0xE7), // #DFE2E7
-            nav_icon_active: Color32::from_rgb(0xDF, 0xE2, 0xE7),
+            bg_input: Color32::from_rgb(0x1A, 0x1D, 0x22), // #1A1D22 search / input well
+            border: Color32::from_rgb(0x37, 0x3D, 0x45), // #373D45 divider
+            text_primary: Color32::from_rgb(0xE6, 0xE9, 0xEE), // #E6E9EE
+            text_secondary: Color32::from_rgb(0xAA, 0xB2, 0xBE), // #AAB2BE
+            text_muted: Color32::from_rgb(0x8E, 0x96, 0xA4), // #8E96A4 placeholder
+            primary: Color32::from_rgb(0x25, 0x63, 0xEB), // #2563EB accent blue
+            primary_hover: Color32::from_rgb(0x60, 0xA5, 0xFA), // #60A5FA links / hover
+            accent_online: Color32::from_rgb(0x4A, 0xDE, 0x80), // #4ADE80
+            danger: Color32::from_rgb(0xDC, 0x26, 0x26), // #DC2626 badge / errors
+            warning: Color32::from_rgb(0xFB, 0xBF, 0x24), // #FBBF24
+            bubble_out_bg: Color32::from_rgb(0x1F, 0x34, 0x4D), // #1F344D own bubble
+            bubble_out_text: Color32::from_rgb(0xEB, 0xF0, 0xF6),
+            bubble_out_meta: Color32::from_rgb(0x9D, 0xB2, 0xCC),
+            bubble_in_bg: Color32::from_rgb(0x28, 0x2D, 0x33), // #282D33 incoming bubble
+            bubble_in_border: Color32::from_rgb(0x28, 0x2D, 0x33), // borderless, shadow only
+            bubble_in_text: Color32::from_rgb(0xE6, 0xE9, 0xEE),
+            bubble_in_meta: Color32::from_rgb(0x96, 0x9F, 0xAE),
+            nav_icon: Color32::from_rgb(0xE6, 0xE9, 0xEE),
+            nav_icon_active: Color32::from_rgb(0xE6, 0xE9, 0xEE),
             nav_selected_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 13), // white 5%
             nav_hover_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 26),    // white 10%
-            chrome_fg: Color32::from_rgb(0xDF, 0xE2, 0xE7),
-            chrome_fg_muted: Color32::from_rgb(0x9F, 0xAC, 0xBC),
-            chrome_hover: Color32::from_rgb(0x26, 0x2A, 0x2F),
-            chrome_pill_bg: Color32::from_rgba_unmultiplied(0x00, 0x68, 0xFF, 36),
-            chrome_pill_fg: Color32::from_rgb(0x66, 0xA6, 0xFF),
+            chrome_fg: Color32::from_rgb(0xE6, 0xE9, 0xEE),
+            chrome_fg_muted: Color32::from_rgb(0xAA, 0xB2, 0xBE),
+            chrome_hover: Color32::from_rgb(0x2E, 0x33, 0x3A),
+            chrome_pill_bg: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xEB, 36),
+            chrome_pill_fg: Color32::from_rgb(0x60, 0xA5, 0xFA),
         }
     }
 
     pub(super) fn light() -> Self {
-        // Zalo PC light tokens (`:root .light`), same names as the dark set.
+        // Upstream's light surfaces and text; the nav rail and title bar stay Zalo blue (#005AE0)
+        // with white chrome, as in Zalo PC.
         Self {
             is_dark: false,
             bg_app: Color32::from_rgb(0x00, 0x5A, 0xE0), // #005AE0 blue nav rail
-            bg_sidebar: Color32::WHITE,
-            bg_chat_canvas: Color32::from_rgb(0xE5, 0xE7, 0xEB), // #E5E7EB surface
+            bg_sidebar: Color32::from_rgb(0xF8, 0xFA, 0xFC), // #F8FAFC
+            bg_chat_canvas: Color32::from_rgb(0xEB, 0xF0, 0xF7), // #EBF0F7 surface
             bg_elevated: Color32::WHITE,
-            bg_hover: Color32::from_rgb(0xF1, 0xF2, 0xF4), // #F1F2F4
+            bg_hover: Color32::from_rgb(0xED, 0xF2, 0xF7), // #EDF2F7
             bg_selected: Color32::from_rgb(0xE5, 0xF1, 0xFF), // #E5F1FF
-            bg_input: Color32::from_rgb(0xF1, 0xF2, 0xF4), // #F1F2F4 filled input
-            border: Color32::from_rgb(0xD9, 0xDB, 0xDF),   // black 15% over white
-            text_primary: Color32::from_rgb(0x08, 0x1B, 0x3A), // #081B3A
-            text_secondary: Color32::from_rgb(0x5A, 0x69, 0x81), // #5A6981
-            text_muted: Color32::from_rgb(0x77, 0x85, 0x9C), // #77859C
-            primary: Color32::from_rgb(0x00, 0x68, 0xFF),  // #0068FF
-            primary_hover: Color32::from_rgb(0x00, 0x45, 0xAD), // #0045AD
-            accent_online: Color32::from_rgb(0x37, 0xB3, 0x61), // #37B361
-            danger: Color32::from_rgb(0xC3, 0x18, 0x18),   // #C31818
-            warning: Color32::from_rgb(0xE6, 0xA7, 0x00),
-            bubble_out_bg: Color32::from_rgb(0xE5, 0xF1, 0xFF), // #E5F1FF
-            bubble_out_text: Color32::from_rgb(0x08, 0x1B, 0x3A),
-            bubble_out_meta: Color32::from_rgb(0x5A, 0x69, 0x81),
+            bg_input: Color32::WHITE,
+            border: Color32::from_rgb(0xCB, 0xD5, 0xE1), // #CBD5E1
+            text_primary: Color32::from_rgb(0x0F, 0x17, 0x2A), // #0F172A
+            text_secondary: Color32::from_rgb(0x47, 0x55, 0x69), // #475569
+            text_muted: Color32::from_rgb(0x5C, 0x64, 0x70), // #5C6470
+            primary: Color32::from_rgb(0x00, 0x68, 0xFF), // #0068FF
+            primary_hover: Color32::from_rgb(0x00, 0x55, 0xD4), // #0055D4
+            accent_online: Color32::from_rgb(0x04, 0x78, 0x57), // #047857
+            danger: Color32::from_rgb(0xC3, 0x18, 0x18), // #C31818
+            warning: Color32::from_rgb(0x9A, 0x5B, 0x00), // #9A5B00
+            bubble_out_bg: Color32::from_rgb(0xE5, 0xEF, 0xFF), // #E5EFFF
+            bubble_out_text: Color32::from_rgb(0x0F, 0x17, 0x2A),
+            bubble_out_meta: Color32::from_rgb(0x43, 0x58, 0x75),
             bubble_in_bg: Color32::WHITE,
             bubble_in_border: Color32::WHITE, // borderless, shadow only
-            bubble_in_text: Color32::from_rgb(0x08, 0x1B, 0x3A),
-            bubble_in_meta: Color32::from_rgb(0x5A, 0x69, 0x81),
+            bubble_in_text: Color32::from_rgb(0x0F, 0x17, 0x2A),
+            bubble_in_meta: Color32::from_rgb(0x5C, 0x64, 0x70),
             nav_icon: Color32::WHITE,
             nav_icon_active: Color32::WHITE,
             nav_selected_bg: Color32::from_rgba_unmultiplied(0, 0, 0, 64), // black 25%
@@ -144,8 +146,15 @@ impl ThemePalette {
         }
     }
 
-    pub(super) fn apply_to_ctx(&self, ctx: &egui::Context) {
+    /// Apply the palette plus the motion settings (`animations_enabled`, `animation_speed`).
+    pub(super) fn apply_to_ctx(&self, ctx: &egui::Context, animations: bool, speed: f32) {
         let mut style = (*ctx.style()).clone();
+        // egui's default is 1/12 s; 0 turns every built-in transition into an instant jump.
+        style.animation_time = if animations {
+            (1.0 / 12.0) / speed.clamp(0.5, 2.0)
+        } else {
+            0.0
+        };
         let mut visuals = if self.is_dark {
             egui::Visuals::dark()
         } else {
@@ -206,6 +215,78 @@ impl ThemePalette {
             base.apply_json_overrides(&raw);
         }
         base
+    }
+
+    /// Built-in palette + `theme.json` overrides + the colours chosen in Settings → Giao diện.
+    /// Reads `theme.json` from disk, so call it only when something changed (see
+    /// `ZaloGuiApp::refresh_cached_palette`), never once per frame.
+    pub(super) fn resolve(dark_mode: bool, settings: &AppSettings) -> Self {
+        let mut p = Self::load_with_custom_override(dark_mode);
+        p.apply_custom_colors(
+            settings.custom_primary_color.as_deref(),
+            settings.custom_accent_color.as_deref(),
+            settings.custom_bubble_out_bg.as_deref(),
+            settings.custom_bubble_in_bg.as_deref(),
+        );
+        p
+    }
+
+    /// Override primary / accent / bubble colours (`#RRGGBB`). Text on a custom bubble is picked
+    /// by WCAG contrast so any chosen colour stays readable.
+    pub(super) fn apply_custom_colors(
+        &mut self,
+        primary_hex: Option<&str>,
+        accent_hex: Option<&str>,
+        bubble_out_hex: Option<&str>,
+        bubble_in_hex: Option<&str>,
+    ) {
+        let parse = |h: Option<&str>| h.and_then(parse_hex_color);
+        if let Some(c) = parse(primary_hex) {
+            self.primary = c;
+            // Hover is lighter on dark surfaces and darker on light ones.
+            let shift = |v: u8| {
+                if self.is_dark {
+                    v.saturating_add(25)
+                } else {
+                    v.saturating_sub(25)
+                }
+            };
+            self.primary_hover = Color32::from_rgb(shift(c.r()), shift(c.g()), shift(c.b()));
+            if self.is_dark {
+                self.chrome_pill_bg = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 36);
+                self.chrome_pill_fg = self.primary_hover;
+            }
+        }
+        if let Some(c) = parse(accent_hex) {
+            self.accent_online = c;
+        }
+        let pick = |bg: Color32, dark_ink: Color32, light_ink: Color32| {
+            if contrast_ratio(dark_ink, bg) >= contrast_ratio(light_ink, bg) {
+                dark_ink
+            } else {
+                light_ink
+            }
+        };
+        let ink_dark = Color32::from_rgb(0x0F, 0x17, 0x2A);
+        if let Some(c) = parse(bubble_out_hex) {
+            self.bubble_out_bg = c;
+            self.bubble_out_text = pick(c, ink_dark, Color32::from_rgb(0xEB, 0xF0, 0xF6));
+            self.bubble_out_meta = pick(
+                c,
+                Color32::from_rgb(0x43, 0x58, 0x75),
+                Color32::from_rgb(0x9D, 0xB2, 0xCC),
+            );
+        }
+        if let Some(c) = parse(bubble_in_hex) {
+            self.bubble_in_bg = c;
+            self.bubble_in_border = c;
+            self.bubble_in_text = pick(c, ink_dark, Color32::from_rgb(0xE6, 0xE9, 0xEE));
+            self.bubble_in_meta = pick(
+                c,
+                Color32::from_rgb(0x5C, 0x64, 0x70),
+                Color32::from_rgb(0x96, 0x9F, 0xAE),
+            );
+        }
     }
 
     /// Apply any `#RRGGBB` color overrides from a JSON string (`theme.json`) (#7).
@@ -294,6 +375,35 @@ impl ThemePalette {
         let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
         std::fs::write(path, text)
     }
+}
+
+/// Whether the UI is dark for `theme_mode` ("light" | "dark" | "system"). "system" follows the
+/// OS appearance reported by the windowing layer and falls back to dark when it is unknown.
+pub(super) fn resolve_dark_mode(theme_mode: &str, system_theme: Option<egui::Theme>) -> bool {
+    match theme_mode {
+        "light" => false,
+        "system" => system_theme.map_or(true, |t| t == egui::Theme::Dark),
+        _ => true,
+    }
+}
+
+/// WCAG relative luminance of an sRGB colour.
+pub(super) fn relative_luminance(c: Color32) -> f32 {
+    let lin = |v: u8| {
+        let f = v as f32 / 255.0;
+        if f <= 0.04045 {
+            f / 12.92
+        } else {
+            ((f + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+/// WCAG contrast ratio between two colours (1.0 ..= 21.0).
+pub(super) fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
 pub(super) fn parse_hex_color(s: &str) -> Option<Color32> {
@@ -1098,6 +1208,57 @@ pub(super) fn render_toggle_switch(
 }
 
 static CJK_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Font choice currently applied, so the lazy CJK rebuild keeps the user's font.
+static ACTIVE_FONT_CHOICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// UI font choices offered in Settings → Giao diện: `(key, label, candidate system font files)`.
+/// `default` is the bundled Be Vietnam Pro and needs no file.
+const FONT_CHOICES: &[(&str, &str, &[&str])] = &[
+    ("default", "Mặc định (Be Vietnam Pro)", &[]),
+    (
+        "helvetica",
+        "Helvetica",
+        &["/System/Library/Fonts/Helvetica.ttc"],
+    ),
+    (
+        "arial",
+        "Arial",
+        &[
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ],
+    ),
+    (
+        "tahoma",
+        "Tahoma",
+        &[
+            "C:\\Windows\\Fonts\\tahoma.ttf",
+            "/System/Library/Fonts/Supplemental/Tahoma.ttf",
+        ],
+    ),
+    (
+        "verdana",
+        "Verdana",
+        &[
+            "C:\\Windows\\Fonts\\verdana.ttf",
+            "/System/Library/Fonts/Supplemental/Verdana.ttf",
+        ],
+    ),
+    ("segoe_ui", "Segoe UI", &["C:\\Windows\\Fonts\\segoeui.ttf"]),
+];
+
+/// Font choices whose file actually exists on this machine (always includes `default`).
+pub(super) fn available_font_choices() -> Vec<(&'static str, &'static str)> {
+    FONT_CHOICES
+        .iter()
+        .filter(|(key, _, files)| {
+            *key == "default" || files.iter().any(|f| std::path::Path::new(f).is_file())
+        })
+        .map(|(key, label, _)| (*key, *label))
+        .collect()
+}
 
 pub(crate) fn is_cjk(c: char) -> bool {
     matches!(c as u32,
@@ -1113,14 +1274,23 @@ pub(super) fn ensure_cjk_font<'a>(ctx: &egui::Context, mut texts: impl Iterator<
         return;
     }
     CJK_LOADED.store(true, Ordering::Relaxed);
-    build_fonts(ctx, true);
+    let choice = ACTIVE_FONT_CHOICE
+        .lock()
+        .map(|c| c.clone())
+        .unwrap_or_default();
+    build_fonts(ctx, &choice, true);
 }
 
-pub(super) fn setup_custom_fonts(ctx: &egui::Context) {
-    build_fonts(ctx, false);
+/// Install the UI fonts with the user's `font_family` choice (`default` = bundled Be Vietnam Pro).
+pub(super) fn setup_custom_fonts_with_choice(ctx: &egui::Context, font_choice: &str) {
+    if let Ok(mut active) = ACTIVE_FONT_CHOICE.lock() {
+        *active = font_choice.to_string();
+    }
+    let with_cjk = CJK_LOADED.load(std::sync::atomic::Ordering::Relaxed);
+    build_fonts(ctx, font_choice, with_cjk);
 }
 
-fn build_fonts(ctx: &egui::Context, with_cjk: bool) {
+fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool) {
     let mut fonts = egui::FontDefinitions::default();
 
     // 1. Embed official Lucide Icon Font (vector glyphs for all UI icons)
@@ -1137,6 +1307,23 @@ fn build_fonts(ctx: &egui::Context, with_cjk: bool) {
         "bundled_sans".to_owned(),
         egui::FontData::from_static(BUNDLED_SANS),
     );
+
+    // Optional user-selected system font; it goes in front of the bundled sans, which stays as the
+    // Vietnamese-safe fallback for any glyph the chosen font lacks.
+    let selected_files = FONT_CHOICES
+        .iter()
+        .find(|(key, _, _)| *key == font_choice.trim())
+        .map(|(_, _, files)| *files)
+        .unwrap_or(&[]);
+    for path in selected_files {
+        if let Ok(font_data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "selected_font".to_owned(),
+                egui::FontData::from_owned(font_data),
+            );
+            break;
+        }
+    }
 
     let font_candidates = [
         "C:\\Windows\\Fonts\\segoeui.ttf",
@@ -1195,6 +1382,9 @@ fn build_fonts(ctx: &egui::Context, with_cjk: bool) {
     prop.insert(0, "bundled_sans".to_owned());
     if fonts.font_data.contains_key("vietnamese_font") {
         prop.insert(1, "vietnamese_font".to_owned());
+    }
+    if fonts.font_data.contains_key("selected_font") {
+        prop.insert(0, "selected_font".to_owned());
     }
     if fonts.font_data.contains_key("cjk_font") {
         prop.push("cjk_font".to_owned());

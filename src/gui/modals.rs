@@ -2502,6 +2502,7 @@ impl ZaloGuiApp {
                                                         }
                                                     });
                                                 });
+                                            self.render_appearance_display_settings(ui, ctx, pal, inner_w);
                                             ui.add_space(16.0);
 
                                             ui.label(RichText::new("Hình nền chat").color(pal.text_primary).size(13.5).strong());
@@ -3376,11 +3377,15 @@ impl ZaloGuiApp {
             }
         }
         if theme_switched {
-            self.set_theme(self.dark_mode);
-            self.show_toast(if self.dark_mode {
-                "Đã chuyển sang giao diện Tối (Atom One Dark)"
-            } else {
-                "Đã chuyển sang giao diện Sáng (Zalo Light)"
+            // `update` resolves "system" against the OS theme and re-applies the palette.
+            self.theme_dirty = true;
+            if !self.settings.save() {
+                self.show_toast("Không thể lưu giao diện: tác vụ nền chưa sẵn sàng.");
+            }
+            self.show_toast(match self.settings.theme_mode.as_str() {
+                "light" => "Đã chuyển sang giao diện Sáng",
+                "system" => "Giao diện sẽ tự theo chế độ của hệ thống",
+                _ => "Đã chuyển sang giao diện Tối",
             });
         }
         if trigger_sync {
