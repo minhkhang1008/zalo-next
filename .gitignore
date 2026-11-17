@@ -2,6 +2,10 @@
 target/
 dist/
 
+# Generated native helper output (zstd sources, helper binaries, DailyNotifier.app).
+# Rebuilt by native/macos/build-native-helpers.sh; never commit it.
+/native/macos/build/
+
 # Active session credentials and tokens (CRITICAL: NEVER COMMIT)
 session.json
 session*.json
@@ -53,6 +57,7 @@ test_lab/*.html
 
 # Media and packet capture caches
 stickers_cache/
+media_cache/
 dump/
 qr.png
 *.flow

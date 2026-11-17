@@ -1,0 +1,3 @@
+# Keep GitHub's language bar about our Rust code, not captured third-party bundles.
+web-bundle/** linguist-vendored
+web-bundle/** -diff
