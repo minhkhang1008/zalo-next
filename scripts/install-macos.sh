@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================================
 #  Trình cài đặt Zalo-next cho macOS — mã nguồn mở, đọc được toàn bộ trước khi chạy.
-#  Nguồn: https://github.com/minhkhang1008/ctdozlite-next/blob/main/scripts/install-macos.sh
+#  Nguồn: https://github.com/minhkhang1008/zalo-next/blob/main/scripts/install-macos.sh
 #
 #  Script này CHỈ làm đúng 5 việc, theo thứ tự, và hỏi bạn trước khi cài:
 #    1. Tải tệp .dmg chính thức từ GitHub Releases của repo trên (đúng chip Apple Silicon/Intel).
@@ -22,7 +22,7 @@
 # =============================================================================================
 set -euo pipefail
 
-REPO="minhkhang1008/ctdozlite-next"
+REPO="minhkhang1008/zalo-next"
 APP_DIR="${CTDOZ_APP_DIR:-/Applications}"
 APP_NAME="Zalo-next.app"
 

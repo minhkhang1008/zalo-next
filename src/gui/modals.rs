@@ -2427,7 +2427,7 @@ impl ZaloGuiApp {
                                                             .on_hover_cursor(CursorIcon::PointingHand)
                                                             .clicked()
                                                         {
-                                                            open_external_url("https://github.com/minhkhang1008/ctdozlite-next/blob/main/docs/TINH_NANG.md");
+                                                            open_external_url("https://github.com/minhkhang1008/zalo-next/blob/main/docs/TINH_NANG.md");
                                                         }
                                                         ui.add_space(4.0);
                                                         let total_msgs: usize = self.threads.iter().map(|t| t.messages.len()).sum();

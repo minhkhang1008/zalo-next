@@ -19,10 +19,10 @@ cask "zalo-next" do
   sha256 arm:   "99874ee5735a1398afa183f524e4ebf0d57bf9379c6851c6e507ffb3c9348d11",
          intel: "23031888a21e2aa69fedcfe9ee6b4090769537802a5ba1a9e26dc7c6a6b9cf2c"
 
-  url "https://github.com/minhkhang1008/ctdozlite-next/releases/download/v#{version}/zalo-next-#{version}-macos-#{arch}.dmg"
+  url "https://github.com/minhkhang1008/zalo-next/releases/download/v#{version}/zalo-next-#{version}-macos-#{arch}.dmg"
   name "Zalo-next"
   desc "Lightweight native Zalo desktop client written in Rust"
-  homepage "https://github.com/minhkhang1008/ctdozlite-next"
+  homepage "https://github.com/minhkhang1008/zalo-next"
 
   depends_on macos: :big_sur
 

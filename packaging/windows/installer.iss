@@ -6,7 +6,7 @@
 #define MyAppVersion "0.0.0"
 #endif
 #define MyAppPublisher "ctdoteam1110"
-#define MyAppURL "https://github.com/minhkhang1008/ctdozlite-next"
+#define MyAppURL "https://github.com/minhkhang1008/zalo-next"
 #define MyAppExeName "zalo-next.exe"
 
 [Setup]

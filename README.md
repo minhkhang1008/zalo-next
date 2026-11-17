@@ -44,18 +44,18 @@ brew install --cask zalo-next
 **Hoặc trình cài đặt một lệnh** (đọc được toàn bộ, in rõ từng bước và hỏi trước khi cài):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/minhkhang1008/ctdozlite-next/main/scripts/install-macos.sh | bash
+curl -fsSL https://raw.githubusercontent.com/minhkhang1008/zalo-next/main/scripts/install-macos.sh | bash
 ```
 
 Muốn xem trước rồi mới chạy:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/minhkhang1008/ctdozlite-next/main/scripts/install-macos.sh
+curl -fsSLO https://raw.githubusercontent.com/minhkhang1008/zalo-next/main/scripts/install-macos.sh
 less install-macos.sh      # đọc nội dung
 bash install-macos.sh
 ```
 
-**Tải `.dmg` thủ công:** vào [Releases](https://github.com/minhkhang1008/ctdozlite-next/releases), tải
+**Tải `.dmg` thủ công:** vào [Releases](https://github.com/minhkhang1008/zalo-next/releases), tải
 `zalo-next-<phiên bản>-macos-arm64.dmg` (Apple Silicon) hoặc `-x86_64` (Intel), kéo app vào
 Applications. Lần đầu mở macOS sẽ chặn: chạy `xattr -cr /Applications/Zalo-next.app` hoặc vào
 **System Settings → Privacy & Security → Open Anyway**.
@@ -63,7 +63,7 @@ Applications. Lần đầu mở macOS sẽ chặn: chạy `xattr -cr /Applicatio
 **Tự build:** cần Rust 1.75+, Xcode Command Line Tools và CMake.
 
 ```bash
-git clone https://github.com/minhkhang1008/ctdozlite-next.git && cd ctdozlite-next
+git clone https://github.com/minhkhang1008/zalo-next.git && cd zalo-next
 export CMAKE_POLICY_VERSION_MINIMUM=3.5      # nếu dùng CMake 4.x
 cargo run --release -- --gui                  # chạy thử
 bash packaging/package-local.sh               # đóng gói .dmg vào dist/
@@ -77,11 +77,11 @@ Zalo-next chưa được Apple "công chứng" (việc này cần tài khoản t
 chặn app khi tải bằng trình duyệt. Thay vì yêu cầu bạn tắt bảo vệ của macOS, mọi bước đều kiểm chứng được:
 
 - **Mã nguồn mở:** toàn bộ mã của app và [trình cài đặt](scripts/install-macos.sh) nằm trong repo này.
-- **Build công khai:** mọi tệp cài đặt được [GitHub Actions](https://github.com/minhkhang1008/ctdozlite-next/actions)
+- **Build công khai:** mọi tệp cài đặt được [GitHub Actions](https://github.com/minhkhang1008/zalo-next/actions)
   build từ mã nguồn, không build trên máy cá nhân.
 - **Kiểm tra được nguồn gốc:** mỗi bản phát hành có `SHA256SUMS.txt`; từ v0.2.2 có thêm chứng nhận nguồn gốc của GitHub.
   Có `gh` (GitHub CLI) thì chạy:
-  `gh attestation verify zalo-next-<phiên bản>-macos-arm64.dmg --repo minhkhang1008/ctdozlite-next`
+  `gh attestation verify zalo-next-<phiên bản>-macos-arm64.dmg --repo minhkhang1008/zalo-next`
   — kết quả "Verification succeeded" nghĩa là tệp đúng do workflow của repo này build ra.
 - **Trình cài đặt chỉ làm 5 việc:** tải `.dmg` từ GitHub Releases → đối chiếu SHA-256 → kiểm tra chữ ký
   → chép vào Applications → gỡ cờ "tải từ Internet" cho riêng app này. Không cài dịch vụ chạy nền,

@@ -70,12 +70,12 @@ def build(version: str, changelog: str, repo: str) -> str:
         "",
         "```bash",
         "brew tap minhkhang1008/tap && brew trust minhkhang1008/tap && brew install --cask zalo-next",
-        f"curl -fsSL https://raw.githubusercontent.com/{repo or 'minhkhang1008/ctdozlite-next'}"
+        f"curl -fsSL https://raw.githubusercontent.com/{repo or 'minhkhang1008/zalo-next'}"
         "/main/scripts/install-macos.sh | bash",
         "```",
         "",
         "Kiểm tra nguồn gốc tệp: `gh attestation verify <tệp> --repo "
-        f"{repo or 'minhkhang1008/ctdozlite-next'}`.",
+        f"{repo or 'minhkhang1008/zalo-next'}`.",
     ]
     return "\n".join(out).replace("\n\n\n", "\n\n") + "\n"
 

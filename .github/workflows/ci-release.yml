@@ -153,7 +153,7 @@ jobs:
           Release:        1
           Summary:        Native Zalo Desktop Client written in Rust
           License:        MIT OR Apache-2.0
-          URL:            https://github.com/minhkhang1008/ctdozlite-next
+          URL:            https://github.com/minhkhang1008/zalo-next
           BuildArch:      x86_64
           AutoReqProv:    no
           Requires:       alsa-lib, libX11, libxcb, libxkbcommon
@@ -469,7 +469,7 @@ jobs:
 
           ver = os.environ["VERSION"]
           tag = os.environ["TAG_NAME"]
-          repo = "https://github.com/minhkhang1008/ctdozlite-next"
+          repo = "https://github.com/minhkhang1008/zalo-next"
           assets = []
           for line in Path("SHA256SUMS.txt").read_text().splitlines():
               parts = line.strip().split(None, 1)

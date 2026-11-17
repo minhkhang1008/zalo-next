@@ -73,7 +73,7 @@ Các điểm cần xử lý trước khi chuyển:
 ## Các quy tắc riêng phải giữ
 
 - REST/MCP không được kích hoạt trở lại; upstream vẫn có đường bật server.
-- Auto-updater chỉ lấy fork `minhkhang1008/ctdozlite-next` và bắt buộc kiểm tra
+- Auto-updater chỉ lấy fork `minhkhang1008/zalo-next` và bắt buộc kiểm tra
   SHA-256. Upstream dùng `GITHUB_REPO = "ctdoteam1110/ctdozlite"`; không thay
   nguồn cập nhật của fork bằng giá trị này.
 - Giữ trust allowlist, quyền file/thư mục, giới hạn RAM và không tự tải URL tin

@@ -18,14 +18,14 @@ Homebrew bắt buộc xác nhận tin cậy (`brew trust`) với mọi tap ngoà
 `curl -fsSLO <đường dẫn bên dưới>` rồi mở ra xem):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/minhkhang1008/ctdozlite-next/main/scripts/install-macos.sh | bash
+curl -fsSL https://raw.githubusercontent.com/minhkhang1008/zalo-next/main/scripts/install-macos.sh | bash
 ```
 
 Script (`scripts/install-macos.sh`) tải bản mới nhất đúng chip, đối chiếu SHA-256 với
 `SHA256SUMS.txt`, chép `Zalo-next.app` vào `/Applications`, gỡ cờ cách ly rồi mở app. Gatekeeper chỉ
 chặn tệp có cờ `com.apple.quarantine` mà trình duyệt gắn vào; `curl` không gắn cờ này. Tuỳ chọn:
 `CTDOZ_VERSION=0.2.1` (cài bản cụ thể), `CTDOZ_APP_DIR=~/Applications`, `CTDOZ_YES=1` (không hỏi),
-`CTDOZ_NO_OPEN=1`. Kiểm tra nguồn gốc tệp: `gh attestation verify <tệp> --repo minhkhang1008/ctdozlite-next`
+`CTDOZ_NO_OPEN=1`. Kiểm tra nguồn gốc tệp: `gh attestation verify <tệp> --repo minhkhang1008/zalo-next`
 (xem mục "An toàn & minh bạch" trong README).
 
 Vì sao không ký "thật": muốn macOS mở app tải bằng trình duyệt mà không hỏi, app phải được ký
@@ -35,7 +35,7 @@ không mang cờ cách ly nên không bị chặn; chỉ lần cài đầu cần
 
 **Hoặc tải `.dmg` thủ công:**
 
-Tải tại [Releases](https://github.com/minhkhang1008/ctdozlite-next/releases):
+Tải tại [Releases](https://github.com/minhkhang1008/zalo-next/releases):
 
 | Máy | Tệp |
 |---|---|
@@ -69,7 +69,7 @@ Gỡ cài đặt: xoá `Zalo-next.app`; muốn xoá cả dữ liệu thì xoá t
 Cần: Rust 1.75+, Xcode Command Line Tools (`xcode-select --install`) và CMake (`brew install cmake`).
 
 ```bash
-git clone https://github.com/minhkhang1008/ctdozlite-next.git && cd ctdozlite-next
+git clone https://github.com/minhkhang1008/zalo-next.git && cd zalo-next
 export CMAKE_POLICY_VERSION_MINIMUM=3.5    # bắt buộc với CMake 4.x
 cargo run --release -- --gui
 ```

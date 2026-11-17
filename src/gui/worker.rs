@@ -4248,7 +4248,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
 /// Releases of this fork. Update checks only talk to GitHub (`api.github.com`,
 /// `github.com/.../releases`) and never carry Zalo cookies; every download is size-limited and
 /// verified against the release's SHA-256 digest before install.
-const GITHUB_REPO: &str = "minhkhang1008/ctdozlite-next";
+const GITHUB_REPO: &str = "minhkhang1008/zalo-next";
 
 pub(crate) async fn fetch_github_latest_release() -> Result<UpdateCheckResult, String> {
     let current_ver = env!("CARGO_PKG_VERSION").to_string();

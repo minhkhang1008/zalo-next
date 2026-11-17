@@ -4,7 +4,7 @@ version = "0.3.2"
 edition = "2021"
 authors = ["TIPC1110 <tienichpc1110@gmail.com>"]
 description = "Lightweight, high-performance native Zalo PC client written in Rust (zero Node.js, zero Electron)"
-repository = "https://github.com/minhkhang1008/ctdozlite-next"
+repository = "https://github.com/minhkhang1008/zalo-next"
 license = "MIT OR Apache-2.0"
 default-run = "zalo-next"
 
