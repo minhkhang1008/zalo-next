@@ -9,6 +9,7 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 ## [Unreleased]
 
 ### Changed (Thay đổi)
+- **Thư mục dữ liệu macOS thống nhất:** mọi cách chạy (kể cả `cargo run`, TUI) dùng `~/Library/Application Support/ctdozlite`; lần chạy đầu tự sao chép phiên/lịch sử cũ từ thư mục làm việc sang (an toàn, giữ bản gốc dạng `*.bak`, không ghi đè).
 - **Đổi tên thành Zalo-next:** tên app macOS là `Zalo-next.app` (menu About / Hide / Quit cũng đọc "Zalo-next"), tệp thực thi và gói phát hành là `zalo-next-*` (cask Homebrew `zalo-next`). Giữ nguyên bundle id và thư mục dữ liệu `~/Library/Application Support/ctdozlite` để không mất đăng nhập, lịch sử và quyền thông báo/micro/camera. Gói `.deb` / `.rpm` mới thay thế gói `ctdozlite` cũ.
 
 ## [0.3.2] - 2026-11-14

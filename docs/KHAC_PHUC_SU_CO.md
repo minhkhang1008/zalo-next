@@ -8,8 +8,8 @@ Khi gặp lỗi, chạy lại với `--dev` để xem log mạng trong Dev Inspe
 web khác (Zalo chỉ giữ một phiên web cho mỗi tài khoản). Đăng nhập lại bằng QR; lịch sử tin nhắn vẫn còn.
 
 **Mở lại app phải đăng nhập lại dù chưa đăng xuất.** Kiểm tra bạn có đang mở app với một thư mục dữ
-liệu khác lần trước không (bản `.app` dùng `~/Library/Application Support/ctdozlite`, còn `cargo run`
-hoặc `--data-dir` dùng thư mục khác) và thư mục đó có quyền ghi không.
+liệu khác lần trước không (trên macOS mọi cách chạy dùng `~/Library/Application Support/ctdozlite`, trừ khi bạn
+truyền `--data-dir`/`--profile`; dữ liệu cũ trong thư mục làm việc được chuyển sang và để lại bản `*.bak`) và thư mục đó có quyền ghi không.
 
 **Chạy hai tài khoản bị đăng xuất lẫn nhau.** Mỗi tài khoản cần một thư mục riêng:
 `zalo-next --data-dir ~/.zalo-next-taikhoan2`.

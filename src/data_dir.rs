@@ -6,6 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
+/// Data directory used on macOS: `~/Library/Application Support/ctdozlite`. The folder keeps the
+/// legacy name on purpose, so existing logins and databases survive the Zalo-next rename.
+pub fn macos_default_dir(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/ctdozlite")
+}
+
 /// Resolve paths without changing process state, including in parallel tests.
 ///
 /// # Errors
@@ -84,14 +90,18 @@ pub fn resolve(
         .filter(|p| p.file_name().is_some_and(|n| n == "Contents"))
         .and_then(Path::parent)
         .is_some_and(|p| p.extension().is_some_and(|e| e == "app"));
-    let (base, is_private) = if macos && bundled {
-        let home = home.context("Cần HOME để xác định Application Support")?;
-        if !home.is_absolute() && !home.to_str().is_some_and(|s| s.starts_with('/')) {
-            bail!("HOME phải là đường dẫn tuyệt đối");
+    // On macOS every run (the .app, `cargo run`, the TUI, helper CLIs) shares one private data
+    // directory, so they all see the same session and message database. Only a developer run
+    // without HOME falls back to the working directory; a bundle without HOME is an error.
+    let (base, is_private) = match (macos, home) {
+        (true, Some(home)) => {
+            if !home.is_absolute() && !home.to_str().is_some_and(|s| s.starts_with('/')) {
+                bail!("HOME phải là đường dẫn tuyệt đối");
+            }
+            (macos_default_dir(home), true)
         }
-        (home.join("Library/Application Support/ctdozlite"), true)
-    } else {
-        (cwd.to_path_buf(), false)
+        (true, None) if bundled => bail!("Cần HOME để xác định Application Support"),
+        _ => (cwd.to_path_buf(), false),
     };
     if let Some(prof) = profile_name {
         return Ok((base.join("profiles").join(prof), true));
@@ -146,10 +156,164 @@ pub fn initialize(args: &[String]) -> Result<PathBuf> {
         cfg!(target_os = "macos"),
     )?;
     prepare(&path, private)?;
+    // First launch after the data-dir rule changed: bring over session/history that older builds
+    // left in the working directory. Never for explicit `--data-dir` / `--profile`, and not for
+    // `--print-data-dir`, which must have no side effects.
+    if cfg!(target_os = "macos")
+        && !args.iter().any(|a| a == "--print-data-dir")
+        && home
+            .as_deref()
+            .is_some_and(|home| path == macos_default_dir(home))
+    {
+        let report = migrate_legacy_cwd_storage(&cwd, &path);
+        if !report.moved.is_empty() {
+            eprintln!(
+                "ℹ Đã chuyển dữ liệu cũ từ {} sang {}: {} (bản gốc đổi tên thành *.bak).",
+                cwd.display(),
+                path.display(),
+                report.moved.join(", ")
+            );
+        }
+        for error in &report.errors {
+            eprintln!("! Không chuyển được dữ liệu cũ: {error}");
+        }
+    }
     // Legacy storage callers use relative paths; switch once before creating workers.
     std::env::set_current_dir(&path)
         .with_context(|| format!("Không chọn được thư mục dữ liệu {}", path.display()))?;
     Ok(path)
+}
+
+/// Files that older builds wrote next to the working directory. SQLite sidecars travel with the
+/// database so a WAL-mode history is copied consistently.
+const LEGACY_FILES: &[&str] = &[
+    "session.json",
+    "zalo_history.db",
+    "zalo_history.db-wal",
+    "zalo_history.db-shm",
+    "threads_cache.json",
+    "app_settings.json",
+    "theme.json",
+    "custom_stickers.json",
+    "autoreply_rules.json",
+    "active_account",
+    "sync_identity.json",
+    "sync_rsa_identity.json",
+    "sync_v2_keys.json",
+];
+/// Per-account data (`accounts/<uin>.json`, `<uin>_history.db`, ...).
+const LEGACY_DIRS: &[&str] = &["accounts"];
+/// A working directory only counts as legacy storage when it holds one of these.
+const LEGACY_ANCHORS: &[&str] = &["session.json", "zalo_history.db", "accounts"];
+
+/// Result of [`migrate_legacy_cwd_storage`].
+#[derive(Debug, Default)]
+pub struct MigrationReport {
+    /// Names copied into the new data directory (originals renamed to `*.bak`).
+    pub moved: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Copy a legacy file or directory tree with owner-only permissions; returns the byte total.
+fn copy_tree_private(source: &Path, destination: &Path) -> Result<u64> {
+    if source.is_dir() {
+        ensure_private_dir(destination)?;
+        let mut total = 0;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let path = entry.path();
+            // Symlinks are not followed: a link must never pull outside data into the store.
+            if entry.file_type()?.is_symlink() {
+                continue;
+            }
+            total += copy_tree_private(&path, &destination.join(entry.file_name()))?;
+        }
+        Ok(total)
+    } else {
+        copy_private(source, destination).map_err(Into::into)
+    }
+}
+
+fn tree_size(path: &Path) -> std::io::Result<u64> {
+    if path.is_dir() {
+        let mut total = 0;
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_symlink() {
+                continue;
+            }
+            total += tree_size(&entry.path())?;
+        }
+        Ok(total)
+    } else {
+        Ok(std::fs::metadata(path)?.len())
+    }
+}
+
+/// Free `name.bak` (or `name.bak.N`) next to `path`.
+fn backup_path(path: &Path) -> PathBuf {
+    let base = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let base = base.unwrap_or_default();
+    (0..)
+        .map(|n| {
+            let suffix = if n == 0 {
+                ".bak".to_string()
+            } else {
+                format!(".bak.{n}")
+            };
+            path.with_file_name(format!("{base}{suffix}"))
+        })
+        .find(|p| !p.exists())
+        .unwrap_or_else(|| path.with_file_name(format!("{base}.bak")))
+}
+
+/// Move session, history and settings that older builds kept in the working directory into the
+/// macOS data directory.
+///
+/// Non-destructive and idempotent: each item is copied (owner-only), verified by size, and only
+/// then renamed to `<name>.bak` in the source (the `*.bak` pattern is git-ignored). Items already
+/// present in `target` are never overwritten, and nothing happens unless the target holds no
+/// session/history yet and the source holds some. Errors are reported, never fatal.
+pub fn migrate_legacy_cwd_storage(cwd: &Path, target: &Path) -> MigrationReport {
+    let mut report = MigrationReport::default();
+    let same = match (cwd.canonicalize(), target.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => cwd == target,
+    };
+    if same
+        || LEGACY_ANCHORS.iter().any(|n| target.join(n).exists())
+        || !LEGACY_ANCHORS.iter().any(|n| cwd.join(n).exists())
+    {
+        return report;
+    }
+    for name in LEGACY_FILES.iter().chain(LEGACY_DIRS) {
+        let (from, to) = (cwd.join(name), target.join(name));
+        let is_symlink = std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_symlink());
+        if is_symlink || !from.exists() || to.exists() {
+            continue;
+        }
+        let result = (|| -> Result<()> {
+            let expected = tree_size(&from)?;
+            let copied = copy_tree_private(&from, &to)?;
+            if copied != expected || tree_size(&to)? != expected {
+                // Roll the partial copy back so the next launch can retry cleanly.
+                let _ = if to.is_dir() {
+                    std::fs::remove_dir_all(&to)
+                } else {
+                    std::fs::remove_file(&to)
+                };
+                bail!("kích thước bản sao của {name} không khớp");
+            }
+            std::fs::rename(&from, backup_path(&from))
+                .with_context(|| format!("Không đổi tên bản gốc của {name}"))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => report.moved.push((*name).to_string()),
+            Err(error) => report.errors.push(format!("{name}: {error:#}")),
+        }
+    }
+    report
 }
 
 fn create_private_file(parent: &Path, prefix: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
@@ -546,6 +710,172 @@ mod tests {
         assert_eq!(std::fs::read(occupied.join("keep")).unwrap(), b"retained");
         assert!(write_private_atomic(&root.join("missing/session.json"), b"fixture").is_err());
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn macos_non_bundled_runs_share_application_support() {
+        let cwd = Path::new("/work/repo");
+        let home = Path::new("/Users/fixture");
+        let expected = PathBuf::from("/Users/fixture/Library/Application Support/ctdozlite");
+        // `cargo run` / CLI / TUI use the same directory as the .app.
+        assert_eq!(
+            resolve(
+                &[],
+                cwd,
+                Path::new("/work/repo/target/debug/zalo-next"),
+                Some(home),
+                true
+            )
+            .unwrap(),
+            (expected.clone(), true)
+        );
+        // --profile nests inside it; --data-dir still wins.
+        assert_eq!(
+            resolve(
+                &["--profile=acc2".into()],
+                cwd,
+                Path::new("/bin/zalo-next"),
+                Some(home),
+                true
+            )
+            .unwrap(),
+            (expected.join("profiles").join("acc2"), true)
+        );
+        assert_eq!(
+            resolve(
+                &["--data-dir=/tmp/x".into()],
+                cwd,
+                Path::new("/bin/zalo-next"),
+                Some(home),
+                true
+            )
+            .unwrap(),
+            (PathBuf::from("/tmp/x"), true)
+        );
+        // Linux / Windows keep the working directory.
+        assert_eq!(
+            resolve(&[], cwd, Path::new("/bin/zalo-next"), Some(home), false).unwrap(),
+            (cwd.to_path_buf(), false)
+        );
+        assert!(resolve(
+            &[],
+            cwd,
+            Path::new("/bin/zalo-next"),
+            Some(Path::new("rel")),
+            true
+        )
+        .is_err());
+    }
+
+    fn write(path: &Path, contents: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn migration_copies_legacy_cwd_data_and_keeps_backups() {
+        let root = fixture();
+        let (cwd, target) = (root.join("repo"), root.join("support"));
+        write(&cwd.join("session.json"), b"session fixture");
+        write(&cwd.join("zalo_history.db"), b"db fixture");
+        write(&cwd.join("zalo_history.db-wal"), b"wal fixture");
+        write(&cwd.join("accounts/1234.json"), b"account fixture");
+        write(&cwd.join("accounts/1234_history.db"), b"account db");
+        write(&cwd.join("unrelated.txt"), b"keep me");
+        write(&cwd.join("README.md"), b"keep me too");
+        prepare(&target, true).unwrap();
+
+        let report = migrate_legacy_cwd_storage(&cwd, &target);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.moved.contains(&"session.json".to_string()));
+        assert!(report.moved.contains(&"accounts".to_string()));
+        assert_eq!(
+            std::fs::read(target.join("session.json")).unwrap(),
+            b"session fixture"
+        );
+        assert_eq!(
+            std::fs::read(target.join("zalo_history.db-wal")).unwrap(),
+            b"wal fixture"
+        );
+        assert_eq!(
+            std::fs::read(target.join("accounts/1234.json")).unwrap(),
+            b"account fixture"
+        );
+        // Originals survive as *.bak; unrelated files are untouched.
+        assert_eq!(
+            std::fs::read(cwd.join("session.json.bak")).unwrap(),
+            b"session fixture"
+        );
+        assert!(cwd.join("accounts.bak/1234.json").is_file());
+        assert!(!cwd.join("session.json").exists());
+        assert_eq!(
+            std::fs::read(cwd.join("unrelated.txt")).unwrap(),
+            b"keep me"
+        );
+        assert!(!target.join("unrelated.txt").exists() && !target.join("README.md").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(target.join("session.json")), 0o600);
+            assert_eq!(mode(target.join("accounts")), 0o700);
+            assert_eq!(mode(target.join("accounts/1234.json")), 0o600);
+        }
+        // Idempotent: a second launch has nothing left to do.
+        let again = migrate_legacy_cwd_storage(&cwd, &target);
+        assert!(again.moved.is_empty() && again.errors.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_never_overwrites_or_mixes_existing_target_data() {
+        let root = fixture();
+        let (cwd, target) = (root.join("repo"), root.join("support"));
+        write(&cwd.join("session.json"), b"old session");
+        write(&target.join("session.json"), b"current session");
+        let report = migrate_legacy_cwd_storage(&cwd, &target);
+        assert!(report.moved.is_empty() && report.errors.is_empty());
+        assert_eq!(
+            std::fs::read(target.join("session.json")).unwrap(),
+            b"current session"
+        );
+        assert_eq!(
+            std::fs::read(cwd.join("session.json")).unwrap(),
+            b"old session"
+        );
+        assert!(!cwd.join("session.json.bak").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_needs_a_session_or_history_anchor_and_a_different_directory() {
+        let root = fixture();
+        let (cwd, target) = (root.join("repo"), root.join("support"));
+        // Only a stray theme file: not Zalo-next storage, leave it alone.
+        write(&cwd.join("theme.json"), b"{}");
+        std::fs::create_dir_all(&target).unwrap();
+        let report = migrate_legacy_cwd_storage(&cwd, &target);
+        assert!(report.moved.is_empty() && cwd.join("theme.json").exists());
+        // Same directory: nothing to do even with an anchor present.
+        write(&cwd.join("session.json"), b"s");
+        assert!(migrate_legacy_cwd_storage(&cwd, &cwd).moved.is_empty());
+        assert!(cwd.join("session.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_skips_symlinked_entries() {
+        let root = fixture();
+        let (cwd, target) = (root.join("repo"), root.join("support"));
+        write(&cwd.join("session.json"), b"session");
+        let outside = root.join("outside.json");
+        write(&outside, b"outside data");
+        std::os::unix::fs::symlink(&outside, cwd.join("threads_cache.json")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let report = migrate_legacy_cwd_storage(&cwd, &target);
+        assert_eq!(report.moved, vec!["session.json".to_string()]);
+        assert!(!target.join("threads_cache.json").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

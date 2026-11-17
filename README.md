@@ -98,7 +98,7 @@ chặn app khi tải bằng trình duyệt. Thay vì yêu cầu bạn tắt bả
 | `zalo-next --dev` | Bật Dev Inspector để xem log mạng khi gỡ lỗi |
 
 Dữ liệu (phiên đăng nhập, lịch sử, cài đặt) nằm ở `~/Library/Application Support/ctdozlite`
-khi chạy bản `.app`, hoặc ở thư mục `--data-dir` nếu bạn chỉ định. Không chia sẻ `session.json`
+trên mọi cách chạy (kể cả `cargo run`), hoặc ở thư mục `--data-dir` nếu bạn chỉ định; dữ liệu cũ trong thư mục làm việc được tự chuyển sang ở lần chạy đầu. Không chia sẻ `session.json`
 cho bất kỳ ai.
 
 ## Tài liệu

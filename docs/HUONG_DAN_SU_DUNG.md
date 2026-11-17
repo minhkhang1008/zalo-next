@@ -21,9 +21,11 @@ Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diệ
 
 ---
 
-Trên macOS, bản `.app` mặc định lưu dữ liệu trong `~/Library/Application Support/ctdozlite`, kể cả khi khởi chạy với thư mục làm việc `/`. Bản CLI ngoài bundle giữ thư mục làm việc hiện tại để tiếp tục dùng dữ liệu cũ. `--data-dir` ghi đè cả hai lựa chọn; thư mục chỉ định và thư mục mặc định của bundle có quyền `0700` trên Unix. Nếu thư mục không ghi được, chương trình báo lỗi trước khi mở dữ liệu.
+Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dùng chung `~/Library/Application Support/ctdozlite`, kể cả khi thư mục làm việc là `/`, nên GUI và TUI luôn thấy cùng một phiên đăng nhập và cơ sở dữ liệu. Windows và Linux giữ thư mục làm việc hiện tại. `--data-dir` ghi đè lựa chọn này (`--profile <tên>` tạo thư mục con `profiles/<tên>`); thư mục chỉ định và thư mục mặc định trên macOS có quyền `0700` trên Unix. Nếu thư mục không ghi được, chương trình báo lỗi trước khi mở dữ liệu.
 
-`--version` không chuẩn bị thư mục dữ liệu. Chương trình không tự di chuyển, sao chép hay xóa dữ liệu cũ khi thay đổi thư mục; có thể dùng `--data-dir` để chọn lại thư mục đã có dữ liệu.
+`--version` và `--print-data-dir` không chuẩn bị hay di chuyển dữ liệu.
+
+**Tự chuyển dữ liệu cũ (macOS):** ở lần chạy đầu sau khi đổi quy tắc, nếu thư mục dữ liệu mới chưa có phiên/lịch sử nhưng thư mục làm việc có `session.json`, `zalo_history.db` hoặc `accounts/`, chương trình sao chép (quyền `0600`/`0700`) các tệp của Zalo-next (`session.json`, `zalo_history.db` kèm `-wal`/`-shm`, `accounts/`, `threads_cache.json`, `app_settings.json`, `theme.json`, `custom_stickers.json`, `autoreply_rules.json`, `active_account`, khóa Sync V2), kiểm tra kích thước rồi đổi tên bản gốc thành `*.bak` (không xóa). Không bao giờ ghi đè tệp đã có ở thư mục mới, không đụng tới tệp khác, và không chạy khi dùng `--data-dir` / `--profile`. Muốn quay lại, đổi tên `*.bak` về tên cũ và chạy với `--data-dir .`.
 
 ## 2. Giao diện đồ họa (GUI)
 

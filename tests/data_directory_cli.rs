@@ -145,15 +145,24 @@ fn legacy_cli_keeps_cwd_and_version_does_not_prepare_storage() {
         env!("CARGO_BIN_EXE_zalo-next")
     );
     let fixture = Fixture::new();
+    // macOS: every run (not only the .app) shares ~/Library/Application Support/ctdozlite.
+    // Other platforms keep the working directory.
+    let home = fixture.0.join("home");
+    std::fs::create_dir(&home).unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_zalo-next"))
         .args(["--print-data-dir", "--logout"])
+        .env("HOME", &home)
         .current_dir(&fixture.0)
         .output()
         .unwrap();
     assert!(result.status.success());
+    #[cfg(target_os = "macos")]
+    let expected = home.join("Library/Application Support/ctdozlite");
+    #[cfg(not(target_os = "macos"))]
+    let expected = fixture.0.clone();
     assert_eq!(
         String::from_utf8_lossy(&result.stdout).trim(),
-        fixture.0.to_str().unwrap()
+        expected.to_str().unwrap()
     );
     let data = fixture.0.join("not-created");
     let result = Command::new(env!("CARGO_BIN_EXE_zalo-next"))
@@ -168,7 +177,37 @@ fn legacy_cli_keeps_cwd_and_version_does_not_prepare_storage() {
         format!("Zalo-next v{}", env!("CARGO_PKG_VERSION"))
     );
     assert!(!data.exists());
-    assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(&fixture.0)
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_name() != "home")
+            .count(),
+        0
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn print_data_dir_never_migrates_legacy_working_directory_files() {
+    let fixture = Fixture::new();
+    let home = fixture.0.join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(fixture.0.join("session.json"), b"legacy session").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_zalo-next"))
+        .args(["--print-data-dir", "--logout"])
+        .env("HOME", &home)
+        .current_dir(&fixture.0)
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    // Side-effect free: the legacy file stays put and nothing is copied.
+    assert_eq!(
+        std::fs::read(fixture.0.join("session.json")).unwrap(),
+        b"legacy session"
+    );
+    assert!(!home
+        .join("Library/Application Support/ctdozlite/session.json")
+        .exists());
 }
 
 #[test]
