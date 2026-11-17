@@ -121,6 +121,7 @@ impl MessageStore {
         }
 
         crate::productivity::init_schema(&conn)?;
+        crate::ai::init_schema(&conn)?;
         if path != ":memory:" {
             enforce_sqlite_file_permissions(std::path::Path::new(path))?;
         }
@@ -183,6 +184,8 @@ impl MessageStore {
             "DELETE FROM threads WHERE thread_id = ?1",
             params![thread_id],
         )?;
+        // Local Assistant messages belong to the conversation and go with it (INV-5 table).
+        crate::ai::delete_thread(&self.conn, thread_id)?;
         Ok(())
     }
 

@@ -102,3 +102,17 @@ cargo run --release --bin test_fetch -- --send <USER_ID> "Nội dung tin nhắn"
 # Gửi thử tin nhắn nhóm
 cargo run --release --bin test_fetch -- --send-group <GROUP_ID> "Nội dung tin nhắn"
 ```
+
+## Trợ lý AI (`@AI`)
+
+1. Vào **Cài đặt → Trợ lý AI**, bật trợ lý, nhập **Base URL** tương thích OpenAI (ví dụ `https://api.example.com/v1`;
+   `http://localhost:11434/v1` cho Ollama), **API key** và **Model**, rồi bấm **Kiểm tra kết nối**.
+2. Trong bất kỳ cuộc trò chuyện nào gõ `@AI <câu hỏi>` rồi Enter. AI trả lời bằng một bong bóng riêng như người thứ ba;
+   **chỉ mình bạn thấy**, không gửi gì tới Zalo và người kia không biết.
+3. Chuột phải vào tin của AI để **Sao chép**, **Trả lời** (tiếp tục hỏi AI), **Tạo lại câu trả lời** hoặc **Xóa**
+   (chỉ xóa trên máy này).
+4. **Chia sẻ nội dung cuộc trò chuyện**: mặc định tắt, AI chỉ thấy câu hỏi của bạn. Bật ở Cài đặt (mặc định chung) hoặc
+   ngay ở khung soạn tin khi gõ `@AI` (từng cuộc trò chuyện) để AI đọc văn bản các tin gần đây và tóm tắt/gợi ý tốt hơn.
+   Nhóm chat luôn hỏi xác nhận lần đầu vì có tin nhắn của người khác. Liên kết, ảnh và tệp không bao giờ được gửi.
+5. API key nằm trong tệp riêng tư `ai_secret.json` (không nằm trong `app_settings.json`). Biến môi trường
+   `CTDOZ_BASE_URL`, `CTDOZ_API_KEY`, `CTDOZ_MODEL` luôn ưu tiên hơn cài đặt.

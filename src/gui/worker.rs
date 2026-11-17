@@ -127,6 +127,29 @@ pub enum WorkerCmd {
     SaveAppSettings {
         json: String,
     },
+    /// `@AI` question: persist, ask the Assistant and report back. Never sends anything to Zalo.
+    AiAsk {
+        req: crate::ai::AskRequest,
+    },
+    /// Load the local Assistant dialogue of one conversation.
+    AiLoadThread {
+        thread_id: String,
+    },
+    AiDelete {
+        msg_id: String,
+    },
+    AiTestConnection {
+        base_url: String,
+        model: String,
+    },
+    AiListModels {
+        base_url: String,
+        model: String,
+    },
+    /// Save (or, when empty, remove) the Assistant API key in the private key file.
+    AiSaveKey {
+        key: String,
+    },
     /// Read OS authorization without prompting.
     ReadNotificationAuthorization {
         request_id: u64,
@@ -1231,6 +1254,72 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 };
                                 let _ = tokio::task::spawn_blocking(|| crate::media::list_media_devices(true)).await;
                                 let _ = tx.send(GuiEvent::VideoToolsChecked { available });
+                            });
+                        }
+                        WorkerCmd::AiAsk { req } => {
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move { run_ai_ask(req, tx, "zalo_history.db".to_string()).await });
+                        }
+                        WorkerCmd::AiLoadThread { thread_id } => {
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let id = thread_id.clone();
+                                let rows = tokio::task::spawn_blocking(move || {
+                                    let store = crate::store::MessageStore::open("zalo_history.db")?;
+                                    Ok::<_, anyhow::Error>(crate::ai::load_thread(&store.conn, &id, 300)?)
+                                })
+                                .await;
+                                let messages = match rows {
+                                    Ok(Ok(rows)) => rows,
+                                    _ => Vec::new(),
+                                };
+                                let _ = tx.send(GuiEvent::AiThreadLoaded { thread_id, messages });
+                            });
+                        }
+                        WorkerCmd::AiDelete { msg_id } => {
+                            tokio::spawn(async move {
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    let store = crate::store::MessageStore::open("zalo_history.db")?;
+                                    Ok::<_, anyhow::Error>(crate::ai::delete_message(&store.conn, &msg_id)?)
+                                })
+                                .await;
+                            });
+                        }
+                        WorkerCmd::AiTestConnection { base_url, model } => {
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let result = match crate::ai::AiConfig::resolve(&base_url, &model) {
+                                    Err(e) => Err(e.to_string()),
+                                    Ok(cfg) => {
+                                        let turns = [crate::ai::Turn::new("user", "Trả lời đúng một từ: OK")];
+                                        crate::ai::chat_completion(&cfg, &turns, 16)
+                                            .await
+                                            .map(|reply| format!("Kết nối thành công · {} · \"{}\"", cfg.model, reply.chars().take(40).collect::<String>()))
+                                            .map_err(|e| e.to_string())
+                                    }
+                                };
+                                let _ = tx.send(GuiEvent::AiTestResult(result));
+                            });
+                        }
+                        WorkerCmd::AiListModels { base_url, model } => {
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let result = match crate::ai::AiConfig::resolve(&base_url, if model.trim().is_empty() { "model" } else { &model }) {
+                                    Err(e) => Err(e.to_string()),
+                                    Ok(cfg) => crate::ai::list_models(&cfg).await.map_err(|e| e.to_string()),
+                                };
+                                let _ = tx.send(GuiEvent::AiModels(result));
+                            });
+                        }
+                        WorkerCmd::AiSaveKey { key } => {
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let saved = tokio::task::spawn_blocking(move || crate::ai::save_api_key(&key)).await;
+                                let note = match saved {
+                                    Ok(Ok(())) => "Đã lưu API key (tệp riêng tư, không nằm trong cài đặt).".to_string(),
+                                    _ => "Không lưu được API key.".to_string(),
+                                };
+                                let _ = tx.send(GuiEvent::StatusUpdate(note));
                             });
                         }
                         WorkerCmd::SaveAppSettings { json } => {
@@ -4662,6 +4751,77 @@ pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::C
     }
 }
 
+/// Persist the question, ask the Assistant and report the answer. Runs on the worker; nothing here
+/// touches the Zalo session or any Zalo endpoint (INV-5 / INV-6).
+async fn run_ai_ask(req: crate::ai::AskRequest, tx: GuiTx, db_path: String) {
+    use crate::ai::{AiMessage, AiRole, Turn};
+    let fail = |tx: &GuiTx, thread_id: &str, error: String| {
+        let _ = tx.send(GuiEvent::AiFailed {
+            thread_id: thread_id.to_string(),
+            error,
+        });
+    };
+    // 1. Persist the user's message and read the earlier dialogue (blocking SQLite).
+    let (user_msg, thread_id, exclude) = (req.user_msg.clone(), req.thread_id.clone(), req.user_msg_id.clone());
+    let db_for_load = db_path.clone();
+    let loaded = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<AiMessage>> {
+        let store = crate::store::MessageStore::open(&db_for_load)?;
+        if let Some(m) = &user_msg {
+            crate::ai::insert(&store.conn, m)?;
+        }
+        Ok(crate::ai::load_thread(&store.conn, &thread_id, 24)?)
+    })
+    .await;
+    let rows = match loaded {
+        Ok(Ok(rows)) => rows,
+        _ => Vec::new(),
+    };
+    let history: Vec<Turn> = rows
+        .iter()
+        .filter(|m| m.id != exclude)
+        .filter_map(|m| match m.role {
+            AiRole::User => Some(Turn::new("user", m.text.clone())),
+            AiRole::Assistant => Some(Turn::new("assistant", m.text.clone())),
+            AiRole::Error => None,
+        })
+        .collect();
+    // 2. Configuration (env overrides settings; key from env or the private key file).
+    let (base_url, model) = (req.base_url.clone(), req.model.clone());
+    let cfg = match tokio::task::spawn_blocking(move || crate::ai::AiConfig::resolve(&base_url, &model)).await {
+        Ok(Ok(cfg)) => cfg,
+        Ok(Err(e)) => return fail(&tx, &req.thread_id, e.to_string()),
+        Err(_) => return fail(&tx, &req.thread_id, "Không đọc được cấu hình trợ lý AI".into()),
+    };
+    // 3. Ask.
+    let answer = crate::ai::answer(&req, &history, |turns, max_tokens| {
+        let cfg = cfg.clone();
+        async move { crate::ai::chat_completion(&cfg, &turns, max_tokens).await }
+    })
+    .await;
+    let answer = match answer {
+        Ok(a) => a,
+        Err(e) => return fail(&tx, &req.thread_id, cfg.redact(&e.to_string())),
+    };
+    let reply = AiMessage {
+        id: crate::ai::make_id(),
+        thread_id: req.thread_id.clone(),
+        role: AiRole::Assistant,
+        text: answer.text,
+        ts: crate::ai::now_ms(),
+        reply_to_id: Some(req.user_msg_id.clone()),
+        model: Some(cfg.model.clone()),
+        note: Some(answer.note),
+    };
+    let stored = reply.clone();
+    let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let store = crate::store::MessageStore::open(&db_path)?;
+        crate::ai::insert(&store.conn, &stored)?;
+        Ok(())
+    })
+    .await;
+    let _ = tx.send(GuiEvent::AiReply(reply));
+}
+
 #[cfg(test)]
 mod tests {
     use super::prepare_avatar_texture;
@@ -4826,4 +4986,129 @@ fn spawn_voice_capture(
         }
     });
     (control, cancelled)
+}
+
+#[cfg(test)]
+mod ai_worker_tests {
+    use super::*;
+    use crate::ai::{AiRole, AskRequest};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Serves `bodies` in order, one connection each, and records every request body.
+    async fn fake_ai(bodies: Vec<&'static str>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://127.0.0.1:{}/v1", listener.local_addr().unwrap().port());
+        let handle = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for body in bodies {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                seen.push(String::from_utf8_lossy(&buf).to_string());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(resp.as_bytes()).await.unwrap();
+            }
+            seen
+        });
+        (url, handle)
+    }
+
+    fn request(url: &str, share: bool) -> AskRequest {
+        let id = crate::ai::make_id();
+        AskRequest {
+            thread_id: "thread-1".into(),
+            thread_name: "Sơn".into(),
+            is_group: false,
+            prompt: "Rust là gì".into(),
+            user_msg: Some(crate::ai::AiMessage {
+                id: id.clone(),
+                thread_id: "thread-1".into(),
+                role: AiRole::User,
+                text: "Rust là gì".into(),
+                ts: crate::ai::now_ms(),
+                reply_to_id: None,
+                model: None,
+                note: None,
+            }),
+            user_msg_id: id,
+            quoted: None,
+            reply_to_id: None,
+            transcript: vec![crate::ai::TranscriptLine { time: "10:00".into(), who: "Sơn".into(), text: "hẹn 7h nhé".into() }],
+            share,
+            base_url: url.into(),
+            model: "test-model".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_persists_both_sides_replies_and_leaves_the_zalo_store_untouched() {
+        let dir = std::env::temp_dir().join(format!("zalo-next-ai-{}-{}", std::process::id(), crate::ai::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history.db").to_string_lossy().to_string();
+        let (url, server) = fake_ai(vec![r#"{"choices":[{"message":{"content":"Rust là ngôn ngữ hệ thống."}}]}"#]).await;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let gui_tx = GuiTx::new(tx, egui::Context::default());
+        run_ai_ask(request(&url, true), gui_tx, db.clone()).await;
+        let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let GuiEvent::AiReply(reply) = event else { panic!("expected AiReply") };
+        assert_eq!(reply.role, AiRole::Assistant);
+        assert_eq!(reply.text, "Rust là ngôn ngữ hệ thống.");
+        assert_eq!(reply.note.as_deref(), Some("Đã đọc 1 tin gần nhất"));
+        // The request carried the shared conversation as data.
+        let sent = server.await.unwrap().remove(0);
+        assert!(sent.contains("hẹn 7h nhé") && sent.contains("cuoc_tro_chuyen"));
+        // Both sides are stored in the local table; the real messages table is empty.
+        let store = crate::store::MessageStore::open(&db).unwrap();
+        let rows = crate::ai::load_thread(&store.conn, "thread-1", 10).unwrap();
+        assert_eq!(rows.iter().map(|m| m.role).collect::<Vec<_>>(), [AiRole::User, AiRole::Assistant]);
+        assert!(store.messages_for("thread-1", 10).unwrap().is_empty());
+        // Deleting the conversation removes the dialogue too.
+        let mut store = store;
+        store.delete_thread("thread-1").unwrap();
+        assert!(crate::ai::load_thread(&store.conn, "thread-1", 10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sharing_off_sends_no_conversation_text_and_errors_are_reported_not_stored() {
+        let dir = std::env::temp_dir().join(format!("zalo-next-ai-off-{}-{}", std::process::id(), crate::ai::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history.db").to_string_lossy().to_string();
+        let (url, server) = fake_ai(vec![r#"{"choices":[{"message":{"content":"ok"}}]}"#]).await;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let gui_tx = GuiTx::new(tx, egui::Context::default());
+        run_ai_ask(request(&url, false), gui_tx.clone(), db.clone()).await;
+        let GuiEvent::AiReply(reply) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap() else { panic!() };
+        assert_eq!(reply.note.as_deref(), Some("AI không đọc cuộc trò chuyện"));
+        let sent = server.await.unwrap().remove(0);
+        assert!(!sent.contains("hẹn 7h nhé"), "conversation text leaked while sharing was off");
+        // Unreachable endpoint: the GUI gets a failure event and nothing extra is stored.
+        run_ai_ask(request("http://127.0.0.1:1/v1", false), gui_tx, db.clone()).await;
+        let GuiEvent::AiFailed { error, .. } = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap() else { panic!() };
+        assert!(!error.is_empty());
+        let store = crate::store::MessageStore::open(&db).unwrap();
+        let rows = crate::ai::load_thread(&store.conn, "thread-1", 10).unwrap();
+        assert!(rows.iter().all(|m| m.role != AiRole::Error));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

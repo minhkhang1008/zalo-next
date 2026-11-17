@@ -2240,7 +2240,7 @@ pub(super) fn render_chat_markdown_block(
     }
 }
 
-fn render_markdown_lines(
+pub(super) fn render_markdown_lines(
     ui: &mut egui::Ui,
     raw: &str,
     text_col: Color32,

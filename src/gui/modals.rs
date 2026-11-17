@@ -1570,6 +1570,7 @@ impl ZaloGuiApp {
                                     (SettingsTab::Notifications, lucide::BELL, "Thông báo"),
                                     (SettingsTab::Messages, lucide::MESSAGE_SQUARE, "Tin nhắn"),
                                     (SettingsTab::Utilities, lucide::SLIDERS, "Tiện ích"),
+                                    (SettingsTab::Assistant, lucide::SPARKLES, "Trợ lý AI"),
                                     (SettingsTab::Update, lucide::SPARKLES, "Cập nhật"),
                                 ];
                                 for (tab, icon, title) in tabs {
@@ -1686,6 +1687,7 @@ impl ZaloGuiApp {
                                         SettingsTab::Notifications => "Cài đặt thông báo",
                                         SettingsTab::Messages => "Cài đặt tin nhắn",
                                         SettingsTab::Utilities => "Tiện ích & Gợi ý",
+                                        SettingsTab::Assistant => "Trợ lý AI",
                                         SettingsTab::Update => "Cập nhật phần mềm",
                                     };
                                     ui.label(
@@ -3049,6 +3051,9 @@ impl ZaloGuiApp {
                                                         export_autoreply_tpl = true;
                                                     }
                                                 });
+                                        }
+                                        SettingsTab::Assistant => {
+                                            self.render_assistant_settings(ui, pal, inner_w);
                                         }
                                         SettingsTab::Update => {
                                             let cur_ver = env!("CARGO_PKG_VERSION");

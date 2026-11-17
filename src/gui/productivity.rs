@@ -50,7 +50,11 @@ impl ZaloGuiApp {
         Draft {
             thread_id: self.productivity.bound.clone(),
             text: self.input_message.clone(),
-            reply: self.replying_to.clone(),
+            // Assistant messages stay out of Zalo drafts (INV-5).
+            reply: self
+                .replying_to
+                .clone()
+                .filter(|q| !crate::ai::is_ai_id(&q.id)),
             auto_mention: self
                 .reply_auto_mention
                 .as_ref()

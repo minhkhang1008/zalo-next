@@ -3922,6 +3922,10 @@ pub(crate) async fn send_quote_message_with_mentions(
     now: u64,
     picks: &[MentionPick],
 ) -> Result<Value> {
+    // INV-5: a local Assistant message can never become a Zalo quote (its id and text are ours alone).
+    if crate::ai::is_ai_id(&quoted.id) {
+        anyhow::bail!("tin nhắn AI chỉ có trên máy này, không thể trích dẫn lên Zalo");
+    }
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
@@ -10461,4 +10465,23 @@ pub fn parse_voice_send_response(
         link_src: Some("Thoại Zalo".into()),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod ai_guard_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_ai_messages_can_never_be_quoted_to_zalo() {
+        let quoted = ChatMessage {
+            id: crate::ai::make_id(),
+            text: "câu trả lời của AI".into(),
+            ..Default::default()
+        };
+        let session = Session::new(false, false, false).unwrap();
+        let err = send_quote_message_with_mentions(&session, "1", "hi", &quoted, false, 1, &[])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("AI"), "{err}");
+    }
 }

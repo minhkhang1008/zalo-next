@@ -1,7 +1,12 @@
 # Trợ lý AI trong Zalo-next (thiết kế)
 
-> **Trạng thái: thiết kế, chưa triển khai.** Quyết định kiến trúc ở
-> [ADR 0004](adr/0004-local-ai-assistant.md); các việc cần làm ở [`tasks/ai-assistant.md`](../tasks/ai-assistant.md).
+> **Trạng thái: đã triển khai (2026-11-17), chờ kiểm chứng với nhà cung cấp AI thật.** Quyết định kiến trúc ở
+> [ADR 0004](adr/0004-local-ai-assistant.md); tiến độ ở [`tasks/ai-assistant.md`](../tasks/ai-assistant.md).
+>
+> **Khác với bản thiết kế ban đầu:** (1) tin AI được giữ trong một map riêng của GUI, **không** nằm trong
+> `Thread.messages`, nên các chỗ chặn ở mục 3.2 gần như tự thỏa mãn; (2) API key lưu ở `ai_secret.json`
+> (quyền `0600`) hoặc biến môi trường, chưa dùng Keychain; (3) chưa có streaming (trả lời hiện một lần);
+> (4) gợi ý nhanh là các nút bấm ở khung soạn tin khi gõ `@AI`.
 
 ## 1. Mục tiêu
 

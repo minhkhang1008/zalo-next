@@ -3488,7 +3488,9 @@ impl ZaloGuiApp {
                         gif_mode || panel_gif,
                         gif_search_query.as_deref(),
                     );
-                    let active_mention_info = if self.settings.suggest_mentions && gif_query.is_none() {
+                    let ai_command = self.settings.ai_enabled
+                        && crate::ai::parse_ai_command(&self.input_message).is_some();
+                    let active_mention_info = if self.settings.suggest_mentions && gif_query.is_none() && !ai_command {
                         extract_active_mention_query(&self.input_message)
                             .map(|(pos, q)| (pos, q.to_string()))
                     } else {
@@ -3841,6 +3843,22 @@ impl ZaloGuiApp {
                                                 })
                                                 .map(|(i, _)| i);
 
+                                            // Local Assistant dialogue lives outside `thread.messages` (INV-5) and is drawn between
+                                            // the real messages by timestamp.
+                                            if self.settings.ai_enabled && !self.ai.loaded.contains(&thread_id) {
+                                                if let Some(tx) = WORKER_TX.get() {
+                                                    if tx.send(WorkerCmd::AiLoadThread { thread_id: thread_id.clone() }).is_ok() {
+                                                        self.ai.loaded.insert(thread_id.clone());
+                                                    }
+                                                }
+                                            }
+                                            let ai_items: Vec<crate::ai::AiMessage> = if self.settings.ai_enabled {
+                                                self.ai.messages.get(&thread_id).cloned().unwrap_or_default()
+                                            } else {
+                                                Vec::new()
+                                            };
+                                            let mut ai_next = 0usize;
+                                            let mut ai_action: Option<super::ai_ui::AiAction> = None;
                                             // Photos sent together collapse into one grid row: the first
                                             // photo draws the whole album, the rest are skipped.
                                             let album_runs = super::album::album_runs(
@@ -3878,6 +3896,19 @@ impl ZaloGuiApp {
                                                     .get(pos + album_len)
                                                     .map(|&ni| &thread.messages[ni]);
 
+                                                let msg_ts = normalize_ts_ms(msg.ts);
+                                                while ai_next < ai_items.len() && ai_items[ai_next].ts <= msg_ts {
+                                                    if let Some(a) = super::ai_ui::render_ai_bubble(
+                                                        ui,
+                                                        &ai_items[ai_next],
+                                                        pal,
+                                                        &self.emoji_textures,
+                                                        &mut self.loading_stickers,
+                                                    ) {
+                                                        ai_action = Some(a);
+                                                    }
+                                                    ai_next += 1;
+                                                }
                                                 if should_show_time_divider(prev_msg, msg) {
                                                     if pos > 0 {
                                                         ui.add_space(6.0);
@@ -3982,6 +4013,24 @@ impl ZaloGuiApp {
                                                     );
                                                     jump_scrolled |= jump_scroll_pending;
                                                 }
+                                            }
+                                            while ai_next < ai_items.len() {
+                                                if let Some(a) = super::ai_ui::render_ai_bubble(
+                                                    ui,
+                                                    &ai_items[ai_next],
+                                                    pal,
+                                                    &self.emoji_textures,
+                                                    &mut self.loading_stickers,
+                                                ) {
+                                                    ai_action = Some(a);
+                                                }
+                                                ai_next += 1;
+                                            }
+                                            if self.settings.ai_enabled && self.ai.thinking.contains(&thread_id) {
+                                                super::ai_ui::render_ai_thinking(ui, pal);
+                                            }
+                                            if ai_action.is_some() {
+                                                self.ai.pending_action = ai_action;
                                             }
                                             let (bottom_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 1.0), Sense::hover());
                                             if self.force_scroll_to_bottom {
@@ -4365,6 +4414,8 @@ impl ZaloGuiApp {
                                 });
                             });
                     } else {
+                    // 3a. `@AI` hint row (privacy state + quick prompts)
+                    self.render_ai_composer_hint(ui, pal, &thread_id);
                     // 3b. Reply banner (quoted message preview above the composer)
                     if self.replying_to.is_some() {
                         let mut cancel = false;
@@ -5448,6 +5499,11 @@ impl ZaloGuiApp {
                                                 is_group,
                                             });
                                         }
+                                    } else if (send_clicked || enter_pressed) && self.ai_intercepts_send() {
+                                        // `@AI ...` (or a reply to an AI message) goes to the local
+                                        // Assistant only; nothing is sent to Zalo.
+                                        response.request_focus();
+                                        self.ai_submit_from_composer(&thread_id);
                                     } else if (send_clicked || enter_pressed)
                                         && (self.pending_clipboard_image.is_some()
                                             || !self.pending_drop_files.is_empty())
@@ -5486,7 +5542,12 @@ impl ZaloGuiApp {
                                         self.dismissed_sticker_suggest_for.clear();
                                         self.composer_sticker_selected = None;
                                         response.request_focus();
-                                        let quoted = self.replying_to.take();
+                                        // An AI message is never quoted to Zalo (INV-5), even when the
+                                        // assistant was switched off while replying to it.
+                                        let quoted = self
+                                            .replying_to
+                                            .take()
+                                            .filter(|q| !crate::ai::is_ai_id(&q.id));
                                         self.reply_auto_mention = None;
                                         if let Some(tx) = WORKER_TX.get() {
                                             if let Some(quoted) = quoted {
@@ -5668,6 +5729,7 @@ impl ZaloGuiApp {
         self.render_phone_lookup_modal(ctx, pal);
         self.render_schedule_modal(ctx, pal);
         self.render_settings_modal(ctx, pal);
+        self.render_ai_confirm(ctx, pal);
     }
 }
 

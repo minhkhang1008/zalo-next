@@ -1,6 +1,6 @@
 # ADR-0004: Local-only AI assistant as a virtual participant
 
-- **Status:** proposed
+- **Status:** accepted (implemented 2026-11-17; pending live verification with a real provider)
 - **Date:** 2026-11-17
 - **Deciders:** repository owner
 
@@ -20,15 +20,17 @@ columns) and `AGENTS.md` ("no automatic GET to message URLs", sensitive files `0
 
 1. AI traffic uses a dedicated `reqwest::Client` in a new `ai` module: no cookie jar, no Zalo headers, redirects off,
    hard timeout and body cap, `https` only (loopback excepted). `is_trusted_zalo_url` is **not** widened.
-2. AI messages are **local-only**: stored in a new table `local_ai_messages`, carried in memory with a distinct
-   `MessageKind::LocalAi` and an `ai_` id prefix, rendered as a third sender. They never enter `messages`, `threads`
-   persistence, `threads_cache.json`, history sync, unread counts, notifications, search (by default) or any
-   `WorkerCmd::Send*` path.
+2. AI messages are **local-only**: stored in a new table `local_ai_messages` and kept in the GUI in a map that is
+   **separate from `Thread.messages`**, with an `ai_` id prefix, drawn as a third sender between the real messages
+   by timestamp. Because no Zalo code path ever receives them, they cannot reach `messages`, `threads_cache.json`,
+   history sync, seen receipts, unread counts, notifications, search, forward or any `WorkerCmd::Send*` path.
+   Defence in depth: `send_quote_message_with_mentions` refuses `ai_` ids, and drafts never persist an AI reply.
 3. `@AI` is intercepted in the composer before the send branch and becomes `WorkerCmd::AskAi`; it never reaches Zalo.
 4. Sharing conversation text with the AI is **opt-in**, off by default, overridable per conversation, with a
    confirmation the first time for group chats. Only text is shared, never URLs, files or media.
-5. The API key is not stored in `app_settings.json`: environment variable, then macOS Keychain (without putting the
-   key on a command line), then a `0600` file.
+5. The API key is not stored in `app_settings.json`: environment variable (`CTDOZ_API_KEY`), then a `0600` file
+   `ai_secret.json` in the data directory. macOS Keychain storage is a follow-up (it must not put the key on a
+   command line).
 6. Context is built under a character budget (newest messages first kept), with map-reduce for summaries that exceed
    it. Message text is wrapped as untrusted data in the prompt.
 
@@ -36,9 +38,9 @@ columns) and `AGENTS.md` ("no automatic GET to message URLs", sensitive files `0
 
 - Positive: the feature cannot leak AI content to Zalo or Zalo credentials to the AI host by construction; no schema
   change to existing tables; behaviour is testable offline with a local fake server.
-- Negative: roughly ten guard points in existing code must learn about local messages (listed in
-  `docs/AI_TRO_LY.md` §3.2); a second message source complicates merge/ordering code.
-- Follow-ups: streaming, persona/prompt customisation, optional inclusion of AI text in search, cost warnings.
+- Negative: the message list renderer merges two sources by timestamp; Assistant messages are not part of
+  Zalo search/export and cannot be starred or reacted to.
+- Follow-ups: Keychain storage, streaming, persona/prompt customisation, optional inclusion of AI text in search, cost warnings.
 
 ## Alternatives Considered
 

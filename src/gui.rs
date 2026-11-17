@@ -21,6 +21,7 @@ use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
 use crate::session::Session;
 
+mod ai_ui;
 mod album;
 mod appearance;
 mod background;
@@ -121,6 +122,18 @@ pub enum GuiEvent {
     },
     LoginFailed(String),
     ThreadsUpdated(Vec<Thread>),
+    /// Local Assistant dialogue of one conversation (see `src/ai.rs`).
+    AiThreadLoaded {
+        thread_id: String,
+        messages: Vec<crate::ai::AiMessage>,
+    },
+    AiReply(crate::ai::AiMessage),
+    AiFailed {
+        thread_id: String,
+        error: String,
+    },
+    AiTestResult(Result<String, String>),
+    AiModels(Result<Vec<String>, String>),
     MessageQueuesRefreshed {
         account_uin: String,
         threads: Vec<Thread>,
@@ -536,6 +549,7 @@ enum SettingsTab {
     Notifications,
     Messages,
     Utilities,
+    Assistant,
     Update,
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -580,6 +594,16 @@ struct AppSettings {
     custom_accent_color: Option<String>,
     custom_bubble_out_bg: Option<String>,
     custom_bubble_in_bg: Option<String>,
+    // Trợ lý AI (`@AI`, see src/ai.rs). The API key is NOT stored here.
+    ai_enabled: bool,
+    ai_base_url: String,
+    ai_model: String,
+    /// Default for "share conversation text with the Assistant"; off unless the user opts in.
+    ai_share_default: bool,
+    /// Per-conversation override of `ai_share_default`.
+    ai_share_threads: HashMap<String, bool>,
+    /// Group conversations whose first-time sharing prompt was accepted.
+    ai_group_confirmed: HashSet<String>,
     // 4. Thông báo
     enable_notifications: bool,
     play_notification_sound: bool,
@@ -662,6 +686,12 @@ impl Default for AppSettings {
             custom_accent_color: None,
             custom_bubble_out_bg: None,
             custom_bubble_in_bg: None,
+            ai_enabled: false,
+            ai_base_url: String::new(),
+            ai_model: String::new(),
+            ai_share_default: false,
+            ai_share_threads: HashMap::new(),
+            ai_group_confirmed: HashSet::new(),
             enable_notifications: true,
             play_notification_sound: true,
             quick_messages_enabled: true,
@@ -791,6 +821,8 @@ pub struct ZaloGuiApp {
     /// Palette for the current theme + custom colours. `palette()` hands out this copy so
     /// `theme.json` is read from disk only when `refresh_cached_palette` runs, not every frame.
     cached_palette: ThemePalette,
+    /// Local Assistant state (messages live outside `threads`, see `gui/ai_ui.rs`).
+    ai: ai_ui::State,
 
     // Session state
     is_logged_in: bool,
@@ -1195,6 +1227,7 @@ impl ZaloGuiApp {
             dark_mode,
             theme_dirty: false,
             cached_palette,
+            ai: ai_ui::State::new(),
             is_logged_in,
             user_name,
             user_uin,
@@ -1473,6 +1506,13 @@ impl ZaloGuiApp {
     fn check_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
+                GuiEvent::AiThreadLoaded { thread_id, messages } => {
+                    self.ai_on_thread_loaded(thread_id, messages);
+                }
+                GuiEvent::AiReply(msg) => self.ai_on_reply(msg),
+                GuiEvent::AiFailed { thread_id, error } => self.ai_on_failed(thread_id, error),
+                GuiEvent::AiTestResult(result) => self.ai_on_test_result(result),
+                GuiEvent::AiModels(result) => self.ai_on_models(result),
                 GuiEvent::VoiceProgress {
                     account,
                     generation,
@@ -3070,6 +3110,8 @@ impl eframe::App for ZaloGuiApp {
         let heartbeat_ms = if ctx.input(|i| i.focused) { 3000 } else { 500 };
         ctx.request_repaint_after(std::time::Duration::from_millis(heartbeat_ms));
         self.check_events(ctx);
+
+        self.ai_handle_pending_action(ctx);
 
         self.ime_just_committed = false;
         ctx.input_mut(|i| {

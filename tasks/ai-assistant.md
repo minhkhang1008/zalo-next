@@ -1,7 +1,7 @@
 # Local AI assistant (`@AI`) — task breakdown
 
 Design: [`docs/AI_TRO_LY.md`](../docs/AI_TRO_LY.md) · Decision: [ADR-0004](../docs/adr/0004-local-ai-assistant.md).
-Status: **not started** (design only, agreed with the owner 2026-11-17). Each task below can be filed as a GitHub
+Status: **AI-1..AI-6 implemented 2026-11-17** except Keychain storage and streaming (see each task); offline tests pass, live verification with a real provider and Zalo account is pending. Each task below can be filed as a GitHub
 Issue per `docs/standards/issue-tracker.md`; implement in order, one branch per task (`feature/ai-*`).
 Terms follow `GLOSSARY.md` (Assistant, Local AI message, Context sharing; INV-5, INV-6).
 
@@ -9,7 +9,7 @@ Definition of done for every task: `cargo check`, relevant `cargo test`, no new 
 rustfmt on touched files only, `.agents/WORKLOG.md` entry, Vietnamese UI strings / English comments. Live
 verification (real provider, real Zalo account) is tracked separately from offline tests.
 
-## AI-1 — Configuration, client, connection test
+## AI-1 — Configuration, client, connection test  (done; Keychain deferred, key file `0600` + env instead)
 
 - New `src/ai/` module: `config` (base URL, model, key source), `client` (dedicated `reqwest::Client`, no cookie jar,
   redirects off, timeout, body cap, `https` or loopback only), `error` (typed errors → Vietnamese messages).
@@ -21,7 +21,7 @@ verification (real provider, real Zalo account) is tracked separately from offli
   header (INV-6); key redaction; URL validation.
 - Acceptance: test button reports a real result; key survives restart without appearing in `app_settings.json`.
 
-## AI-2 — Local message model and storage
+## AI-2 — Local message model and storage  (done; kept outside `Thread.messages` instead of a `MessageKind`)
 
 - `local_ai_messages` table + versioned migration (own `user_version` step; do not reuse numbers taken by
   `productivity.rs` / history heal). Account-scoped DB, `0600`.
@@ -29,7 +29,7 @@ verification (real provider, real Zalo account) is tracked separately from offli
 - Tests: round-trip, per-account isolation, delete thread removes rows, migration idempotent on old DBs.
 - Acceptance: rows persist across restart; nothing is written to `messages`.
 
-## AI-3 — Guards in existing code (INV-5)
+## AI-3 — Guards in existing code (INV-5)  (done by construction + quote/draft guards)
 
 Make every spot in `docs/AI_TRO_LY.md` §3.2 ignore or specially handle Local AI messages: `SendSeen` last-message
 id, `merge_thread_into` / `deduplicate_threads`, `persist_threads` + `threads_cache.json`, unread + native
@@ -40,7 +40,7 @@ notification + tray badge, thread preview/time, search, forward / multi-select /
 - Acceptance: with a Local AI message as the newest item, seen-receipt, unread count, preview and notifications are
   identical to the same thread without it.
 
-## AI-4 — Composer `@AI`, rendering, message menu
+## AI-4 — Composer `@AI`, rendering, message menu  (done)
 
 - Intercept `@AI <text>` before the send branch (precedent: the `@gif` command); disabled assistant → plain text.
   Group mention popover must not hijack `@AI`.
@@ -50,7 +50,7 @@ notification + tray badge, thread preview/time, search, forward / multi-select /
 - Worker `AskAi` → `GuiEvent::AiMessage` / `AiError` (Thử lại); no UI-thread I/O (INV-3).
 - Acceptance: the "Rust là gì" example works in a 1-1 chat; the other person sees nothing (verify in Zalo Web).
 
-## AI-5 — Context sharing, context builder, summaries
+## AI-5 — Context sharing, context builder, summaries  (done)
 
 - Setting: global default (off) + per-conversation override; first-time confirmation for groups naming the host.
 - Context builder: character budget, chronological, `[HH:mm] Tên: text`, text only (no URLs/attachments), untrusted
@@ -61,7 +61,7 @@ notification + tray badge, thread preview/time, search, forward / multi-select /
   off ⇒ no conversation text in the request body.
 - Acceptance: summarising a 1,000-message group stays within budget and cites the covered time range.
 
-## AI-6 — Streaming, polish, docs
+## AI-6 — Streaming, polish, docs  (docs done; streaming not done)
 
 - Optional SSE streaming via `Response::chunk()`, cancel on conversation change / quit.
 - Error copy, empty states, accessibility of the new controls; update `docs/HUONG_DAN_SU_DUNG.md`,
