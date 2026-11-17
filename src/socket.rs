@@ -99,8 +99,16 @@ pub fn send_sync_message_ws_request(payload: &Value) -> bool {
     });
     send_ws_frame(CMD_SYNC_REQUEST, 0, 1, Some(&body))
 }
+/// Dispose reasons of `cmd 591` (Zalo PC `DisposeReason` enum, as followed by upstream ctdozlite
+/// v0.1.2 - see `re-notes/47_sync_v2_call_logs.md`). They travel as integers: a string such as
+/// "SYNC_FULL_COMPLETED" is rejected by the server and leaves the phone stuck on "Đang đồng bộ".
+pub const SYNC_DISPOSE_USER_CANCEL: u8 = 0;
+pub const SYNC_DISPOSE_SUCCESS: u8 = 1;
+pub const SYNC_DISPOSE_ERROR: u8 = 2;
+pub const SYNC_DISPOSE_OUTDATED: u8 = 3;
+
 /// Release a Sync V2 phone session after success, cancellation, timeout or error.
-pub fn send_sync_ack_delete(sync_id: &str, reason: &str) -> bool {
+pub fn send_sync_ack_delete(sync_id: &str, reason: u8) -> bool {
     let body = serde_json::json!({
         "reqId": format!("req_591_{}", now_ms()),
         "data": { "syncId": sync_id, "toDevice": 0, "reason": reason },

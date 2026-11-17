@@ -309,11 +309,11 @@ impl Drop for V2SyncLease {
     fn drop(&mut self) {
         // Session release is best effort when the transport is already disconnected.
         let reason = if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
-            "PC_USER_CANCELS_SYNC"
+            crate::socket::SYNC_DISPOSE_USER_CANCEL
         } else if last_phone_sync_complete() {
-            "SYNC_FULL_COMPLETED"
+            crate::socket::SYNC_DISPOSE_SUCCESS
         } else {
-            "BATCH_TIMEOUT"
+            crate::socket::SYNC_DISPOSE_ERROR
         };
         let _ = crate::socket::send_sync_ack_delete(&self.0, reason);
         if let Ok(mut state) = V2_TRANSFER.lock() {
@@ -919,6 +919,17 @@ pub fn has_sync_v2_session(sync_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// One attachment of a Sync V2 message (`metadata.field 1`). Only the fields needed to
+/// recognise call logs are decoded.
+#[derive(Debug, Default, Clone)]
+pub struct ParsedProtoAttach {
+    pub attach_type: Option<String>,
+    pub action: Option<String>,
+    pub params: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct ParsedProtoMsg {
     pub sender_id: String,
@@ -928,6 +939,7 @@ pub struct ParsedProtoMsg {
     pub timestamp: u64,
     pub global_id: String,
     pub content: String,
+    pub attaches: Vec<ParsedProtoAttach>,
 }
 
 #[derive(Debug, Default)]
@@ -990,6 +1002,10 @@ fn parse_message(buf: &[u8]) -> Option<ParsedProtoMsg> {
                     1 => msg.sender_id = String::from_utf8_lossy(bytes).into_owned(),
                     6 => msg.global_id = String::from_utf8_lossy(bytes).into_owned(),
                     7 => msg.content = String::from_utf8_lossy(bytes).into_owned(),
+                    // Message metadata; a malformed block only loses the attachments.
+                    8 => msg
+                        .attaches
+                        .extend(parse_proto_metadata(bytes).unwrap_or_default()),
                     _ => {}
                 }
             }
@@ -1009,6 +1025,69 @@ fn parse_message(buf: &[u8]) -> Option<ParsedProtoMsg> {
         }
     }
     Some(msg)
+}
+
+/// Read one length-delimited field at `offset` (after its tag); returns the bytes and next offset.
+fn take_len_delimited(buf: &[u8], offset: usize) -> Option<(&[u8], usize)> {
+    let (len, next) = parse_vli(buf, offset)?;
+    let end = next.checked_add(usize::try_from(len).ok()?)?;
+    Some((buf.get(next..end)?, end))
+}
+
+fn skip_field(buf: &[u8], wire_type: u64, offset: usize) -> Option<usize> {
+    match wire_type {
+        0 => parse_vli(buf, offset).map(|(_, next)| next),
+        1 => offset.checked_add(8).filter(|n| *n <= buf.len()),
+        2 => take_len_delimited(buf, offset).map(|(_, next)| next),
+        5 => offset.checked_add(4).filter(|n| *n <= buf.len()),
+        _ => None,
+    }
+}
+
+fn parse_proto_attach(buf: &[u8]) -> Option<ParsedProtoAttach> {
+    let mut att = ParsedProtoAttach::default();
+    let mut offset = 0;
+    while offset < buf.len() {
+        let (tag, next) = parse_vli(buf, offset)?;
+        let (field_num, wire_type) = (tag >> 3, tag & 0x07);
+        if wire_type == 2 {
+            let (bytes, end) = take_len_delimited(buf, next)?;
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            match field_num {
+                1 => att.attach_type = Some(text),
+                3 => att.action = Some(text),
+                4 => att.params = Some(text),
+                5 => att.title = Some(text),
+                8 => att.description = Some(text),
+                _ => {}
+            }
+            offset = end;
+        } else {
+            offset = skip_field(buf, wire_type, next)?;
+        }
+    }
+    Some(att)
+}
+
+/// Decode `metadata` (message field 8): repeated attachments in field 1; quotes (field 4) and
+/// the rest are ignored.
+fn parse_proto_metadata(buf: &[u8]) -> Option<Vec<ParsedProtoAttach>> {
+    let mut attaches = Vec::new();
+    let mut offset = 0;
+    while offset < buf.len() {
+        let (tag, next) = parse_vli(buf, offset)?;
+        let (field_num, wire_type) = (tag >> 3, tag & 0x07);
+        if wire_type == 2 && field_num == 1 {
+            let (bytes, end) = take_len_delimited(buf, next)?;
+            if let Some(att) = parse_proto_attach(bytes) {
+                attaches.push(att);
+            }
+            offset = end;
+        } else {
+            offset = skip_field(buf, wire_type, next)?;
+        }
+    }
+    Some(attaches)
 }
 
 fn parse_partition(buf: &[u8]) -> Option<ParsedProtoPartition> {
@@ -1168,6 +1247,137 @@ fn resolve_v2_partition(
         .ok_or_else(|| anyhow::anyhow!("Gói Sync V2 chứa hội thoại không được yêu cầu."))
 }
 
+fn parse_json_obj(raw: Option<&str>) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match serde_json::from_str::<serde_json::Value>(raw?.trim()).ok()? {
+        serde_json::Value::Object(map) => Some(map),
+        _ => None,
+    }
+}
+
+/// Canonical call-log text (`📞 Cuộc gọi thoại đến (74s)`, `📹 … (0s) — Bạn bị nhỡ`) from the
+/// attachment of a Sync V2 call message, which the GUI renders as a call card. Returns
+/// `(text, is_video, duration_secs)`.
+///
+/// Evidence: owner-authorised port of upstream ctdozlite v0.1.2 (`re-notes/47_sync_v2_call_logs.md`).
+pub(crate) fn format_sync_v2_call_text(
+    content: &str,
+    action: Option<&str>,
+    params_raw: Option<&str>,
+    description: Option<&str>,
+    is_outgoing: bool,
+) -> (String, bool, Option<u64>) {
+    let params = parse_json_obj(params_raw);
+    let param_u64 = |keys: &[&str]| -> Option<u64> {
+        let p = params.as_ref()?;
+        keys.iter().find_map(|k| match p.get(*k)? {
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok())),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        })
+    };
+    let is_video = param_u64(&["calltype", "callType"]) == Some(1)
+        || description.is_some_and(|d| d.to_lowercase().contains("video"))
+        || content.to_lowercase().contains("video");
+    let is_caller = params
+        .as_ref()
+        .and_then(|p| p.get("isCaller"))
+        .and_then(|v| match v {
+            serde_json::Value::Bool(b) => Some(*b),
+            serde_json::Value::Number(n) => n.as_i64().map(|i| i != 0),
+            serde_json::Value::String(s) => match s.trim() {
+                "1" | "true" => Some(true),
+                "0" | "false" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or(match action {
+            Some("recommened.calling" | "recommended.calling") => true,
+            Some("recommened.receivecall" | "recommended.receivecall") => false,
+            _ => is_outgoing,
+        });
+    let dur_secs = param_u64(&["duration", "dur"]).or_else(|| parse_colon_duration_secs(content));
+    let is_missed = action.is_some_and(|a| a.contains("misscall"))
+        || dur_secs == Some(0)
+        || (dur_secs.is_none() && content.trim().is_empty());
+    let icon = if is_video { "📹" } else { "📞" };
+    let kind = if is_video {
+        "Cuộc gọi video"
+    } else {
+        "Cuộc gọi thoại"
+    };
+    let dir = if is_caller { "đi" } else { "đến" };
+    let text = if is_missed {
+        let reason = match (param_u64(&["reason"]), is_caller) {
+            (Some(1), _) => "Người nhận đang bận",
+            (Some(2), true) => "Người nhận không nghe máy",
+            (Some(3), true) => "Người nhận từ chối",
+            (Some(3), false) => "Bạn đã từ chối",
+            (_, true) => "Bạn đã hủy",
+            (_, false) => "Bạn bị nhỡ",
+        };
+        format!("{icon} {kind} {dir} (0s) — {reason}")
+    } else if let Some(secs) = dur_secs {
+        format!("{icon} {kind} {dir} ({secs}s)")
+    } else {
+        format!("{icon} {kind} {dir}")
+    };
+    (text, is_video, dur_secs)
+}
+
+fn is_sync_v2_call_attach(att: &ParsedProtoAttach, content: &str) -> bool {
+    let call_action = att.action.as_deref().map(str::trim).is_some_and(|a| {
+        matches!(
+            a,
+            "recommened.calltime"
+                | "recommened.misscall"
+                | "recommened.calling"
+                | "recommened.receivecall"
+                | "recommended.calltime"
+                | "recommended.misscall"
+                | "recommended.calling"
+                | "recommended.receivecall"
+        )
+    });
+    call_action
+        || att.title.as_deref().map(str::trim) == Some("sendBubbleMessage")
+        || (att
+            .description
+            .as_deref()
+            .is_some_and(|d| d.trim().starts_with("Cuộc gọi"))
+            && (content.trim().is_empty() || parse_colon_duration_secs(content).is_some()))
+}
+
+/// Text, message type and JSON metadata to store for a decoded Sync V2 message. Call logs become
+/// `chat.ecall` rows (non-empty `raw_json`, so re-syncing also upgrades rows stored earlier as
+/// plain text); everything else is unchanged.
+fn sync_v2_message_parts(
+    message: &ParsedProtoMsg,
+    is_outgoing: bool,
+) -> (String, &'static str, String) {
+    if let Some(att) = message
+        .attaches
+        .iter()
+        .find(|a| is_sync_v2_call_attach(a, &message.content))
+    {
+        let (text, is_video, duration) = format_sync_v2_call_text(
+            &message.content,
+            att.action.as_deref(),
+            att.params.as_deref(),
+            att.description.as_deref(),
+            is_outgoing,
+        );
+        let mut meta = serde_json::json!({ "call_bubble": true, "is_video": is_video });
+        if let Some(d) = duration {
+            meta["duration"] = serde_json::json!(d);
+        }
+        return (text, "chat.ecall", meta.to_string());
+    }
+    (message.content.clone(), "webchat", String::new())
+}
+
 fn persist_v2_partitions(
     store: &mut MessageStore,
     partitions: Vec<ParsedProtoPartition>,
@@ -1182,6 +1392,7 @@ fn persist_v2_partitions(
             let thread_id = resolve_v2_partition(mapping, &part.id)?;
             for message in part.messages {
                 let is_outgoing = message.sender_id == uin;
+                let (text, msg_type, raw_json) = sync_v2_message_parts(&message, is_outgoing);
                 let msg_id = if !message.global_id.is_empty() && message.global_id != "0" {
                     message.global_id
                 } else {
@@ -1203,11 +1414,11 @@ fn persist_v2_partitions(
                     } else {
                         String::new()
                     },
-                    text: message.content,
-                    msg_type: "webchat".into(),
+                    text,
+                    msg_type: msg_type.into(),
                     ts: message.timestamp as i64,
                     is_outgoing,
-                    raw_json: String::new(),
+                    raw_json,
                 };
                 if store.upsert_message(&stored)? {
                     imported += 1;
@@ -1333,6 +1544,152 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
 }
 #[cfg(test)]
 mod tests {
+    fn vli(mut n: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                return out;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    fn field(num: u64, payload: &[u8]) -> Vec<u8> {
+        let mut out = vli((num << 3) | 2);
+        out.extend(vli(payload.len() as u64));
+        out.extend_from_slice(payload);
+        out
+    }
+    /// Sync V2 message bytes: sender(1) global id(6) content(7) metadata(8) with one attachment.
+    fn message_bytes(content: &str, attach: &[(u64, &str)]) -> Vec<u8> {
+        let mut att = Vec::new();
+        for (num, value) in attach {
+            att.extend(field(*num, value.as_bytes()));
+        }
+        let mut msg = field(1, b"peer");
+        msg.extend(vli(5 << 3));
+        msg.extend(vli(1_700_000_000_000));
+        msg.extend(field(6, b"gid-1"));
+        msg.extend(field(7, content.as_bytes()));
+        msg.extend(field(8, &field(1, &att)));
+        msg
+    }
+
+    #[test]
+    fn attach_metadata_is_decoded_and_malformed_metadata_is_dropped() {
+        let bytes = message_bytes(
+            "0:18",
+            &[
+                (3, "recommened.calltime"),
+                (5, "sendBubbleMessage"),
+                (8, "Cuộc gọi"),
+            ],
+        );
+        let msg = parse_message(&bytes).unwrap();
+        assert_eq!(msg.content, "0:18");
+        assert_eq!(msg.attaches.len(), 1);
+        assert_eq!(
+            msg.attaches[0].action.as_deref(),
+            Some("recommened.calltime")
+        );
+        assert_eq!(msg.attaches[0].title.as_deref(), Some("sendBubbleMessage"));
+        // Truncated metadata must not break the message itself.
+        let mut broken = field(7, b"hello");
+        broken.extend(vli((8 << 3) | 2));
+        broken.extend(vli(99));
+        broken.extend_from_slice(b"xx");
+        assert!(
+            parse_message(&broken).is_none() || parse_message(&broken).unwrap().attaches.is_empty()
+        );
+        let mut bad_meta = field(7, b"hello");
+        bad_meta.extend(field(8, &[0x0a, 0x7f, 0x01]));
+        let msg = parse_message(&bad_meta).unwrap();
+        assert_eq!(msg.content, "hello");
+        assert!(msg.attaches.is_empty());
+    }
+
+    #[test]
+    fn call_logs_become_ecall_rows_and_resync_upgrades_old_plain_rows() {
+        let mut store = crate::store::MessageStore::open(":memory:").unwrap();
+        let map = std::collections::HashMap::from([("oneone/p".into(), "thread-1".into())]);
+        let parse = |content: &str, attach: &[(u64, &str)]| ParsedProtoPartition {
+            id: "p".into(),
+            messages: vec![parse_message(&message_bytes(content, attach)).unwrap()],
+        };
+        // Older build: the call arrived as bare "0:18" text.
+        let old = ParsedProtoPartition {
+            id: "p".into(),
+            messages: vec![ParsedProtoMsg {
+                global_id: "gid-1".into(),
+                sender_id: "peer".into(),
+                content: "0:18".into(),
+                timestamp: 1,
+                ..Default::default()
+            }],
+        };
+        assert_eq!(
+            persist_v2_partitions(&mut store, vec![old], &map, "me", "Me").unwrap(),
+            1
+        );
+        assert_eq!(store.messages_for("thread-1", 10).unwrap()[0].text, "0:18");
+        // Re-sync with attachment metadata rewrites it as a call log.
+        let call = parse(
+            "0:18",
+            &[(3, "recommened.calltime"), (5, "sendBubbleMessage")],
+        );
+        assert_eq!(
+            persist_v2_partitions(&mut store, vec![call], &map, "me", "Me").unwrap(),
+            0
+        );
+        let rows = store.messages_for("thread-1", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "📞 Cuộc gọi thoại đến (18s)");
+        assert_eq!(rows[0].msg_type, "chat.ecall");
+    }
+
+    #[test]
+    fn call_text_covers_duration_missed_cancelled_and_video() {
+        let t = |content, action, params, desc, out| {
+            format_sync_v2_call_text(content, action, params, desc, out).0
+        };
+        assert_eq!(
+            t("1:14", Some("recommened.calltime"), None, None, false),
+            "📞 Cuộc gọi thoại đến (74s)"
+        );
+        assert_eq!(
+            t(
+                "",
+                Some("recommened.misscall"),
+                Some(r#"{"isCaller":0,"callType":1}"#),
+                None,
+                false
+            ),
+            "📹 Cuộc gọi video đến (0s) — Bạn bị nhỡ"
+        );
+        assert_eq!(
+            t("", None, None, Some("Cuộc gọi"), true),
+            "📞 Cuộc gọi thoại đi (0s) — Bạn đã hủy"
+        );
+        assert_eq!(
+            t(
+                "",
+                Some("recommened.misscall"),
+                Some(r#"{"isCaller":"1","reason":3}"#),
+                None,
+                true
+            ),
+            "📞 Cuộc gọi thoại đi (0s) — Người nhận từ chối"
+        );
+        assert_eq!(
+            t("", None, Some(r#"{"duration":"125"}"#), None, true),
+            "📞 Cuộc gọi thoại đi (125s)"
+        );
+        // An ordinary text message with an unrelated attachment stays plain text.
+        let msg = parse_message(&message_bytes("hello", &[(3, "rtf"), (5, "hi")])).unwrap();
+        assert_eq!(sync_v2_message_parts(&msg, false).1, "webchat");
+    }
 
     #[test]
     fn imported_batches_are_atomic_and_idempotent_and_use_real_thread_ids() {
