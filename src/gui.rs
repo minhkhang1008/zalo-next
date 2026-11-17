@@ -814,7 +814,11 @@ impl GuiTx {
     /// Same contract as `Sender::send` (callers already `let _ =` it), plus the wake-up.
     #[allow(clippy::result_large_err)]
     pub fn send(&self, ev: GuiEvent) -> Result<(), std::sync::mpsc::SendError<GuiEvent>> {
+        let incoming = matches!(ev, GuiEvent::IncomingCall { .. });
         let res = self.tx.send(ev);
+        if incoming {
+            eprintln!("[call] GuiTx.send(IncomingCall) -> receiver alive: {}", res.is_ok());
+        }
         self.ctx.request_repaint();
         res
     }
@@ -1517,6 +1521,9 @@ impl ZaloGuiApp {
 
     fn check_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.event_rx.try_recv() {
+            if matches!(event, GuiEvent::IncomingCall { .. }) {
+                eprintln!("[call] check_events dequeued IncomingCall");
+            }
             match event {
                 GuiEvent::AiThreadLoaded { thread_id, messages } => {
                     self.ai_on_thread_loaded(thread_id, messages);
