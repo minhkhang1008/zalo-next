@@ -21,8 +21,10 @@ use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
 use crate::session::Session;
 
+mod album;
 mod appearance;
 mod background;
+mod clipboard_write;
 mod doc_preview_ui;
 #[cfg(target_os = "macos")]
 mod macos_clipboard;
@@ -30,6 +32,7 @@ mod macos_clipboard;
 mod macos_drag;
 mod messages;
 mod modals;
+mod picker;
 mod productivity;
 mod reactions_dialog;
 mod stickers;
@@ -44,6 +47,7 @@ mod worker;
 mod workspace;
 
 use messages::*;
+use picker::*;
 use stickers::*;
 use theme::*;
 pub use theme::{emoji_to_tex_key, load_app_icon, lucide, REACTION_LIST};
@@ -466,6 +470,8 @@ struct VideoPlayerModal {
     progress: f32,
     texture: Option<TextureHandle>,
     finished: bool,
+    /// Playback could not start or died with an error (`status` holds the reason).
+    failed: bool,
     playing: bool,
     position_seconds: f32,
     started_at: Option<std::time::Instant>,
@@ -544,6 +550,8 @@ struct AppSettings {
     autostart_on_boot: bool,
     remember_login: bool,
     download_dir: String,
+    /// What the image viewer's copy button does on a plain click: "image" or "link".
+    image_copy_default: String,
     // 2. Quyền riêng tư
     show_birthday: String,
     show_online_status: bool,
@@ -589,6 +597,10 @@ struct AppSettings {
     suggest_mentions: bool,
     enable_gif_search: bool,
     enable_sticker_keyword_search: bool,
+    /// Stickers sent from the panel, newest first ("Gần đây").
+    recent_stickers: Vec<crate::chat::StickerItem>,
+    /// Emoji picked in the panel, newest first.
+    recent_emojis: Vec<String>,
     // 7. Thiết bị cuộc gọi (Mic & Camera)
     selected_mic_device: String,
     selected_camera_device: String,
@@ -627,6 +639,7 @@ impl Default for AppSettings {
             autostart_on_boot: true,
             remember_login: true,
             download_dir: default_dl,
+            image_copy_default: "image".into(),
             show_birthday: "Không hiện".into(),
             show_online_status: true,
             show_seen_status: true,
@@ -663,6 +676,8 @@ impl Default for AppSettings {
             suggest_mentions: true,
             enable_gif_search: true,
             enable_sticker_keyword_search: true,
+            recent_stickers: Vec::new(),
+            recent_emojis: Vec::new(),
             selected_mic_device: String::new(),
             selected_camera_device: String::new(),
             mic_gain_percent: 100,
@@ -862,6 +877,16 @@ pub struct ZaloGuiApp {
     in_chat_search_focus_pending: bool,
     // Sticker picker & image cache state
     sticker_picker_open: bool,
+    /// Active tab of the Sticker / Emoji / GIF panel.
+    picker_tab: PickerTab,
+    /// Panel shown at its larger size.
+    picker_expanded: bool,
+    /// Search box of the panel's GIF tab.
+    picker_gif_query: String,
+    /// Scroll offset of the sticker pack bar, kept so the arrow buttons can step it.
+    picker_bar_offset: f32,
+    /// Where the composer's sticker button sits, so a click on it is not an "outside" click.
+    picker_button_rect: Rect,
     sticker_tab: StickerTab,
     sticker_textures: HashMap<String, TextureHandle>,
     loading_stickers: HashSet<String>,
@@ -921,6 +946,10 @@ pub struct ZaloGuiApp {
     /// Off-thread size + thumbnail results for `pending_drop_files`.
     drop_thumb_tx: std::sync::mpsc::Sender<workspace::DropThumb>,
     drop_thumb_rx: std::sync::mpsc::Receiver<workspace::DropThumb>,
+    /// Result of the off-thread download-folder picker (`None` inside = user cancelled).
+    dl_dir_pick_rx: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    /// Result of the off-thread "copy image" action from the image viewer.
+    image_copy_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// Zone under the cursor on the last drag-hover frame (fallback when no position is known).
     drop_zone_last: Option<workspace::DropZone>,
     unread_counts: HashMap<String, usize>,
@@ -1226,6 +1255,11 @@ impl ZaloGuiApp {
             in_chat_search_query: String::new(),
             in_chat_search_focus_pending: false,
             sticker_picker_open: false,
+            picker_tab: PickerTab::Sticker,
+            picker_expanded: false,
+            picker_gif_query: String::new(),
+            picker_bar_offset: 0.0,
+            picker_button_rect: Rect::NOTHING,
             sticker_tab: StickerTab::Popular,
             sticker_textures: HashMap::new(),
             loading_stickers: HashSet::new(),
@@ -1280,6 +1314,8 @@ impl ZaloGuiApp {
             gif_scroll_pending: false,
             drop_thumb_tx,
             drop_thumb_rx,
+            dl_dir_pick_rx: None,
+            image_copy_rx: None,
             drop_zone_last: None,
             unread_counts: HashMap::new(),
             link_metadata_cache: HashMap::new(),
@@ -2258,6 +2294,7 @@ impl ZaloGuiApp {
                         .filter(|player| player.generation == generation && player.playing)
                     {
                         player.status = error;
+                        player.failed = true;
                         player.finished = true;
                         player.playing = false;
                         player.started_at = None;

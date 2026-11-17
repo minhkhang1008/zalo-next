@@ -164,6 +164,8 @@ impl ZaloGuiApp {
                     {
                         self.contacts_view_open = false;
                         self.thread_filter = ThreadFilter::All;
+                        // Clicking the active "Tin nhắn" tab also dismisses the search.
+                        self.search_query.clear();
                     }
 
                     ui.add_space(8.0);
@@ -492,6 +494,17 @@ impl ZaloGuiApp {
                                 let s_enter = (s_resp.lost_focus() || s_resp.has_focus())
                                     && ui.input(|i| i.key_pressed(Key::Enter))
                                     && !is_ime_busy;
+                                // Esc closes the sidebar search (Zalo PC parity); an open IME
+                                // composition keeps Esc for itself.
+                                if s_resp.has_focus()
+                                    && !is_ime_busy
+                                    && ui.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, Key::Escape)
+                                    })
+                                {
+                                    self.search_query.clear();
+                                    s_resp.surrender_focus();
+                                }
                                 let digits_cnt = self
                                     .search_query
                                     .chars()
@@ -3459,7 +3472,22 @@ impl ZaloGuiApp {
                     };
                     let gif_mode = gif_query.is_some()
                         && self.gif_dismissed_for.as_deref() != Some(self.input_message.as_str());
-                    self.update_gif_search(ctx, gif_mode, gif_query.as_deref());
+                    // The panel's GIF tab drives the same search state through its own box.
+                    let panel_gif = self.sticker_picker_open
+                        && self.picker_tab == PickerTab::Gif
+                        && !posting_restricted;
+                    let gif_search_query: Option<String> = if gif_query.is_some() {
+                        gif_query.clone()
+                    } else if panel_gif {
+                        Some(self.picker_gif_query.trim().to_string())
+                    } else {
+                        None
+                    };
+                    self.update_gif_search(
+                        ctx,
+                        gif_mode || panel_gif,
+                        gif_search_query.as_deref(),
+                    );
                     let active_mention_info = if self.settings.suggest_mentions && gif_query.is_none() {
                         extract_active_mention_query(&self.input_message)
                             .map(|(pos, q)| (pos, q.to_string()))
@@ -3569,8 +3597,7 @@ impl ZaloGuiApp {
                     // The sticker strip is a true floating overlay (`egui::Area`) above the composer bar
                     // (matching Zalo PC's `PopoverIdentitiesDefine.STICKER_SUGGESTION`), so the message scroll
                     // area and composer input box never shift or lose IME focus while typing.
-                    let picker_reserve = if posting_restricted { 0.0 } else { (if self.sticker_picker_open { 268.0 } else { 0.0 })
-                        + (if self.replying_to.is_some() { 48.0 } else { 0.0 })
+                    let picker_reserve = if posting_restricted { 0.0 } else { (if self.replying_to.is_some() { 48.0 } else { 0.0 })
                         + (if self.pending_clipboard_image.is_some() {
                             64.0
                         } else {
@@ -3814,14 +3841,41 @@ impl ZaloGuiApp {
                                                 })
                                                 .map(|(i, _)| i);
 
+                                            // Photos sent together collapse into one grid row: the first
+                                            // photo draws the whole album, the rest are skipped.
+                                            let album_runs = super::album::album_runs(
+                                                &thread.messages,
+                                                &visible_indices,
+                                            );
+                                            let mut album_by_head: HashMap<usize, (usize, Vec<usize>)> =
+                                                HashMap::new();
+                                            let mut album_tail: HashSet<usize> = HashSet::new();
+                                            for (first_pos, len, members) in album_runs {
+                                                album_tail.extend(first_pos + 1..first_pos + len);
+                                                album_by_head.insert(first_pos, (len, members));
+                                            }
                                             for (pos, &idx) in visible_indices.iter().enumerate() {
+                                                if album_tail.contains(&pos) {
+                                                    continue;
+                                                }
                                                 let msg = &thread.messages[idx];
+                                                let album_len = album_by_head
+                                                    .get(&pos)
+                                                    .map(|(len, _)| *len)
+                                                    .unwrap_or(1);
+                                                let album_members: Option<Vec<&ChatMessage>> =
+                                                    album_by_head.get(&pos).map(|(_, members)| {
+                                                        members
+                                                            .iter()
+                                                            .map(|&mi| &thread.messages[mi])
+                                                            .collect()
+                                                    });
                                                 let prev_msg = pos
                                                     .checked_sub(1)
                                                     .and_then(|p| visible_indices.get(p))
                                                     .map(|&pi| &thread.messages[pi]);
                                                 let next_msg = visible_indices
-                                                    .get(pos + 1)
+                                                    .get(pos + album_len)
                                                     .map(|&ni| &thread.messages[ni]);
 
                                                 if should_show_time_divider(prev_msg, msg) {
@@ -3903,6 +3957,7 @@ impl ZaloGuiApp {
                                                         &self.emoji_textures,
                                                         idx,
                                                         &reactor_name,
+                                                        album_members.as_deref(),
                                                     ) {
                                                         pending_action = Some((idx, action));
                                                     }
@@ -3912,7 +3967,13 @@ impl ZaloGuiApp {
                                                         9.0
                                                     });
                                                 });
-                                                if jump_index == Some(idx) {
+                                                // A jump to a hidden album member lands on the album row.
+                                                if jump_index.is_some_and(|j| {
+                                                    j == idx
+                                                        || album_by_head
+                                                            .get(&pos)
+                                                            .is_some_and(|(_, m)| m.contains(&j))
+                                                }) {
                                                     render_quote_target(
                                                         ui,
                                                         row.response.rect,
@@ -4241,6 +4302,7 @@ impl ZaloGuiApp {
                                         progress: 0.0,
                                         texture: None,
                                         finished: false,
+                                        failed: false,
                                         playing: true,
                                         position_seconds: 0.0,
                                         started_at: None,
@@ -4303,11 +4365,6 @@ impl ZaloGuiApp {
                                 });
                             });
                     } else {
-                    // 3. Optional Sticker Picker Drawer
-                    if self.sticker_picker_open {
-                        self.render_sticker_picker(ui, &thread_id, is_group, pal);
-                    }
-
                     // 3b. Reply banner (quoted message preview above the composer)
                     if self.replying_to.is_some() {
                         let mut cancel = false;
@@ -4779,6 +4836,7 @@ impl ZaloGuiApp {
                                                 self.sticker_picker_open =
                                                     !self.sticker_picker_open;
                                             }
+                                            self.picker_button_rect = stk_rect;
 
                                             // 2) Compact Photo Upload Icon Button
                                             let (img_rect, img_resp) = ui.allocate_exact_size(
@@ -5521,6 +5579,15 @@ impl ZaloGuiApp {
                         ) {
                             self.send_composer_gif(&thread_id, is_group, item);
                         }
+                    }
+                    if self.sticker_picker_open && !posting_restricted {
+                        self.render_picker_panel(
+                            ctx,
+                            composer_frame.response.rect,
+                            &thread_id,
+                            is_group,
+                            pal,
+                        );
                     }
                     let mut click_chosen_mention = None;
                     if !quick_message_mode && !mention_candidates.is_empty() {

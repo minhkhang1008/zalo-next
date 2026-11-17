@@ -545,6 +545,99 @@ pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::Pa
     }
 }
 
+/// Open a native OS *folder* picker and return the chosen directory.
+///
+/// Blocks until the dialog closes, so call it from a helper thread, never from the egui frame.
+pub(super) fn pick_native_folder_dialog() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct BrowseInfoW {
+            hwnd_owner: *mut std::ffi::c_void,
+            pidl_root: *const std::ffi::c_void,
+            display_name: *mut u16,
+            title: *const u16,
+            flags: u32,
+            lpfn: *const std::ffi::c_void,
+            l_param: isize,
+            image: i32,
+        }
+        #[link(name = "shell32")]
+        extern "system" {
+            fn SHBrowseForFolderW(lpbi: *mut BrowseInfoW) -> *mut std::ffi::c_void;
+            fn SHGetPathFromIDListW(pidl: *const std::ffi::c_void, path: *mut u16) -> i32;
+        }
+        #[link(name = "ole32")]
+        extern "system" {
+            fn CoTaskMemFree(pv: *mut std::ffi::c_void);
+        }
+        let title: Vec<u16> = "Chọn thư mục lưu file tải về\0".encode_utf16().collect();
+        let mut display = vec![0u16; 260];
+        let mut info = BrowseInfoW {
+            hwnd_owner: std::ptr::null_mut(),
+            pidl_root: std::ptr::null(),
+            display_name: display.as_mut_ptr(),
+            title: title.as_ptr(),
+            // BIF_RETURNONLYFSDIRS (0x1) | BIF_NEWDIALOGSTYLE (0x40)
+            flags: 0x1 | 0x40,
+            lpfn: std::ptr::null(),
+            l_param: 0,
+            image: 0,
+        };
+        let pidl = unsafe { SHBrowseForFolderW(&mut info) };
+        if pidl.is_null() {
+            return None;
+        }
+        let mut path = vec![0u16; 32_768];
+        let ok = unsafe { SHGetPathFromIDListW(pidl, path.as_mut_ptr()) };
+        unsafe { CoTaskMemFree(pidl) };
+        if ok == 0 {
+            return None;
+        }
+        let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+        let s = String::from_utf16_lossy(&path[..end]);
+        (!s.is_empty()).then(|| std::path::PathBuf::from(s))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"Chọn thư mục lưu file tải về\")",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!s.is_empty()).then(|| std::path::PathBuf::from(s))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Ok(out) = std::process::Command::new("zenity")
+            .args(["--file-selection", "--directory"])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        let out = std::process::Command::new("kdialog")
+            .arg("--getexistingdirectory")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!s.is_empty()).then(|| std::path::PathBuf::from(s))
+    }
+}
+
 /// Detect `Ctrl+V` / `Shift+Insert` (Windows) or `Cmd+V` (macOS) reliably even when `egui-winit`
 /// swallows `Key::V` because the system clipboard contains an image instead of UTF-8 text.
 pub(super) fn is_clipboard_paste_triggered(ctx: &egui::Context) -> bool {
@@ -1304,7 +1397,7 @@ fn is_inline_emoji_cluster(cluster: &str) -> bool {
 
 /// Colour texture for an emoji cluster from the system font, requesting it from the worker
 /// on first use. Returns `None` until it arrives (or forever if rasterisation failed).
-fn system_emoji_texture<'a>(
+pub(super) fn system_emoji_texture<'a>(
     cluster: &str,
     textures: &'a HashMap<String, TextureHandle>,
     loading: &mut HashSet<String>,
@@ -2371,6 +2464,7 @@ pub(super) fn render_message_body(
     sticker_textures: &HashMap<String, TextureHandle>,
     loading_stickers: &mut HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
+    album: Option<&[&ChatMessage]>,
 ) -> Option<BubbleAction> {
     let mut body_action = None;
     let mention_texts = message_mention_texts(msg);
@@ -2415,6 +2509,30 @@ pub(super) fn render_message_body(
     // Dedicated inline Photo Card when the message is an uploaded/received Zalo photo (#72)
     let is_zalo_photo = is_zalo_photo_message(msg);
     if is_zalo_photo {
+        if let Some(members) = album.filter(|members| members.len() > 1) {
+            let act = super::album::render_album_grid(
+                ui,
+                members,
+                super::album::album_width(max_text_width),
+                pal,
+                sticker_textures,
+                loading_stickers,
+                &sender_label,
+            );
+            if let Some(cap) = extract_photo_user_caption(msg) {
+                ui.add_space(5.0);
+                render_chat_markdown_block(
+                    ui,
+                    cap,
+                    text_col,
+                    pal,
+                    sticker_textures,
+                    loading_stickers,
+                    mention_texts.as_deref(),
+                );
+            }
+            return act;
+        }
         if let Some(thumb_url) = photo_primary_url(msg) {
             let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
             if !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
@@ -3251,6 +3369,7 @@ pub(super) fn render_chat_bubble(
     emoji_textures: &HashMap<String, TextureHandle>,
     idx: usize,
     reactor_name: &dyn Fn(&str) -> String,
+    album: Option<&[&ChatMessage]>,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
@@ -3297,6 +3416,8 @@ pub(super) fn render_chat_bubble(
         max_text_width.min(256.0)
     } else if has_voice_card {
         max_text_width.min(292.0).max(210.0)
+    } else if is_photo_card && album.is_some_and(|members| members.len() > 1) {
+        super::album::album_width(max_text_width)
     } else if is_photo_card {
         let thumb_u = photo_primary_url(msg).unwrap_or("");
         let tkey = format!("thumb_{}", crate::crypto::md5_hex(thumb_u));
@@ -3561,6 +3682,7 @@ pub(super) fn render_chat_bubble(
                                     sticker_textures,
                                     loading_stickers,
                                     emoji_textures,
+                                    album,
                                 );
                             }
                             if let Some(act) =
@@ -3721,6 +3843,7 @@ pub(super) fn render_chat_bubble(
                                     sticker_textures,
                                     loading_stickers,
                                     emoji_textures,
+                                    album,
                                 );
                             }
                             if let Some(act) =
@@ -4836,6 +4959,7 @@ mod quote_navigation_tests {
                                 &HashMap::new(),
                                 0,
                                 &|id: &str| id.to_string(),
+                                None,
                             );
                         });
                     },

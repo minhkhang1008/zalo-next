@@ -88,6 +88,7 @@ fn restart_video_player(player: &mut VideoPlayerModal) {
     player.generation = next_video_generation();
     player.playing = true;
     player.finished = false;
+    player.failed = false;
     player.started_at = None;
     player.status = "Đang chuẩn bị video…".into();
     if let Some(tx) = WORKER_TX.get() {
@@ -101,6 +102,78 @@ fn restart_video_player(player: &mut VideoPlayerModal) {
             volume: player.volume,
         });
     }
+}
+
+/// File name for a manually downloaded video: the message's own name, else the URL's last segment.
+fn video_download_name(title: &str, url: &str) -> String {
+    let clean = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                    || c.is_control()
+                {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            .trim()
+            .to_string()
+    };
+    let mut name = clean(title);
+    if name.is_empty() {
+        let tail = url
+            .split(['?', '#'])
+            .next()
+            .and_then(|u| u.rsplit('/').next())
+            .unwrap_or("");
+        name = clean(tail);
+    }
+    if name.is_empty() {
+        name = "video".into();
+    }
+    if !name.contains('.') {
+        name.push_str(".mp4");
+    }
+    name
+}
+
+/// Re-encode any cached/local image bytes (the cache stores the CDN bytes as-is: JPEG, WebP, ...)
+/// as PNG, the one format every clipboard backend here accepts.
+fn image_bytes_to_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("không giải mã được ảnh: {e}"))?;
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("không mã hóa được ảnh: {e}"))?;
+    Ok(png)
+}
+
+/// Copy the image shown in the viewer to the clipboard.
+///
+/// Prefers the HD cache entry, then the thumbnail entry (`stickers_cache/<key>.png`, written by
+/// `WorkerCmd::FetchStickerImage`), then a local file. Runs on a helper thread (disk + decode).
+fn copy_viewer_image(cache_keys: &[String], local_source: &str) -> Result<(), String> {
+    for key in cache_keys {
+        // Keys are hashes/ids produced by the app; reject anything that could leave the cache dir.
+        if key.is_empty() || key.contains(['/', '\\']) || key.contains("..") {
+            continue;
+        }
+        let path = std::path::Path::new("stickers_cache").join(format!("{key}.png"));
+        if let Ok(bytes) = std::fs::read(&path) {
+            if !bytes.is_empty() {
+                return super::clipboard_write::copy_png(&image_bytes_to_png(&bytes)?);
+            }
+        }
+    }
+    if !local_source.starts_with("http://") && !local_source.starts_with("https://") {
+        let path = local_source
+            .strip_prefix("local://")
+            .unwrap_or(local_source);
+        let bytes = std::fs::read(path).map_err(|e| format!("không đọc được file ảnh: {e}"))?;
+        return super::clipboard_write::copy_png(&image_bytes_to_png(&bytes)?);
+    }
+    Err("ảnh chưa tải xong, thử lại sau giây lát".to_string())
 }
 
 fn canonical_download_dir(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
@@ -659,6 +732,8 @@ impl ZaloGuiApp {
             Close,
             TogglePlayback,
             Seek(f32),
+            CopyUrl,
+            Download,
         }
 
         let Some(player) = self.video_player.as_mut() else {
@@ -728,6 +803,48 @@ impl ZaloGuiApp {
                         FontId::proportional(12.5),
                         Color32::LIGHT_GRAY,
                     );
+                    if player.failed {
+                        // Let the user watch it elsewhere: copy the CDN link or save the file.
+                        let btn_size = Vec2::new(150.0, 32.0);
+                        let row_y = layout.media.center().y + 36.0;
+                        for (idx, (label, id, which)) in [
+                            (
+                                "Sao chép URL video",
+                                "zalo_video_copy_url",
+                                VideoAction::CopyUrl,
+                            ),
+                            ("Tải video về", "zalo_video_download", VideoAction::Download),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let cx =
+                                layout.media.center().x + (idx as f32 - 0.5) * (btn_size.x + 12.0);
+                            let rect = Rect::from_center_size(Pos2::new(cx, row_y), btn_size);
+                            let resp = ui
+                                .interact(rect, Id::new(id), Sense::click())
+                                .on_hover_cursor(CursorIcon::PointingHand);
+                            painter.rect_filled(
+                                rect,
+                                Rounding::same(6.0),
+                                if resp.hovered() {
+                                    Color32::from_rgb(25, 132, 255)
+                                } else {
+                                    Color32::from_white_alpha(28)
+                                },
+                            );
+                            painter.text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                label,
+                                FontId::proportional(12.5),
+                                Color32::WHITE,
+                            );
+                            if resp.clicked() {
+                                action = Some(which);
+                            }
+                        }
+                    }
                     if !player.finished {
                         let loading_width = (layout.media.width() * 0.28).clamp(100.0, 280.0);
                         let loading = Rect::from_center_size(
@@ -887,6 +1004,7 @@ impl ZaloGuiApp {
         }
 
         let mut close = false;
+        let mut toast: Option<String> = None;
         match action {
             Some(VideoAction::Close) => close = true,
             Some(VideoAction::TogglePlayback) if player.playing => {
@@ -920,6 +1038,23 @@ impl ZaloGuiApp {
                 player.position_seconds = position;
                 restart_video_player(player);
             }
+            Some(VideoAction::CopyUrl) => {
+                let url = player.url.clone();
+                ctx.copy_text(url);
+                toast = Some("Đã sao chép URL video vào bộ nhớ tạm".to_string());
+            }
+            Some(VideoAction::Download) => {
+                let url = player.url.clone();
+                let name = video_download_name(&player.title, &player.url);
+                toast = Some(format!("⏳ Đang tải video \"{name}\"…"));
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.send(WorkerCmd::DownloadFile {
+                        url,
+                        file_name: name,
+                        download_dir: self.settings.download_dir.clone(),
+                    });
+                }
+            }
             None => {}
         }
 
@@ -929,6 +1064,9 @@ impl ZaloGuiApp {
                 let _ = tx.send(WorkerCmd::StopVideo { generation });
             }
             self.video_player = None;
+        }
+        if let Some(text) = toast {
+            self.show_toast(text);
         }
     }
 
@@ -3441,15 +3579,33 @@ impl ZaloGuiApp {
                 }
             }
         }
-        if pick_dl_dir {
-            if let Some(folder) = pick_native_file_dialog(false) {
-                let dir_path = folder.parent().unwrap_or(&folder).to_path_buf();
-                self.settings.download_dir = dir_path.display().to_string();
-                self.settings.save();
-                self.show_toast(format!(
-                    "Đã đổi thư mục lưu file: {}",
-                    self.settings.download_dir
-                ));
+        if pick_dl_dir && self.dl_dir_pick_rx.is_none() {
+            // The picker blocks until closed, so run it off the UI thread.
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.dl_dir_pick_rx = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(pick_native_folder_dialog());
+            });
+        }
+        if let Some(rx) = &self.dl_dir_pick_rx {
+            match rx.try_recv() {
+                Ok(picked) => {
+                    self.dl_dir_pick_rx = None;
+                    if let Some(dir_path) = picked {
+                        self.settings.download_dir = dir_path.display().to_string();
+                        self.settings.save();
+                        self.show_toast(format!(
+                            "Đã đổi thư mục lưu file: {}",
+                            self.settings.download_dir
+                        ));
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.dl_dir_pick_rx = None;
+                }
             }
         }
         if open_dl_dir {
@@ -6879,6 +7035,22 @@ impl ZaloGuiApp {
         );
         let mut should_close = false;
 
+        if let Some(rx) = &self.image_copy_rx {
+            match rx.try_recv() {
+                Ok(res) => {
+                    self.image_copy_rx = None;
+                    match res {
+                        Ok(()) => self.show_toast("Đã sao chép ảnh vào bộ nhớ tạm"),
+                        Err(e) => self.show_toast(format!("Không sao chép được ảnh: {e}")),
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.image_copy_rx = None,
+            }
+        }
+
         let active_tex = viewer
             .hd_tex_key
             .as_ref()
@@ -7131,24 +7303,124 @@ impl ZaloGuiApp {
                                     {
                                         open_external_url(&viewer.full_url);
                                     }
+                                }
 
-                                    let copy_btn = egui::Button::new(
-                                        RichText::new(format!("{} Sao chép", lucide::COPY))
-                                            .size(11.8)
-                                            .color(pal.text_secondary),
-                                    )
-                                    .fill(pal.bg_elevated)
-                                    .stroke(Stroke::new(1.0_f32, pal.border))
-                                    .rounding(Rounding::same(6.0))
-                                    .min_size(Vec2::new(78.0, 28.0));
-                                    if ui
-                                        .add(copy_btn)
-                                        .on_hover_cursor(CursorIcon::PointingHand)
-                                        .clicked()
-                                    {
-                                        ui.ctx().copy_text(viewer.full_url.clone());
-                                        self.show_toast("Đã sao chép đường dẫn ảnh vào bộ nhớ tạm");
+                                // Split copy button: a click runs the saved default (image or
+                                // link); the caret opens a menu with both plus the default choice.
+                                let default_is_link = self.settings.image_copy_default == "link";
+                                let mut copy_action: Option<bool> = None; // Some(true) = image
+                                let caret_btn = egui::Button::new(
+                                    RichText::new(lucide::CHEVRON_DOWN)
+                                        .size(11.0)
+                                        .color(pal.text_secondary),
+                                )
+                                .fill(pal.bg_elevated)
+                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                .rounding(Rounding::same(6.0))
+                                .min_size(Vec2::new(24.0, 28.0));
+                                let caret_resp = ui
+                                    .add(caret_btn)
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Chọn cách sao chép");
+                                let copy_menu_id = Id::new("image_viewer_copy_menu");
+                                if caret_resp.clicked() {
+                                    ui.memory_mut(|m| m.toggle_popup(copy_menu_id));
+                                }
+                                egui::popup::popup_below_widget(
+                                    ui,
+                                    copy_menu_id,
+                                    &caret_resp,
+                                    egui::PopupCloseBehavior::CloseOnClick,
+                                    |ui| {
+                                        ui.set_min_width(190.0);
+                                        if ui.button("Sao chép ảnh").clicked() {
+                                            copy_action = Some(true);
+                                        }
+                                        let link_btn = ui.add_enabled(
+                                            !viewer.full_url.is_empty(),
+                                            egui::Button::new("Sao chép link ảnh"),
+                                        );
+                                        if link_btn.clicked() {
+                                            copy_action = Some(false);
+                                        }
+                                        ui.separator();
+                                        ui.label(
+                                            RichText::new("Khi bấm nút Sao chép")
+                                                .size(11.0)
+                                                .color(pal.text_muted),
+                                        );
+                                        if ui
+                                            .selectable_label(
+                                                !default_is_link,
+                                                "Mặc định: sao chép ảnh",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.settings.image_copy_default = "image".into();
+                                            self.settings.save();
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                default_is_link,
+                                                "Mặc định: sao chép link",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.settings.image_copy_default = "link".into();
+                                            self.settings.save();
+                                        }
+                                    },
+                                );
+                                let copy_btn = egui::Button::new(
+                                    RichText::new(format!(
+                                        "{} {}",
+                                        lucide::COPY,
+                                        if default_is_link {
+                                            "Sao chép link"
+                                        } else {
+                                            "Sao chép ảnh"
+                                        }
+                                    ))
+                                    .size(11.8)
+                                    .color(pal.text_secondary),
+                                )
+                                .fill(pal.bg_elevated)
+                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                .rounding(Rounding::same(6.0))
+                                .min_size(Vec2::new(100.0, 28.0));
+                                if ui
+                                    .add(copy_btn)
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .clicked()
+                                {
+                                    copy_action = Some(!default_is_link);
+                                }
+                                match copy_action {
+                                    Some(false) => {
+                                        if viewer.full_url.is_empty() {
+                                            self.show_toast("Ảnh này chưa có link để sao chép");
+                                        } else {
+                                            ui.ctx().copy_text(viewer.full_url.clone());
+                                            self.show_toast("Đã sao chép link ảnh vào bộ nhớ tạm");
+                                        }
                                     }
+                                    Some(true) => {
+                                        if self.image_copy_rx.is_none() {
+                                            let keys: Vec<String> = viewer
+                                                .hd_tex_key
+                                                .iter()
+                                                .chain(std::iter::once(&viewer.tex_key))
+                                                .cloned()
+                                                .collect();
+                                            let local = viewer.full_url.clone();
+                                            let (tx, rx) = std::sync::mpsc::channel();
+                                            self.image_copy_rx = Some(rx);
+                                            std::thread::spawn(move || {
+                                                let _ = tx.send(copy_viewer_image(&keys, &local));
+                                            });
+                                        }
+                                    }
+                                    None => {}
                                 }
 
                                 // Zoom In (+)

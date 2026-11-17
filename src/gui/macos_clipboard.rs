@@ -188,6 +188,25 @@ pub(super) fn read_image() -> Option<image::RgbaImage> {
     })
 }
 
+/// Replace the general pasteboard contents with one PNG image.
+///
+/// `NSPasteboard` is documented as thread-safe for writes, so the copy runs off the UI thread.
+pub(super) fn write_png(png: &[u8]) -> Result<(), String> {
+    autoreleasepool(|_| {
+        let data = NSData::with_bytes(png);
+        // SAFETY: plain pasteboard calls with a live NSData; no pointers outlive this closure.
+        unsafe {
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            if pb.setData_forType(Some(&data), NSPasteboardTypePNG) {
+                Ok(())
+            } else {
+                Err("NSPasteboard từ chối dữ liệu ảnh".to_string())
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

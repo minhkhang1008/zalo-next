@@ -3680,6 +3680,9 @@ pub struct GifItem {
     pub thumb: String,
 }
 
+/// `SGG_SRC_CHATBAR_GIF_BOX` (1): GIF picked from the GIF tab of the sticker panel.
+pub const GIF_SRC_CHAT_BAR: i32 = 1;
+
 /// `SGG_SRC_SEARCH_INPUTBOX`: GIF picked through the composer `@gif` command.
 pub const GIF_SRC_COMPOSER_COMMAND: i32 = 7;
 
@@ -3929,8 +3932,11 @@ pub(crate) async fn send_quote_message_with_mentions(
         .map(|l| l.uin.clone())
         .unwrap_or_else(|| "0".into());
 
+    let wire_owner = sidebar_sender_id(quoted);
     let qmsg_owner = if quoted.is_outgoing {
         my_uid.as_str()
+    } else if let Some(uid) = wire_owner.as_deref() {
+        uid
     } else if !quoted.sender.is_empty() && quoted.sender.chars().all(|c| c.is_ascii_digit()) {
         quoted.sender.as_str()
     } else if !is_group {
@@ -3945,7 +3951,7 @@ pub(crate) async fn send_quote_message_with_mentions(
     } else {
         now.saturating_sub(1000)
     };
-    let qmsg_cli_id = qmsg_ts;
+    let qmsg_cli_id = wire_cli_msg_id(quoted).unwrap_or(qmsg_ts);
 
     let quote_res: Result<Value> = async {
         if quoted.id.starts_with("out_") || quoted.id.starts_with("local_") || quoted.id.is_empty()
@@ -4039,7 +4045,9 @@ pub(crate) async fn send_quote_message_with_mentions(
 
     match quote_res {
         Ok(r) => Ok(r),
-        Err(_) => {
+        Err(e) => {
+            // The plain-text fallback hides why a reply was not threaded, so keep the reason.
+            crate::logger::log_error("chat::send_quote_message", &e.to_string());
             if is_group {
                 send_group_mention_message_with_client_id(s, to_id, text, now, picks).await
             } else {
@@ -4153,6 +4161,17 @@ pub fn reaction_code_and_type(emoji_or_code: &str) -> (&'static str, i32) {
     }
 }
 
+/// Real client message id (`cliMsgId`) of a received or sent message.
+///
+/// It is NOT the server timestamp: live captures show `cliMsgId` 1794398852870 against
+/// `ts` 1794398854583 for the same photo, so reactions and quotes keyed by `ts` never matched the
+/// original message on the server.
+pub(crate) fn wire_cli_msg_id(msg: &ChatMessage) -> Option<u64> {
+    client_message_id(msg)
+        .and_then(|id| id.parse::<u64>().ok())
+        .filter(|id| *id > 0)
+}
+
 /// Send a message reaction (`sendReactionMessage` in `compact-app-pc.b7bec208c4c8f73e09f8.js:14317097`, cmd `12410` / `12411`).
 pub async fn send_reaction(
     s: &Session,
@@ -4177,11 +4196,13 @@ pub async fn send_reaction(
     } else {
         json!(msg.id)
     };
-    let c_msg_id = if msg.ts > 0 {
-        msg.ts as u64
-    } else {
-        msg.id.parse::<u64>().unwrap_or(now)
-    };
+    let c_msg_id = wire_cli_msg_id(msg).unwrap_or_else(|| {
+        if msg.ts > 0 {
+            msg.ts as u64
+        } else {
+            msg.id.parse::<u64>().unwrap_or(now)
+        }
+    });
 
     let inner_msg = json!({
         "rMsg": [{
@@ -8597,6 +8618,26 @@ pub async fn delete_conversation(
 
 #[cfg(test)]
 mod tests {
+    /// Live capture: `cliMsgId` 1794398852870 vs `ts` 1794398854583 for one photo. Reactions and
+    /// quotes must key on the client id, not the server timestamp.
+    #[test]
+    fn reaction_and_quote_use_client_msg_id_not_server_ts() {
+        let mut msg = super::ChatMessage {
+            id: "8477547366897".into(),
+            ts: 1794398854583,
+            client_message_id: "1794398852870".into(),
+            ..Default::default()
+        };
+        assert_eq!(super::wire_cli_msg_id(&msg), Some(1794398852870));
+        // Falls back to the wire reference when the flat field is empty.
+        msg.client_message_id.clear();
+        msg.wire_ref.client_id = Some(serde_json::json!("1794398852870"));
+        assert_eq!(super::wire_cli_msg_id(&msg), Some(1794398852870));
+        // No client id at all: the caller keeps its old timestamp fallback.
+        msg.wire_ref.client_id = None;
+        assert_eq!(super::wire_cli_msg_id(&msg), None);
+    }
+
     #[test]
     fn async_file_type_is_never_the_folder_type() {
         assert_eq!(
