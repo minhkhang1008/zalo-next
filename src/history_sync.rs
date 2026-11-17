@@ -1092,6 +1092,33 @@ fn decompress_sync_payload_with_limit(buf: &[u8], limit: usize) -> Result<Vec<u8
     Ok(buf.to_vec())
 }
 
+/// Parse a bare call duration such as `"0:18"`, `"1:14"` or `"1:02:03"` (Sync V2 call logs).
+pub(crate) fn parse_colon_duration_secs(raw: &str) -> Option<u64> {
+    let s = raw.trim();
+    if s.is_empty() || !s.contains(':') {
+        return None;
+    }
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 && parts.len() != 3 {
+        return None;
+    }
+    if !parts
+        .iter()
+        .all(|p| !p.is_empty() && p.len() <= 3 && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let nums: Vec<u64> = parts
+        .iter()
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    match nums.as_slice() {
+        [m, s] if *s < 60 => Some(m * 60 + s),
+        [h, m, s] if *m < 60 && *s < 60 => Some(h * 3600 + m * 60 + s),
+        _ => None,
+    }
+}
+
 pub fn parse_sync_chunk(buf: &[u8]) -> Option<Vec<ParsedProtoPartition>> {
     let mut parts = Vec::new();
     let mut offset = 0;
