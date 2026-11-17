@@ -16,3 +16,7 @@
 All implementation groups in the existing plan are now present in source. The unchecked
 items require real devices or a runnable packaged build; offline tests are not substituted
 for these checks. No commit, push, release or installed-app replacement performed.
+
+## Local AI assistant (`@AI`)
+
+- [ ] Design agreed; implementation tasks AI-1..AI-6 in `tasks/ai-assistant.md` (not started)

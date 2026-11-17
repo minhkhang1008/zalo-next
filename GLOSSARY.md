@@ -43,6 +43,14 @@ Ubiquitous language for `zalo-next`. Use these terms verbatim in issues, ADRs, t
 | **Store** | Local SQLite database managed by `MessageStore`. | "cache" (cache is non-authoritative) |
 | **Call** | VoIP session (audio/video) handled by `src/call.rs` and `src/audio.rs`. | "phone" |
 
+## Assistant
+
+| Term | Definition | Avoid |
+| :--- | :--- | :--- |
+| **Assistant** | The user-configured OpenAI-compatible model reached through the `ai` module (see ADR-0004). | "bot", "LLM provider" |
+| **Local AI message** | A question or answer exchanged with the Assistant, stored in `local_ai_messages` with an `ai_` id and shown as a third participant. Exists only on this machine. | "AI chat message", "virtual message" |
+| **Context sharing** | Per-conversation opt-in that lets the Assistant read recent conversation text. Off by default. | "AI access", "read mode" |
+
 ## Invariants
 
 Domain invariants are tagged `INV-N` here and referenced verbatim from code and tests.
@@ -51,3 +59,5 @@ Domain invariants are tagged `INV-N` here and referenced verbatim from code and 
 - **INV-2** — `session.json` is never logged, committed or transmitted outside Zalo endpoints.
 - **INV-3** — The UI thread never performs blocking I/O; all such work runs in the worker.
 - **INV-4** — A message row is idempotent by `msg_id`; re-delivery never duplicates history.
+- **INV-5** — A Local AI message is never sent to a Zalo endpoint, written to `messages`/`threads_cache.json`, or used as a read-receipt / quote / forward target.
+- **INV-6** — Zalo credentials are only sent to Zalo hosts and Assistant credentials only to the configured Assistant host; the two HTTP clients share no cookies, headers or redirects.
