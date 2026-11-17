@@ -3026,8 +3026,12 @@ impl eframe::App for ZaloGuiApp {
             self.theme_dirty = false;
         }
 
-        // Keep draining worker events (messages, calls, notifications) while hidden.
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        // Worker events wake the UI themselves (`GuiTx`). A hidden, minimised or unfocused window
+        // may not get those wake-ups reliably, so it keeps a 500 ms heartbeat to drain messages,
+        // calls and notifications; a focused window only needs a slow safety net (it used to
+        // redraw the whole UI twice a second while idle).
+        let heartbeat_ms = if ctx.input(|i| i.focused) { 3000 } else { 500 };
+        ctx.request_repaint_after(std::time::Duration::from_millis(heartbeat_ms));
         self.check_events(ctx);
 
         self.ime_just_committed = false;

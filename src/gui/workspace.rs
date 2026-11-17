@@ -800,39 +800,25 @@ impl ZaloGuiApp {
                         .map(|(i, _)| i)
                         .collect();
 
-                    filtered_indices.sort_by(|&a, &b| {
-                        let ta = &self.threads[a];
-                        let tb = &self.threads[b];
-                        let a_pinned = ta.name.contains("Cloud của tôi")
-                            || ta.presentation.pinned
-                            || self.settings.pinned_threads.contains(&ta.id)
+                    // Pinned rows first, then newest message first (stable for ties). The key is
+                    // computed once per row: the old comparator re-ran the O(pinned) lookups on
+                    // every comparison, on every frame.
+                    filtered_indices.sort_by_cached_key(|&i| {
+                        let t = &self.threads[i];
+                        let pinned = t.name.contains("Cloud của tôi")
+                            || t.presentation.pinned
+                            || self.settings.pinned_threads.contains(&t.id)
                             || crate::chat::is_pinned_in_list(
-                                &ta.id,
-                                ta.is_group,
+                                &t.id,
+                                t.is_group,
                                 &self.settings.pinned_threads,
                             );
-                        let b_pinned = tb.name.contains("Cloud của tôi")
-                            || tb.presentation.pinned
-                            || self.settings.pinned_threads.contains(&tb.id)
-                            || crate::chat::is_pinned_in_list(
-                                &tb.id,
-                                tb.is_group,
-                                &self.settings.pinned_threads,
-                            );
-                        if a_pinned != b_pinned {
-                            return b_pinned.cmp(&a_pinned);
-                        }
-                        let ts_a = ta
+                        let ts = t
                             .messages
                             .last()
                             .map(|m| normalize_ts_ms(m.ts))
                             .unwrap_or(0);
-                        let ts_b = tb
-                            .messages
-                            .last()
-                            .map(|m| normalize_ts_ms(m.ts))
-                            .unwrap_or(0);
-                        ts_b.cmp(&ts_a)
+                        (std::cmp::Reverse(pinned), std::cmp::Reverse(ts))
                     });
 
                     let msg_hits: Vec<(usize, String, String, String, bool)> =
