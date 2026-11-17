@@ -483,8 +483,10 @@ mod tests {
 
     #[test]
     fn scale_and_speed_are_clamped() {
-        let mut s = AppSettings::default();
-        s.font_scale = f32::NAN;
+        let mut s = AppSettings {
+            font_scale: f32::NAN,
+            ..Default::default()
+        };
         assert_eq!(s.normalized_font_scale(), 1.0);
         s.font_scale = 9.0;
         assert_eq!(s.normalized_font_scale(), 3.0);

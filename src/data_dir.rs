@@ -230,7 +230,7 @@ fn copy_tree_private(source: &Path, destination: &Path) -> Result<u64> {
         }
         Ok(total)
     } else {
-        copy_private(source, destination).map_err(Into::into)
+        copy_private(source, destination)
     }
 }
 

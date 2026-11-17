@@ -382,7 +382,7 @@ impl ThemePalette {
 pub(super) fn resolve_dark_mode(theme_mode: &str, system_theme: Option<egui::Theme>) -> bool {
     match theme_mode {
         "light" => false,
-        "system" => system_theme.map_or(true, |t| t == egui::Theme::Dark),
+        "system" => system_theme.is_none_or(|t| t == egui::Theme::Dark),
         _ => true,
     }
 }
