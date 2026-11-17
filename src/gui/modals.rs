@@ -4653,10 +4653,26 @@ impl ZaloGuiApp {
             }
         }
         let viewport_id = egui::ViewportId::from_hash_of("zalo_dedicated_call_window");
-        let builder = egui::ViewportBuilder::default()
+        let mut builder = egui::ViewportBuilder::default()
             .with_title(win_title)
             .with_inner_size([default_w, default_h])
             .with_min_inner_size([520.0, 460.0]);
+        // An incoming call opens while the main window is being raised and focused (`show_app`);
+        // without this the call window can end up *behind* it and the user never sees the Answer
+        // button. Keep it on top and focused while it rings, then return to a normal window.
+        if call.is_incoming_ringing {
+            builder = builder.with_always_on_top().with_active(true);
+            self.call_window_on_top = true;
+            if elapsed_f < 2.0 {
+                ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Focus);
+            }
+        } else if self.call_window_on_top {
+            self.call_window_on_top = false;
+            ctx.send_viewport_cmd_to(
+                viewport_id,
+                egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal),
+            );
+        }
 
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
             if vp_ctx.input(|i| i.viewport().close_requested()) {

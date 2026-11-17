@@ -837,6 +837,8 @@ pub struct ZaloGuiApp {
     /// Palette for the current theme + custom colours. `palette()` hands out this copy so
     /// `theme.json` is read from disk only when `refresh_cached_palette` runs, not every frame.
     cached_palette: ThemePalette,
+    /// The call window was raised "always on top" while ringing and must be reset afterwards.
+    call_window_on_top: bool,
     /// Local Assistant state (messages live outside `threads`, see `gui/ai_ui.rs`).
     ai: ai_ui::State,
 
@@ -1243,6 +1245,7 @@ impl ZaloGuiApp {
             dark_mode,
             theme_dirty: false,
             cached_palette,
+            call_window_on_top: false,
             ai: ai_ui::State::new(),
             is_logged_in,
             user_name,
