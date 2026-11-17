@@ -33,7 +33,15 @@ DailyNotifier) gửi thông báo.
 
 **Thiếu font tiếng Việt trên Linux tối giản:** cài `fonts-noto-core` hoặc `fonts-dejavu-core`.
 
-**Gọi video không có hình:** cần `ffmpeg` trong `PATH` (`brew install ffmpeg`).
+**Gọi video không có hình:** cần `ffmpeg` trong `PATH` (`brew install ffmpeg`). Hiện app chưa hiển thị camera của điện thoại và hình gửi đi còn mờ/trễ, đây là giới hạn đã biết.
+
+**Điện thoại báo "chưa hỗ trợ gọi video":** cập nhật lên v0.4.0 trở lên (đã sửa cặp tham số `zpw_ver`/`zpw_type`).
+
+**Không thấy cửa sổ cuộc gọi đến:** cập nhật lên v0.4.0 trở lên; cửa sổ đang reo giờ luôn nằm trên cùng.
+
+**Thông báo mất avatar / nền trong suốt khi chạy `cargo run`:** thiếu helper Swift đã dựng sẵn; chạy `bash native/macos/build-native-helpers.sh`.
+
+**`@AI` báo lỗi kết nối:** kiểm tra Base URL (chỉ `https`, hoặc `http://localhost`), API key và model ở **Cài đặt → Trợ lý AI**, rồi bấm **Kiểm tra kết nối**. Mã `401` là sai key, `429` là bị giới hạn tốc độ.
 
 ## Mã lỗi thường gặp từ máy chủ Zalo
 

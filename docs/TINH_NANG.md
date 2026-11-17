@@ -14,7 +14,7 @@ Kiểm thử chủ yếu trên macOS. Cách dùng chi tiết: [Hướng dẫn s�
 | Lịch sử tin nhắn cục bộ | ✅ | `zalo_history.db`; giữ nguyên khi tắt app, đăng xuất hay đăng nhập lại |
 | Nhiều tài khoản | ✅ | Mỗi tài khoản một thư mục `--data-dir` |
 | Đồng bộ lịch sử nhóm & Cloud của tôi từ máy chủ | ⛔ | |
-| Đồng bộ tin 1-1 từ điện thoại | 🟡 | Hoạt động một phần, không thể sync toàn bộ dữ liệu |
+| Đồng bộ tin 1-1 từ điện thoại | 🟡 | Hoạt động một phần, không thể sync toàn bộ dữ liệu; nhật ký cuộc gọi (Sync V2) hiện thành thẻ cuộc gọi, chưa kiểm chứng trên điện thoại thật |
 | Nhập lịch sử từ tệp `.db` / `.json` | ✅ | **Cài đặt → Đồng bộ tin nhắn → Nhập lịch sử** |
 
 ## Nhắn tin
@@ -31,7 +31,10 @@ Kiểm thử chủ yếu trên macOS. Cách dùng chi tiết: [Hướng dẫn s�
 | Xem chi tiết tin nhắn | ✅ | Menu "…" → Xem chi tiết |
 | Gửi ảnh & tệp | ✅ | Nút đính kèm, kéo-thả (Gửi nhanh / Xem trước), dán ảnh `⌘V` |
 | Tin nhắn nhanh | ✅ | Tạo/sửa/xoá macro tại **Cài đặt → Tin nhắn**; gõ `/`, chọn bằng ↑/↓ rồi Enter để chèn nội dung và ảnh vào khung soạn thảo |
-| Sticker & gợi ý sticker khi gõ | ✅ | |
+| Sticker, Emoji, GIF (bảng kiểu Zalo Web) | ✅ | Bảng nổi 3 tab, mục Gần đây, kho sticker; emoji chèn vào khung soạn |
+| Gợi ý sticker khi gõ | ✅ | |
+| Album ảnh dạng lưới | ✅ | Nhiều ảnh gửi cùng lúc gộp thành một khối |
+| Sao chép ảnh / liên kết trong khung xem ảnh | ✅ | Chọn mặc định ở nút chia đôi |
 | Tìm và gửi GIF | ✅ | `@gif` hoặc `@gif từ khoá` |
 | Hẹn giờ gửi tin nhắn | ✅ | Nút `🕒` cạnh ô soạn tin |
 | Nhắc lại tin nhắn riêng trên máy | 🟡 | Menu tin → Nhắc hẹn; quản lý tại thanh Nhắc hẹn, app cần mở và đăng nhập |
@@ -60,14 +63,17 @@ Kiểm thử chủ yếu trên macOS. Cách dùng chi tiết: [Hướng dẫn s�
 | Tính năng | | Ghi chú |
 |---|---|---|
 | Gọi thoại 1-1 | ✅ | Đã test |
-| Gọi video | ✅ | |
+| Gọi video | 🟡 | Báo hiệu hoạt động; chưa hiển thị camera điện thoại, hình gửi đi còn mờ/trễ |
+| Cuộc gọi đến | ✅ | Cửa sổ luôn nằm trên cùng, kèm thông báo hệ thống |
 | Gọi nhóm | 🟡 | |
 
 ## Giao diện & hệ thống
 
 | Tính năng | | Ghi chú |
 |---|---|---|
-| Giao diện đồ hoạ kiểu Zalo PC, sáng/tối | ✅ | Mở toàn màn hình; tuỳ chỉnh màu qua `theme.json` |
+| Giao diện đồ hoạ kiểu Zalo PC, sáng/tối/hệ thống | ✅ | **Cài đặt → Giao diện**: bảng màu, phông chữ, thu phóng, hiệu ứng, màu tùy chỉnh |
+| Chạy nền khi đóng cửa sổ | ✅ | Icon ở menu bar (macOS) / khay (Windows); Linux chỉ thu nhỏ, Windows chưa kiểm thử |
+| Trợ lý AI `@AI` | ✅ | Chỉ mình bạn thấy, không gửi tới Zalo; cần tự cấu hình nhà cung cấp tương thích OpenAI. Chưa kiểm chứng với nhà cung cấp thật; chưa có streaming. Xem [AI_TRO_LY.md](AI_TRO_LY.md) |
 | Giao diện terminal (TUI) | ✅ | `--tui` |
 | Thông báo tin nhắn mới (macOS) | ✅ | Notification Center |
 | Emoji màu, hiển thị tiếng Việt/CJK | ✅ | Dùng font hệ thống |

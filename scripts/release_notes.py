@@ -32,6 +32,21 @@ def section(text: str, version: str) -> list[str]:
     return lines[start + 1 : end]
 
 
+_MENTION = re.compile(r"(?<![\w`@])@([A-Za-z0-9][A-Za-z0-9_-]*)")
+
+
+def neutralize_mentions(text: str) -> str:
+    """Wrap bare `@name` in backticks so GitHub does not turn it into a user mention.
+
+    A bare `@ai` links to (and notifies) the real GitHub account `ai`, and lists it on the
+    release page. Text already inside backtick code spans is left untouched.
+    """
+    parts = re.split(r"(`[^`]*`)", text)
+    return "".join(
+        part if part.startswith("`") else _MENTION.sub(r"`@\1`", part) for part in parts
+    )
+
+
 def short_bullet(body: str) -> str:
     m = re.match(r"\*\*(.+?)\*\*", body)
     title = m.group(1) if m else body
@@ -40,7 +55,7 @@ def short_bullet(body: str) -> str:
     title = title.strip().rstrip(":").strip()
     if not m and len(title) > 110:
         title = title[:107].rstrip() + "…"
-    return title
+    return neutralize_mentions(title)
 
 
 def build(version: str, changelog: str, repo: str) -> str:

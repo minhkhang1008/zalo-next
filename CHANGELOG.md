@@ -15,7 +15,7 @@ Bản cập nhật lớn: đổi tên thành **Zalo-next**, trợ lý AI `@AI`, 
 ### Added (Tính năng mới)
 - **Tùy biến giao diện:** bảng màu mặc định mới (theo ctdozlite), chọn phông chữ, thu phóng giao diện, bật/tắt và tốc độ hiệu ứng, bảng màu gợi ý, màu chủ đạo / điểm nhấn / bong bóng tin nhắn tùy chỉnh kèm xem trước, "Khôi phục mặc định"; chế độ "Hệ thống" theo giao diện macOS.
 - **Bảng Sticker / Emoji / GIF kiểu Zalo Web**, album ảnh dạng lưới, nút sao chép ảnh (ảnh hoặc liên kết), chọn thư mục tải về đúng kiểu thư mục, Esc xóa ô tìm kiếm.
-- **Đọc trước ngữ cảnh cho @AI:** tùy chọn (mặc định tắt, cần đồng ý + chọn cuộc trò chuyện) để AI tóm tắt trước các cuộc trò chuyện đã chọn; bản tóm tắt chỉ nằm trong bộ nhớ nên hỏi `@AI` nhanh hơn mà Zalo-next không lưu gì ra đĩa.
+- **Đọc trước ngữ cảnh cho `@AI`:** tùy chọn (mặc định tắt, cần đồng ý + chọn cuộc trò chuyện) để AI tóm tắt trước các cuộc trò chuyện đã chọn; bản tóm tắt chỉ nằm trong bộ nhớ nên hỏi `@AI` nhanh hơn mà Zalo-next không lưu gì ra đĩa.
 - **Trợ lý AI `@AI`:** gắn Base URL tương thích OpenAI, API key và model ở Cài đặt → Trợ lý AI, rồi gõ `@AI <câu hỏi>` trong bất kỳ cuộc trò chuyện nào. AI trả lời như một người thứ ba, **chỉ mình bạn thấy** (lưu cục bộ, không gửi tới Zalo); có thể sao chép, trả lời tiếp, tạo lại, xóa. Tùy chọn chia sẻ nội dung cuộc trò chuyện với AI (mặc định tắt, đổi riêng từng cuộc, nhóm chat hỏi xác nhận lần đầu), tóm tắt nhóm lớn bằng map-reduce. API key lưu trong `ai_secret.json` (quyền 0600), không nằm trong `app_settings.json`. Xem `docs/AI_TRO_LY.md`.
 
 ### Fixed (Sửa lỗi)

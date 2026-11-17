@@ -19,4 +19,9 @@ for these checks. No commit, push, release or installed-app replacement performe
 
 ## Local AI assistant (`@AI`)
 
-- [ ] Design agreed; implementation tasks AI-1..AI-6 in `tasks/ai-assistant.md` (not started)
+- [x] AI-1..AI-6 implemented (`tasks/ai-assistant.md`); offline tests pass
+- [ ] Verify with a real AI provider and the visible UI; Keychain storage and streaming not done
+
+## Video call quality
+
+- [ ] Show the phone camera and improve outbound video sharpness/latency (`tasks/video-call-quality.md`)

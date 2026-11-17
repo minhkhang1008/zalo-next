@@ -45,10 +45,15 @@ Tài liệu mô tả cách phân tách luồng xử lý, tổ chức module giao
 
 - `src/gui.rs`: Khởi tạo `ZaloGuiApp`, quản lý trạng thái ứng dụng, xử lý hàng đợi `GuiEvent`, thanh tiêu đề cửa sổ và màn hình đăng nhập.
 - `src/gui/theme.rs`: Bảng màu `ThemePalette` (Dark/Light), bộ icon vector `lucide`, vẽ avatar và nạp font tiếng Việt của hệ điều hành.
-- `src/gui/stickers.rs`: Bảng chọn nhãn dán (`StickerPicker`), thuật toán gợi ý nhãn dán theo thời gian thực khi gõ (`resolve_contextual_sticker_suggestions`) và thanh popover gợi ý nổi trên ô nhập.
+- `src/gui/stickers.rs`: Thanh gợi ý nhãn dán nổi trên ô nhập và thuật toán gợi ý theo thời gian thực (`resolve_contextual_sticker_suggestions`).
+- `src/gui/picker.rs`: Bảng nổi Sticker / Emoji / GIF kiểu Zalo Web, lưu mục *Gần đây* trong `AppSettings`.
+- `src/gui/album.rs`: Chia hàng và gộp các ảnh gửi cùng lúc thành album dạng lưới.
+- `src/gui/appearance.rs`: Bảng màu, phông chữ, thu phóng và hiệu ứng tùy biến; `src/gui/tray.rs`, `src/gui/background.rs`: chạy nền và icon khay.
+- `src/gui/ai_ui.rs` (với `src/ai.rs`): Giao diện và client của trợ lý `@AI`; tin AI nằm trong map riêng của GUI, không lẫn vào `Thread.messages`.
+- `src/gui/clipboard_write.rs`, `src/gui/macos_clipboard.rs`, `src/gui/macos_drag.rs`: Clipboard và kéo-thả theo từng hệ điều hành, ghi clipboard chạy trên thread phụ.
 - `src/gui/worker.rs`: Định nghĩa `WorkerCmd`, luồng nền Tokio (`spawn_session_worker`) và bộ tải trước ảnh thumbnail nhãn dán (`preload_disk_sticker_thumbnails`, `prefetch_missing_sticker_thumbnails`).
 - `src/gui/workspace.rs`: Bố cục 3 cột gồm thanh điều hướng, danh sách hội thoại, vùng khung chat chính và ngăn thông tin chi tiết bên phải.
-- `src/gui/messages.rs`: Hiển thị bong bóng tin nhắn, nhãn dán, thẻ cuộc gọi, trích dẫn, cảm xúc (reaction), menu chuột phải và xử lý dán ảnh từ clipboard.
+- `src/gui/messages.rs`: Hiển thị bong bóng tin nhắn, nhãn dán, album, thẻ cuộc gọi, trích dẫn, cảm xúc (reaction), menu chuột phải và xử lý dán ảnh từ clipboard.
 - `src/gui/modals.rs`: Các cửa sổ phụ gồm cài đặt, cuộc gọi thoại/video, xem ảnh phóng to, chuyển tiếp tin nhắn, tìm kiếm theo số điện thoại và Dev Inspector.
 
 ---

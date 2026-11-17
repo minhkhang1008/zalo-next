@@ -38,6 +38,6 @@ What we will do, in one paragraph, present tense.
 | [0001](0001-history-sync.md) | History sync | see file |
 | [0002](0002-self-updater.md) | Self-updater | see file |
 | [0003](0003-changelog-policy.md) | Changelog policy | see file |
-| [0004](0004-local-ai-assistant.md) | Local-only AI assistant as a virtual participant | proposed |
+| [0004](0004-local-ai-assistant.md) | Local-only AI assistant as a virtual participant | accepted |
 
 Related domain language lives in [`/GLOSSARY.md`](../../GLOSSARY.md).

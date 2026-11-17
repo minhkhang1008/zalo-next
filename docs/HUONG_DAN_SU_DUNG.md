@@ -14,10 +14,15 @@ Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diệ
 | `--tui` | Chạy chế độ giao diện dòng lệnh trong terminal. | `zalo-next --tui` |
 | `--qr` | Yêu cầu tạo mã QR đăng nhập ngay khi khởi động TUI. | `zalo-next --tui --qr` |
 | `--dev` | Bật thanh công cụ Dev Inspector để xem log mạng và payload giải mã. | `zalo-next --gui --dev` |
+| `--profile <TÊN>` | Dùng thư mục con `profiles/<tên>` cho một tài khoản riêng (chỉ chữ, số, `-`, `_`). | `zalo-next --profile acc2` |
+| `--check-update` | Kiểm tra bản mới trên GitHub Releases rồi thoát. | `zalo-next --check-update` |
+| `--version`, `-V` | In phiên bản rồi thoát. | `zalo-next --version` |
+| `--proxy <URL>` | Đi qua proxy HTTP(S) khi kết nối mạng. | `zalo-next --proxy http://127.0.0.1:8080` |
 | `--logout` | Xóa phiên đăng nhập hiện tại (`session.json`) rồi thoát. | `zalo-next --logout` |
 | `--phone <SỐ>` | Điền sẵn số điện thoại khi thử đăng nhập bằng mật khẩu. | `zalo-next --tui --phone 0912345678` |
 | `--pass <MK>` | Điền sẵn mật khẩu. | `zalo-next --tui --phone 0912345678 --pass ...` |
-| `--dump` | Lưu các gói phản hồi JSON ra thư mục `dump/` để phục vụ phân tích. | `zalo-next --dump` |
+| `--dump`, `-d` | Lưu các gói phản hồi JSON ra thư mục `dump/` để phục vụ phân tích. | `zalo-next --dump` |
+| `--dump-raw` | Như `--dump` nhưng giữ dữ liệu thô chưa giải mã. | `zalo-next --dump-raw` |
 
 ---
 
@@ -38,15 +43,17 @@ Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dù
    **Tạo / Làm mới mã QR**, kiểm tra mạng (tắt VPN) rồi quét lại. Hướng dẫn này cũng có ngay dưới mã QR.
 
 ### 2.2. Nhắn tin & Gợi ý Sticker tự động
-- **Tìm kiếm và lọc hội thoại:** Sử dụng ô tìm kiếm phía trên danh sách bên trái (hỗ trợ tìm tiếng Việt không dấu) hoặc lọc theo các tab *Tất cả*, *Cá nhân*, *Nhóm*.
+- **Tìm kiếm và lọc hội thoại:** Sử dụng ô tìm kiếm (`Esc` để xóa và thoát ô tìm kiếm) phía trên danh sách bên trái (hỗ trợ tìm tiếng Việt không dấu) hoặc lọc theo các tab *Tất cả*, *Cá nhân*, *Nhóm*.
 - **Gợi ý nhãn dán khi đang gõ:**
   - Khi nhập từ khóa hoặc cụm từ ngắn trong ô chat (`xin chào`, `cảm ơn`, `ok`, `haha`, `buồn`, `khóc`, `nhớ`, `cố lên`, `mệt quá`, `đi chơi`, `trà sữa`...), ứng dụng tự động truy vấn API sticker của Zalo và hiển thị dải gợi ý phía trên khung soạn thảo.
   - Bấm trực tiếp vào sticker để gửi, hoặc dùng phím mũi tên `↑` để chọn lên thanh gợi ý, `←` / `→` để di chuyển, `Enter` để gửi và `Esc` để đóng.
   - Bấm biểu tượng kính lúp ở góc phải thanh gợi ý để mở toàn bộ kết quả tìm kiếm của từ khóa đó trong bảng Sticker Picker.
-- **Kho nhãn dán (Sticker Picker):**
-  - Bấm biểu tượng nhãn dán cạnh ô nhập tin nhắn để mở bảng chọn.
-  - Tab **Tìm kiếm** tự động tìm nhãn dán ngay khi gõ từ khóa mà không cần bấm Enter.
-  - Tab **Kho nhãn** cho phép duyệt và ghim các bộ nhãn dán từ máy chủ Zalo.
+- **Bảng Sticker / Emoji / GIF:**
+  - Bấm biểu tượng nhãn dán cạnh ô nhập tin nhắn để mở bảng nổi phía trên khung soạn thảo, kiểu Zalo Web, với ba tab **STICKER**, **EMOJI**, **GIF**.
+  - **STICKER:** ô tìm kiếm tự tìm khi gõ (không cần Enter), mục *Gần đây* và phổ biến, duyệt từng bộ qua thanh bộ nhãn phía dưới, nút **+** mở kho để thêm bộ mới. Bấm vào nhãn dán để gửi.
+  - **EMOJI:** bấm để chèn vào vị trí con trỏ, bảng vẫn mở để chèn tiếp (không tự gửi).
+  - **GIF:** xem xu hướng hoặc tìm theo từ khóa, bấm vào GIF để gửi.
+  - `Esc` hoặc bấm ra ngoài để đóng bảng. Mục *Gần đây* được ghi nhớ giữa các lần mở app.
 - **Tương tác trên tin nhắn:**
   - Nhấp chuột phải vào bong bóng tin nhắn để thả cảm xúc (reaction), trả lời trích dẫn, chuyển tiếp, sao chép nội dung, ghim, đánh dấu sao, thu hồi tin nhắn với mọi người hoặc xóa ở phía cá nhân.
   - **Nhấp đúp** vào một tin nhắn để trả lời nhanh. Trong nhóm, ô soạn tin tự chèn `@Tên` người gửi ở đầu (có thể xoá như tag thường). Nhấn `Esc` hoặc nút `✕` để thoát chế độ trả lời.
@@ -57,12 +64,36 @@ Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dù
 - **Nhắc tên (@mention) trong nhóm:** gõ `@` để mở danh sách thành viên, dùng `↑`/`↓` để chọn, `Tab`/`Enter` để chèn, `Esc` để đóng. Tag hiển thị màu xanh và người được tag sẽ nhận thông báo.
 - **Tìm và gửi GIF:** gõ `@gif` để xem GIF xu hướng, hoặc `@gif <từ khoá>` (ví dụ `@gif hello`) để tìm. Dùng phím mũi tên để chọn, `Enter` để gửi, `Esc` để đóng; bấm chuột vào GIF cũng gửi ngay. Bật/tắt ở **Cài đặt → Tiện ích → Gợi ý @ → Tìm kiếm GIF**.
 - **Ảnh và tệp:**
+  - Nhiều ảnh gửi cùng lúc hiển thị thành **album dạng lưới** như Zalo. Trong khung xem ảnh, nút sao chép là nút chia đôi: bấm để sao chép theo mặc định đã chọn (ảnh hoặc liên kết), bấm mũi tên để đổi.
   - Dán ảnh trực tiếp từ clipboard (`Ctrl+V` trên Windows/Linux, `⌘V` trên macOS): ảnh chụp màn hình, ảnh copy từ trình duyệt/Preview, hoặc tệp ảnh copy trong Finder. Ảnh hiện ở khung xem trước, nhập chú thích rồi nhấn `Enter` để gửi.
   - **Kéo-thả tệp** vào cửa sổ chat: khi kéo, khung chat hiện hai vùng — thả vào vùng tin nhắn (**Gửi nhanh**) để gửi ngay, hoặc thả vào ô soạn tin (**Xem trước khi gửi**) để đính kèm, xem lại, nhập chú thích rồi nhấn `Enter`. Vùng đang trỏ chuột được tô sáng.
 
 ### 2.3. Gọi thoại và gọi video 1-1
 - Trong cuộc trò chuyện cá nhân, bấm biểu tượng điện thoại hoặc máy quay ở góc phải thanh tiêu đề hội thoại để bắt đầu cuộc gọi.
+- Khi có cuộc gọi đến, cửa sổ cuộc gọi hiện **luôn nằm trên cùng** kèm thông báo hệ thống "Cuộc gọi đến"; bấm **Nghe** để trả lời. Gọi video cần `ffmpeg` trong `PATH` (`brew install ffmpeg`). Hiện chưa hiển thị camera của điện thoại và hình Zalo-next gửi đi còn mờ (xem `tasks/video-call-quality.md`).
 - Thiết bị thu âm (Mic) và máy ảnh (Camera) có thể chọn trực tiếp trong cửa sổ cuộc gọi hoặc tại mục **Cài đặt -> Cài đặt chung**.
+
+### 2.4. Trợ lý AI (`@AI`)
+
+1. Vào **Cài đặt → Trợ lý AI**, bật trợ lý, nhập **Base URL** tương thích OpenAI (ví dụ `https://api.example.com/v1`;
+   `http://localhost:11434/v1` cho Ollama), **API key** và **Model**, rồi bấm **Kiểm tra kết nối**.
+2. Trong bất kỳ cuộc trò chuyện nào gõ `@AI <câu hỏi>` rồi Enter. AI trả lời bằng một bong bóng riêng như người thứ ba;
+   **chỉ mình bạn thấy**, không gửi gì tới Zalo và người kia không biết.
+3. Chuột phải vào tin của AI để **Sao chép**, **Trả lời** (tiếp tục hỏi AI), **Tạo lại câu trả lời** hoặc **Xóa**
+   (chỉ xóa trên máy này).
+4. **Chia sẻ nội dung cuộc trò chuyện**: mặc định tắt, AI chỉ thấy câu hỏi của bạn. Bật ở Cài đặt (mặc định chung) hoặc
+   ngay ở khung soạn tin khi gõ `@AI` (từng cuộc trò chuyện) để AI đọc văn bản các tin gần đây và tóm tắt/gợi ý tốt hơn.
+   Nhóm chat luôn hỏi xác nhận lần đầu vì có tin nhắn của người khác. Liên kết, ảnh và tệp không bao giờ được gửi.
+5. API key nằm trong tệp riêng tư `ai_secret.json` (không nằm trong `app_settings.json`). Biến môi trường
+   `CTDOZ_BASE_URL`, `CTDOZ_API_KEY`, `CTDOZ_MODEL` luôn ưu tiên hơn cài đặt.
+6. **Đọc trước ngữ cảnh (tùy chọn, mặc định tắt):** ở Cài đặt → Trợ lý AI, đồng ý cho AI đọc, chọn các cuộc trò chuyện
+   rồi bật công tắc. AI sẽ tóm tắt trước ở nền và giữ bản tóm tắt **chỉ trong bộ nhớ** (không lưu ra đĩa) để trả lời
+   `@AI` nhanh hơn. Xem [AI_TRO_LY.md](AI_TRO_LY.md) mục 11.
+
+### 2.5. Giao diện, chạy nền và cập nhật
+- **Cài đặt → Giao diện:** chọn Sáng / Tối / Hệ thống, bảng màu gợi ý, màu chủ đạo, màu điểm nhấn và bong bóng tin nhắn tùy chỉnh (có xem trước), phông chữ, thu phóng, bật/tắt và tốc độ hiệu ứng; **Khôi phục mặc định** để quay lại ban đầu.
+- **Chạy nền:** bấm nút đóng cửa sổ chỉ ẩn app, vẫn nhận tin nhắn, thông báo và cuộc gọi. Mở lại từ icon ở menu bar; thoát hẳn bằng menu đó hoặc `Ctrl+Q`.
+- **Cập nhật:** app tự kiểm tra mỗi 30 phút; hoặc vào **Cài đặt → Cập nhật** để kiểm tra thủ công.
 
 ---
 
@@ -102,21 +133,3 @@ cargo run --release --bin test_fetch -- --send <USER_ID> "Nội dung tin nhắn"
 # Gửi thử tin nhắn nhóm
 cargo run --release --bin test_fetch -- --send-group <GROUP_ID> "Nội dung tin nhắn"
 ```
-
-## Trợ lý AI (`@AI`)
-
-1. Vào **Cài đặt → Trợ lý AI**, bật trợ lý, nhập **Base URL** tương thích OpenAI (ví dụ `https://api.example.com/v1`;
-   `http://localhost:11434/v1` cho Ollama), **API key** và **Model**, rồi bấm **Kiểm tra kết nối**.
-2. Trong bất kỳ cuộc trò chuyện nào gõ `@AI <câu hỏi>` rồi Enter. AI trả lời bằng một bong bóng riêng như người thứ ba;
-   **chỉ mình bạn thấy**, không gửi gì tới Zalo và người kia không biết.
-3. Chuột phải vào tin của AI để **Sao chép**, **Trả lời** (tiếp tục hỏi AI), **Tạo lại câu trả lời** hoặc **Xóa**
-   (chỉ xóa trên máy này).
-4. **Chia sẻ nội dung cuộc trò chuyện**: mặc định tắt, AI chỉ thấy câu hỏi của bạn. Bật ở Cài đặt (mặc định chung) hoặc
-   ngay ở khung soạn tin khi gõ `@AI` (từng cuộc trò chuyện) để AI đọc văn bản các tin gần đây và tóm tắt/gợi ý tốt hơn.
-   Nhóm chat luôn hỏi xác nhận lần đầu vì có tin nhắn của người khác. Liên kết, ảnh và tệp không bao giờ được gửi.
-5. API key nằm trong tệp riêng tư `ai_secret.json` (không nằm trong `app_settings.json`). Biến môi trường
-   `CTDOZ_BASE_URL`, `CTDOZ_API_KEY`, `CTDOZ_MODEL` luôn ưu tiên hơn cài đặt.
-6. **Đọc trước ngữ cảnh (tùy chọn, mặc định tắt):** ở Cài đặt → Trợ lý AI, đồng ý cho AI đọc, chọn các cuộc trò chuyện
-   rồi bật công tắc. AI sẽ tóm tắt trước ở nền và giữ bản tóm tắt **chỉ trong bộ nhớ** (không lưu ra đĩa) để trả lời
-   `@AI` nhanh hơn. Xem `docs/AI_TRO_LY.md` mục 11.
-
