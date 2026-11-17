@@ -1,5 +1,5 @@
 ---
-name: ctdozlite (ứng dụng desktop egui)
+name: Zalo-next (ứng dụng desktop egui)
 description: Ứng dụng Zalo native gọn nhẹ, tối ưu cho người dùng làm việc cả ngày; nền One Dark, bong bóng chat kiểu Zalo PC.
 colors:
   dark-bg-app: "#181A1F"
@@ -88,7 +88,7 @@ components:
     padding: "6px 2.5px"
 ---
 
-# Design System: ctdozlite (ứng dụng desktop egui)
+# Design System: Zalo-next (ứng dụng desktop egui)
 
 > Tài liệu này mô tả **app desktop** (`src/gui/`).
 > Giá trị màu, bo góc, khoảng cách ở đây được đọc trực tiếp từ code (`src/gui/theme.rs`, `messages.rs`, `workspace.rs`, `main.rs`). Khi code đổi thì cập nhật file này trong cùng commit.
@@ -98,7 +98,7 @@ components:
 
 **Creative North Star: "Bàn làm việc ban đêm"** *(tên gọi do người viết đề xuất, chỉnh lại nếu bạn có tên khác)*
 
-ctdozlite là công cụ để mở cả ngày, không phải trang để ngắm. Giao diện tối, trầm, ít màu: mặt phẳng xám xanh kiểu One Dark làm nền, một màu xanh duy nhất để chỉ hành động, và bong bóng chat giữ dáng quen thuộc của Zalo PC để người dùng không phải học lại. Bản sáng dùng đúng màu xanh Zalo `#0068FF` trên nền trắng và canvas xanh xám nhạt như Zalo PC.
+Zalo-next là công cụ để mở cả ngày, không phải trang để ngắm. Giao diện tối, trầm, ít màu: mặt phẳng xám xanh kiểu One Dark làm nền, một màu xanh duy nhất để chỉ hành động, và bong bóng chat giữ dáng quen thuộc của Zalo PC để người dùng không phải học lại. Bản sáng dùng đúng màu xanh Zalo `#0068FF` trên nền trắng và canvas xanh xám nhạt như Zalo PC.
 
 Mật độ vừa phải, thiên về đọc nhanh: chữ nhỏ (đa số 11.5–13.5px), bo góc nhỏ (6–8px), viền 1px mảnh thay vì bóng đổ nặng. Biểu cảm nằm ở chi tiết chính xác (avatar, pill cảm xúc, thanh hover), không nằm ở trang trí.
 

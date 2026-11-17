@@ -4253,7 +4253,7 @@ const GITHUB_REPO: &str = "minhkhang1008/ctdozlite-next";
 pub(crate) async fn fetch_github_latest_release() -> Result<UpdateCheckResult, String> {
     let current_ver = env!("CARGO_PKG_VERSION").to_string();
     let client = reqwest::Client::builder()
-        .user_agent(format!("ctdozlite/{current_ver}"))
+        .user_agent(format!("zalo-next/{current_ver}"))
         .timeout(Duration::from_secs(12))
         .build()
         .map_err(|e| format!("Khởi tạo HTTP client thất bại: {e}"))?;
@@ -4366,7 +4366,7 @@ async fn apply_github_release_update(
     ctx: &egui::Context,
 ) -> Result<bool, String> {
     let client = reqwest::Client::builder()
-        .user_agent(format!("ctdozlite/{target_version}"))
+        .user_agent(format!("zalo-next/{target_version}"))
         .timeout(Duration::from_secs(240))
         .build()
         .map_err(|e| format!("Khởi tạo HTTP client thất bại: {e}"))?;

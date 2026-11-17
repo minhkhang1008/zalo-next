@@ -1,7 +1,8 @@
-/// User-facing product name (window title, header, notifications). Technical identifiers
-/// (binary, bundle id, data directory, eframe storage key) stay `ctdozlite` so existing data
-/// and notification permissions carry over.
-pub const APP_DISPLAY_NAME: &str = "ctdozlite-next";
+/// User-facing product name (window title, header, notifications). The macOS bundle id
+/// (`com.ctdoteam1110.ctdozlite`) and the data directory (`Application Support/ctdozlite`) keep
+/// the legacy `ctdozlite` identifier on purpose, so existing logins, message databases and
+/// notification/microphone/camera permissions carry over after the rename to Zalo-next.
+pub const APP_DISPLAY_NAME: &str = "Zalo-next";
 
 pub mod account_manager;
 pub mod audio;

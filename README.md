@@ -1,4 +1,4 @@
-# ctdozlite-next
+# Zalo-next
 
 Client Zalo desktop gọn nhẹ viết bằng Rust, là phiên bản tự phát triển từ
 [ctdozlite](https://github.com/ctdoteam1110/ctdozlite) theo trải nghiệm và nhu cầu cá nhân,
@@ -35,11 +35,11 @@ Danh sách đầy đủ: [CHANGELOG](CHANGELOG.md).
 ```bash
 brew tap minhkhang1008/tap
 brew trust minhkhang1008/tap     # Homebrew yêu cầu bạn xác nhận tin tap bên thứ ba
-brew install --cask ctdozlite-next
+brew install --cask zalo-next
 ```
 
 `brew trust` là bước Homebrew bắt buộc với mọi tap ngoài kho chính thức; tap này chỉ chứa
-[một tệp cask](https://github.com/minhkhang1008/homebrew-tap/blob/main/Casks/ctdozlite-next.rb) đọc được.
+[một tệp cask](https://github.com/minhkhang1008/homebrew-tap/blob/main/Casks/zalo-next.rb) đọc được.
 
 **Hoặc trình cài đặt một lệnh** (đọc được toàn bộ, in rõ từng bước và hỏi trước khi cài):
 
@@ -56,8 +56,8 @@ bash install-macos.sh
 ```
 
 **Tải `.dmg` thủ công:** vào [Releases](https://github.com/minhkhang1008/ctdozlite-next/releases), tải
-`ctdozlite-<phiên bản>-macos-arm64.dmg` (Apple Silicon) hoặc `-x86_64` (Intel), kéo app vào
-Applications. Lần đầu mở macOS sẽ chặn: chạy `xattr -cr /Applications/ctdozlite.app` hoặc vào
+`zalo-next-<phiên bản>-macos-arm64.dmg` (Apple Silicon) hoặc `-x86_64` (Intel), kéo app vào
+Applications. Lần đầu mở macOS sẽ chặn: chạy `xattr -cr /Applications/Zalo-next.app` hoặc vào
 **System Settings → Privacy & Security → Open Anyway**.
 
 **Tự build:** cần Rust 1.75+, Xcode Command Line Tools và CMake.
@@ -73,7 +73,7 @@ Chi tiết: [Cài đặt & phát hành](docs/CAI_DAT.md).
 
 ### An toàn & minh bạch
 
-ctdozlite-next chưa được Apple "công chứng" (việc này cần tài khoản trả phí 99 USD/năm), nên macOS
+Zalo-next chưa được Apple "công chứng" (việc này cần tài khoản trả phí 99 USD/năm), nên macOS
 chặn app khi tải bằng trình duyệt. Thay vì yêu cầu bạn tắt bảo vệ của macOS, mọi bước đều kiểm chứng được:
 
 - **Mã nguồn mở:** toàn bộ mã của app và [trình cài đặt](scripts/install-macos.sh) nằm trong repo này.
@@ -81,21 +81,21 @@ chặn app khi tải bằng trình duyệt. Thay vì yêu cầu bạn tắt bả
   build từ mã nguồn, không build trên máy cá nhân.
 - **Kiểm tra được nguồn gốc:** mỗi bản phát hành có `SHA256SUMS.txt`; từ v0.2.2 có thêm chứng nhận nguồn gốc của GitHub.
   Có `gh` (GitHub CLI) thì chạy:
-  `gh attestation verify ctdozlite-<phiên bản>-macos-arm64.dmg --repo minhkhang1008/ctdozlite-next`
+  `gh attestation verify zalo-next-<phiên bản>-macos-arm64.dmg --repo minhkhang1008/ctdozlite-next`
   — kết quả "Verification succeeded" nghĩa là tệp đúng do workflow của repo này build ra.
 - **Trình cài đặt chỉ làm 5 việc:** tải `.dmg` từ GitHub Releases → đối chiếu SHA-256 → kiểm tra chữ ký
   → chép vào Applications → gỡ cờ "tải từ Internet" cho riêng app này. Không cài dịch vụ chạy nền,
   không sửa cài đặt hệ thống, không tắt Gatekeeper, không gửi dữ liệu đi đâu.
-- **Gỡ cài đặt:** kéo `ctdozlite.app` vào Thùng rác (dữ liệu ở `~/Library/Application Support/ctdozlite`).
+- **Gỡ cài đặt:** kéo `Zalo-next.app` vào Thùng rác (dữ liệu ở `~/Library/Application Support/ctdozlite`).
 
 ## Sử dụng nhanh
 
 | Lệnh | Tác dụng |
 |---|---|
-| `ctdozlite --gui` | Mở giao diện đồ hoạ (mặc định) |
-| `ctdozlite --tui --qr` | Giao diện terminal, đăng nhập bằng QR |
-| `ctdozlite --data-dir <thư mục>` | Dùng thư mục dữ liệu riêng (mỗi tài khoản một thư mục) |
-| `ctdozlite --dev` | Bật Dev Inspector để xem log mạng khi gỡ lỗi |
+| `zalo-next --gui` | Mở giao diện đồ hoạ (mặc định) |
+| `zalo-next --tui --qr` | Giao diện terminal, đăng nhập bằng QR |
+| `zalo-next --data-dir <thư mục>` | Dùng thư mục dữ liệu riêng (mỗi tài khoản một thư mục) |
+| `zalo-next --dev` | Bật Dev Inspector để xem log mạng khi gỡ lỗi |
 
 Dữ liệu (phiên đăng nhập, lịch sử, cài đặt) nằm ở `~/Library/Application Support/ctdozlite`
 khi chạy bản `.app`, hoặc ở thư mục `--data-dir` nếu bạn chỉ định. Không chia sẻ `session.json`

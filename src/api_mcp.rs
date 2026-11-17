@@ -120,7 +120,7 @@ pub async fn handle_mcp_request(
             "result": {
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
-                    "name": "ctdozlite-mcp",
+                    "name": "zalo-next-mcp",
                     "version": env!("CARGO_PKG_VERSION")
                 },
                 "capabilities": {
@@ -197,7 +197,7 @@ pub async fn handle_mcp_request(
                 "tools": [
                     {
                         "name": "zalo_status",
-                        "description": "Kiểm tra trạng thái phiên đăng nhập ctdozlite và thống kê dữ liệu cục bộ",
+                        "description": "Kiểm tra trạng thái phiên đăng nhập Zalo-next và thống kê dữ liệu cục bộ",
                         "inputSchema": {
                             "type": "object",
                             "properties": {}
@@ -339,7 +339,7 @@ async fn execute_tool_call(
                 false,
                 json!({
                     "ok": true,
-                    "app": "ctdozlite",
+                    "app": "zalo-next",
                     "version": env!("CARGO_PKG_VERSION"),
                     "logged_in": logged_in,
                     "uin": uin,
@@ -524,7 +524,7 @@ async fn execute_tool_call(
     }
 }
 
-/// Run the MCP JSON-RPC 2.0 server over `stdin`/`stdout` (`ctdozlite --mcp`).
+/// Run the MCP JSON-RPC 2.0 server over `stdin`/`stdout` (`zalo-next --mcp`).
 pub async fn run_mcp_stdio_server(session: Arc<Mutex<Session>>, db_path: &str) -> Result<()> {
     use std::io::{BufRead, Write};
     let stdin = std::io::stdin();
@@ -864,7 +864,7 @@ mod tests {
                 id: "r2".into(),
                 keyword: "/ping".into(),
                 match_mode: "prefix".into(),
-                reply_text: "Pong từ ctdozlite!".into(),
+                reply_text: "Pong từ Zalo-next!".into(),
                 enabled: true,
                 scope: "all".into(),
             },
@@ -915,7 +915,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(init_resp["result"]["serverInfo"]["name"], "ctdozlite-mcp");
+        assert_eq!(init_resp["result"]["serverInfo"]["name"], "zalo-next-mcp");
 
         // 2. MCP tools/list
         let tools_resp = handle_mcp_request(

@@ -378,7 +378,7 @@ impl crate::session::Session {
                 .cmp(&a.last_action_time.unwrap_or(0))
         });
 
-        // 3. Nạp bài đăng Nhật ký từ cơ sở dữ liệu tin nhắn/nhật ký của chính ctdozlite
+        // 3. Nạp bài đăng Nhật ký từ cơ sở dữ liệu tin nhắn/nhật ký của chính Zalo-next
         // Tuyệt đối không đọc đường dẫn cứng trong test_lab/ để không làm sai lệch dữ liệu của người dùng khác.
         let local_db =
             std::env::var("ZALO_TIMELINE_DB").unwrap_or_else(|_| "zalo_history.db".to_string());

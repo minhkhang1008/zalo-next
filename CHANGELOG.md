@@ -3,10 +3,13 @@
 Mọi thay đổi đáng chú ý của `ctdozlite` được ghi nhận tại tệp này theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/) và [Semantic Versioning](https://semver.org/).
 Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes](docs/adr/0003-changelog-policy.md).
 
-> **ctdozlite-next** bắt đầu từ phiên bản `0.2.0`. Các phiên bản từ `0.1.0` trở về trước là lịch sử của
+> **Zalo-next** (trước đây là ctdozlite-next) bắt đầu từ phiên bản `0.2.0`. Các phiên bản từ `0.1.0` trở về trước là lịch sử của
 > dự án gốc [ctdoteam1110/ctdozlite](https://github.com/ctdoteam1110/ctdozlite), giữ lại để tham khảo; các liên kết issue trong đó trỏ về repo gốc.
 
 ## [Unreleased]
+
+### Changed (Thay đổi)
+- **Đổi tên thành Zalo-next:** tên app macOS là `Zalo-next.app` (menu About / Hide / Quit cũng đọc "Zalo-next"), tệp thực thi và gói phát hành là `zalo-next-*` (cask Homebrew `zalo-next`). Giữ nguyên bundle id và thư mục dữ liệu `~/Library/Application Support/ctdozlite` để không mất đăng nhập, lịch sử và quyền thông báo/micro/camera. Gói `.deb` / `.rpm` mới thay thế gói `ctdozlite` cũ.
 
 ## [0.3.2] - 2026-11-14
 

@@ -24,7 +24,7 @@ pub fn credential_free_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(15))
-        .user_agent("ctdozlite-next-media/0.2")
+        .user_agent("zalo-next-media/0.2")
         .build()
 }
 pub const ACTIVE_JOBS: usize = 4;

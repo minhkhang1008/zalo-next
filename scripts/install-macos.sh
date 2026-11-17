@@ -1,17 +1,17 @@
 #!/bin/bash
 # =============================================================================================
-#  Trình cài đặt ctdozlite-next cho macOS — mã nguồn mở, đọc được toàn bộ trước khi chạy.
+#  Trình cài đặt Zalo-next cho macOS — mã nguồn mở, đọc được toàn bộ trước khi chạy.
 #  Nguồn: https://github.com/minhkhang1008/ctdozlite-next/blob/main/scripts/install-macos.sh
 #
 #  Script này CHỈ làm đúng 5 việc, theo thứ tự, và hỏi bạn trước khi cài:
 #    1. Tải tệp .dmg chính thức từ GitHub Releases của repo trên (đúng chip Apple Silicon/Intel).
 #    2. Đối chiếu SHA-256 với SHA256SUMS.txt của cùng bản phát hành — sai là dừng ngay.
-#    3. Kiểm tra chữ ký mã (codesign) của ctdozlite.app bên trong.
-#    4. Chép ctdozlite.app vào /Applications (chỉ xin mật khẩu nếu thư mục cần quyền quản trị).
+#    3. Kiểm tra chữ ký mã (codesign) của Zalo-next.app bên trong.
+#    4. Chép Zalo-next.app vào /Applications (chỉ xin mật khẩu nếu thư mục cần quyền quản trị).
 #    5. Gỡ cờ "tải từ Internet" (com.apple.quarantine) cho riêng app này rồi mở app.
 #
 #  Script KHÔNG: cài dịch vụ chạy nền, sửa cài đặt hệ thống, tắt Gatekeeper, gửi dữ liệu đi đâu,
-#  hay tải gì khác ngoài 2 tệp ở github.com nói trên. Xoá app = kéo ctdozlite.app vào Thùng rác.
+#  hay tải gì khác ngoài 2 tệp ở github.com nói trên. Xoá app = kéo Zalo-next.app vào Thùng rác.
 #
 #  Vì sao cần bước 5: app chưa được Apple "công chứng" (cần tài khoản trả phí 99 USD/năm), nên
 #  macOS chặn mọi app tải bằng trình duyệt chưa công chứng. Tải bằng Terminal + kiểm tra SHA-256 là
@@ -24,7 +24,7 @@ set -euo pipefail
 
 REPO="minhkhang1008/ctdozlite-next"
 APP_DIR="${CTDOZ_APP_DIR:-/Applications}"
-APP_NAME="ctdozlite.app"
+APP_NAME="Zalo-next.app"
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -48,7 +48,7 @@ case "${VERSION}" in
   ''|*[!0-9.]*) die "Không xác định được phiên bản mới nhất (nhận được: '${VERSION}')." ;;
 esac
 
-DMG="ctdozlite-${VERSION}-${SUFFIX}.dmg"
+DMG="zalo-next-${VERSION}-${SUFFIX}.dmg"
 BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
 TMP="$(mktemp -d)"
 MOUNT=""
@@ -58,7 +58,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-say "ctdozlite-next — trình cài đặt mã nguồn mở"
+say "Zalo-next — trình cài đặt mã nguồn mở"
 note "Phiên bản : v${VERSION} (${CHIP})"
 note "Tải từ    : ${BASE}/${DMG}"
 note "Cài vào   : ${APP_DIR}/${APP_NAME}"
@@ -86,14 +86,14 @@ note "Chữ ký hợp lệ (ký ad-hoc bởi GitHub Actions, chưa công chứng
 
 # Hỏi xác nhận (đọc từ bàn phím ngay cả khi script được chạy qua "curl … | bash").
 if [ -z "${CTDOZ_YES:-}" ] && [ -r /dev/tty ]; then
-  printf '\n    Cài ctdozlite-next v%s vào %s? [Y/n] ' "${VERSION}" "${APP_DIR}"
+  printf '\n    Cài Zalo-next v%s vào %s? [Y/n] ' "${VERSION}" "${APP_DIR}"
   read -r reply < /dev/tty || reply=""
   case "${reply}" in
     [nN]*) die "Đã huỷ theo yêu cầu, không thay đổi gì." ;;
   esac
 fi
 
-say "[4/5] Cài ctdozlite.app vào ${APP_DIR}…"
+say "[4/5] Cài Zalo-next.app vào ${APP_DIR}…"
 # Đóng bản đang chạy từ đúng vị trí cài (nếu có) để thay được; không đụng tới app nào khác.
 pkill -f "${APP_DIR}/${APP_NAME}/Contents/MacOS/" 2>/dev/null && sleep 1 || true
 SUDO=""
@@ -108,7 +108,7 @@ say "[5/5] Gỡ cờ \"tải từ Internet\" cho riêng ${APP_NAME}…"
 ${SUDO} xattr -dr com.apple.quarantine "${APP_DIR}/${APP_NAME}" 2>/dev/null || true
 
 echo
-say "Xong! Đã cài ctdozlite-next v${VERSION}."
+say "Xong! Đã cài Zalo-next v${VERSION}."
 note "Các bản sau app tự cập nhật. Gỡ cài đặt: kéo ${APP_DIR}/${APP_NAME} vào Thùng rác"
 note "(dữ liệu nằm ở ~/Library/Application Support/ctdozlite)."
 if [ -z "${CTDOZ_NO_OPEN:-}" ]; then

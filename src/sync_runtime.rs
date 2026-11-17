@@ -64,7 +64,7 @@ pub(crate) async fn ensure_ready(mut progress: impl FnMut(f32, String)) -> Resul
     );
     // A dedicated credential-free client prevents leaking Zalo cookies to public asset requests.
     let client = reqwest::Client::builder()
-        .user_agent(concat!("ctdozlite-next/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("zalo-next/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(60))
         .build()?;

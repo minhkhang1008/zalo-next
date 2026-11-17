@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(cargo metadata --locked --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "ctdozlite") | .version')
+            | jq -r '.packages[] | select(.name == "zalo-next") | .version')
           test -n "$version"
 
           if [[ -n "${INPUT_VERSION:-}" ]]; then
@@ -120,17 +120,19 @@ jobs:
         run: cargo test --locked
       - name: Build release binary (static libopus & sqlite3)
         run: |
-          cargo build --release --locked --bin ctdozlite
-          strip target/release/ctdozlite
+          cargo build --release --locked --bin zalo-next
+          strip target/release/zalo-next
           chmod +x packaging/linux/install.sh packaging/linux/uninstall.sh
       - name: Package .deb (Debian / Ubuntu 22.04+ / Linux Mint / Kali / Pop!_OS / Zorin)
         run: |
-          mkdir -p dist pkg_deb/DEBIAN pkg_deb/usr/bin pkg_deb/usr/share/applications pkg_deb/usr/share/icons/hicolor/256x256/apps
-          cp target/release/ctdozlite pkg_deb/usr/bin/ctdozlite
-          cp packaging/linux/ctdozlite.desktop pkg_deb/usr/share/applications/ctdozlite.desktop
-          cp src/assets/app_icon.png pkg_deb/usr/share/icons/hicolor/256x256/apps/ctdozlite.png
+          mkdir -p dist pkg_deb/DEBIAN pkg_deb/usr/bin pkg_deb/usr/share/applications pkg_deb/usr/share/icons/hicolor/512x512/apps
+          cp target/release/zalo-next pkg_deb/usr/bin/zalo-next
+          cp packaging/linux/zalo-next.desktop pkg_deb/usr/share/applications/zalo-next.desktop
+          cp src/assets/app_icon.png pkg_deb/usr/share/icons/hicolor/512x512/apps/zalo-next.png
           cat > pkg_deb/DEBIAN/control << EOF
-          Package: ctdozlite
+          Package: zalo-next
+          Replaces: ctdozlite
+          Conflicts: ctdozlite
           Version: ${VERSION}
           Section: net
           Priority: optional
@@ -140,17 +142,18 @@ jobs:
           Maintainer: TIPC1110 <tienichpc1110@gmail.com>
           Description: Lightweight native Zalo PC client written in Rust
           EOF
-          dpkg-deb --build --root-owner-group pkg_deb "dist/ctdozlite_${VERSION}_amd64.deb"
+          dpkg-deb --build --root-owner-group pkg_deb "dist/zalo-next_${VERSION}_amd64.deb"
       - name: Package .rpm (Fedora / RHEL / Rocky / AlmaLinux / CentOS / openSUSE)
         run: |
           mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-          cat > rpmbuild/SPECS/ctdozlite.spec << 'EOF'
-          Name:           ctdozlite
+          cat > rpmbuild/SPECS/zalo-next.spec << 'EOF'
+          Name:           zalo-next
+          Obsoletes:      ctdozlite
           Version:        @VERSION@
           Release:        1
           Summary:        Native Zalo Desktop Client written in Rust
           License:        MIT OR Apache-2.0
-          URL:            https://github.com/ctdoteam1110/ctdozlite
+          URL:            https://github.com/minhkhang1008/ctdozlite-next
           BuildArch:      x86_64
           AutoReqProv:    no
           Requires:       alsa-lib, libX11, libxcb, libxkbcommon
@@ -161,58 +164,58 @@ jobs:
           %install
           mkdir -p %{buildroot}/usr/bin
           mkdir -p %{buildroot}/usr/share/applications
-          mkdir -p %{buildroot}/usr/share/icons/hicolor/256x256/apps
-          install -m 755 %{_topdir}/../target/release/ctdozlite %{buildroot}/usr/bin/ctdozlite
-          install -m 644 %{_topdir}/../packaging/linux/ctdozlite.desktop %{buildroot}/usr/share/applications/ctdozlite.desktop
-          install -m 644 %{_topdir}/../src/assets/app_icon.png %{buildroot}/usr/share/icons/hicolor/256x256/apps/ctdozlite.png
+          mkdir -p %{buildroot}/usr/share/icons/hicolor/512x512/apps
+          install -m 755 %{_topdir}/../target/release/zalo-next %{buildroot}/usr/bin/zalo-next
+          install -m 644 %{_topdir}/../packaging/linux/zalo-next.desktop %{buildroot}/usr/share/applications/zalo-next.desktop
+          install -m 644 %{_topdir}/../src/assets/app_icon.png %{buildroot}/usr/share/icons/hicolor/512x512/apps/zalo-next.png
 
           %files
-          /usr/bin/ctdozlite
-          /usr/share/applications/ctdozlite.desktop
-          /usr/share/icons/hicolor/256x256/apps/ctdozlite.png
+          /usr/bin/zalo-next
+          /usr/share/applications/zalo-next.desktop
+          /usr/share/icons/hicolor/512x512/apps/zalo-next.png
           EOF
-          sed -i "s/@VERSION@/${VERSION}/" rpmbuild/SPECS/ctdozlite.spec
-          rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/ctdozlite.spec
-          cp rpmbuild/RPMS/x86_64/*.rpm "dist/ctdozlite-${VERSION}-1.x86_64.rpm"
+          sed -i "s/@VERSION@/${VERSION}/" rpmbuild/SPECS/zalo-next.spec
+          rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/zalo-next.spec
+          cp rpmbuild/RPMS/x86_64/*.rpm "dist/zalo-next-${VERSION}-1.x86_64.rpm"
       - name: Package .AppImage (Universal single-file executable for all Linux distros)
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
-          cp target/release/ctdozlite AppDir/usr/bin/ctdozlite
-          cp packaging/linux/ctdozlite.desktop AppDir/ctdozlite.desktop
-          cp packaging/linux/ctdozlite.desktop AppDir/usr/share/applications/ctdozlite.desktop
-          cp src/assets/app_icon.png AppDir/ctdozlite.png
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/512x512/apps
+          cp target/release/zalo-next AppDir/usr/bin/zalo-next
+          cp packaging/linux/zalo-next.desktop AppDir/zalo-next.desktop
+          cp packaging/linux/zalo-next.desktop AppDir/usr/share/applications/zalo-next.desktop
+          cp src/assets/app_icon.png AppDir/zalo-next.png
           cp src/assets/app_icon.png AppDir/.DirIcon
-          cp src/assets/app_icon.png AppDir/usr/share/icons/hicolor/256x256/apps/ctdozlite.png
+          cp src/assets/app_icon.png AppDir/usr/share/icons/hicolor/512x512/apps/zalo-next.png
           cat > AppDir/AppRun << 'EOF'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "${0}")")"
           export PATH="${HERE}/usr/bin:${PATH}"
           if [ $# -eq 0 ]; then
-              exec "${HERE}/usr/bin/ctdozlite" --gui
+              exec "${HERE}/usr/bin/zalo-next" --gui
           else
-              exec "${HERE}/usr/bin/ctdozlite" "$@"
+              exec "${HERE}/usr/bin/zalo-next" "$@"
           fi
           EOF
           chmod +x AppDir/AppRun
           curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "dist/ctdozlite-${VERSION}-x86_64.AppImage"
-          chmod +x "dist/ctdozlite-${VERSION}-x86_64.AppImage"
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "dist/zalo-next-${VERSION}-x86_64.AppImage"
+          chmod +x "dist/zalo-next-${VERSION}-x86_64.AppImage"
       - name: Package portable .tar.gz with universal install.sh (Arch / Manjaro / Gentoo / Void / any Linux)
         run: |
-          STAGE="ctdozlite-${VERSION}-linux-x86_64"
+          STAGE="zalo-next-${VERSION}-linux-x86_64"
           mkdir -p "$STAGE"
-          cp target/release/ctdozlite "$STAGE/ctdozlite"
+          cp target/release/zalo-next "$STAGE/zalo-next"
           cp packaging/linux/install.sh "$STAGE/install.sh"
           cp packaging/linux/uninstall.sh "$STAGE/uninstall.sh"
-          cp packaging/linux/ctdozlite.desktop "$STAGE/ctdozlite.desktop"
-          cp src/assets/app_icon.png "$STAGE/ctdozlite.png"
+          cp packaging/linux/zalo-next.desktop "$STAGE/zalo-next.desktop"
+          cp src/assets/app_icon.png "$STAGE/zalo-next.png"
           cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/"
-          chmod +x "$STAGE/ctdozlite" "$STAGE/install.sh" "$STAGE/uninstall.sh"
+          chmod +x "$STAGE/zalo-next" "$STAGE/install.sh" "$STAGE/uninstall.sh"
           tar -czf "dist/${STAGE}.tar.gz" "$STAGE"
       - uses: actions/upload-artifact@v6
         with:
-          name: ctdozlite-linux-packages
+          name: zalo-next-linux-packages
           path: dist/*
 
   # 2. Legacy Linux build on Debian 11 Bullseye (glibc 2.31) for older distros (Ubuntu 20.04, Debian 11, Mint 20, RHEL/Rocky 8.x/9.x)
@@ -244,15 +247,17 @@ jobs:
           key: bullseye-glibc231
       - name: Build legacy release binary & .deb + .tar.gz
         run: |
-          cargo build --release --locked --bin ctdozlite
-          strip target/release/ctdozlite
+          cargo build --release --locked --bin zalo-next
+          strip target/release/zalo-next
           chmod +x packaging/linux/install.sh packaging/linux/uninstall.sh
-          mkdir -p dist pkg_deb/DEBIAN pkg_deb/usr/bin pkg_deb/usr/share/applications pkg_deb/usr/share/icons/hicolor/256x256/apps
-          cp target/release/ctdozlite pkg_deb/usr/bin/ctdozlite
-          cp packaging/linux/ctdozlite.desktop pkg_deb/usr/share/applications/ctdozlite.desktop
-          cp src/assets/app_icon.png pkg_deb/usr/share/icons/hicolor/256x256/apps/ctdozlite.png
+          mkdir -p dist pkg_deb/DEBIAN pkg_deb/usr/bin pkg_deb/usr/share/applications pkg_deb/usr/share/icons/hicolor/512x512/apps
+          cp target/release/zalo-next pkg_deb/usr/bin/zalo-next
+          cp packaging/linux/zalo-next.desktop pkg_deb/usr/share/applications/zalo-next.desktop
+          cp src/assets/app_icon.png pkg_deb/usr/share/icons/hicolor/512x512/apps/zalo-next.png
           cat > pkg_deb/DEBIAN/control << EOF
-          Package: ctdozlite
+          Package: zalo-next
+          Replaces: ctdozlite
+          Conflicts: ctdozlite
           Version: ${VERSION}
           Section: net
           Priority: optional
@@ -262,21 +267,21 @@ jobs:
           Maintainer: TIPC1110 <tienichpc1110@gmail.com>
           Description: Lightweight native Zalo PC client written in Rust (glibc 2.31+ compatible)
           EOF
-          dpkg-deb --build --root-owner-group pkg_deb "dist/ctdozlite_${VERSION}_legacy_glibc2.31_amd64.deb"
+          dpkg-deb --build --root-owner-group pkg_deb "dist/zalo-next_${VERSION}_legacy_glibc2.31_amd64.deb"
 
-          STAGE="ctdozlite-${VERSION}-linux-x86_64-legacy-glibc2.31"
+          STAGE="zalo-next-${VERSION}-linux-x86_64-legacy-glibc2.31"
           mkdir -p "$STAGE"
-          cp target/release/ctdozlite "$STAGE/ctdozlite"
+          cp target/release/zalo-next "$STAGE/zalo-next"
           cp packaging/linux/install.sh "$STAGE/install.sh"
           cp packaging/linux/uninstall.sh "$STAGE/uninstall.sh"
-          cp packaging/linux/ctdozlite.desktop "$STAGE/ctdozlite.desktop"
-          cp src/assets/app_icon.png "$STAGE/ctdozlite.png"
+          cp packaging/linux/zalo-next.desktop "$STAGE/zalo-next.desktop"
+          cp src/assets/app_icon.png "$STAGE/zalo-next.png"
           cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/"
-          chmod +x "$STAGE/ctdozlite" "$STAGE/install.sh" "$STAGE/uninstall.sh"
+          chmod +x "$STAGE/zalo-next" "$STAGE/install.sh" "$STAGE/uninstall.sh"
           tar -czf "dist/${STAGE}.tar.gz" "$STAGE"
       - uses: actions/upload-artifact@v6
         with:
-          name: ctdozlite-linux-legacy
+          name: zalo-next-linux-legacy
           path: dist/*
 
   windows-exe:
@@ -297,15 +302,15 @@ jobs:
       - name: Build release binary & installer
         shell: pwsh
         run: |
-          cargo build --release --locked --bin ctdozlite
+          cargo build --release --locked --bin zalo-next
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target\release\ctdozlite.exe "dist\ctdozlite-$($env:VERSION)-portable-windows-x86_64.exe"
-          Compress-Archive -Path "dist\ctdozlite-$($env:VERSION)-portable-windows-x86_64.exe","README.md","LICENSE-MIT","LICENSE-APACHE" -DestinationPath "dist\ctdozlite-$($env:VERSION)-portable-windows-x86_64.zip" -Force
+          Copy-Item target\release\zalo-next.exe "dist\zalo-next-$($env:VERSION)-portable-windows-x86_64.exe"
+          Compress-Archive -Path "dist\zalo-next-$($env:VERSION)-portable-windows-x86_64.exe","README.md","LICENSE-MIT","LICENSE-APACHE" -DestinationPath "dist\zalo-next-$($env:VERSION)-portable-windows-x86_64.zip" -Force
           iscc "/DMyAppVersion=$($env:VERSION)" packaging\windows\installer.iss
-          Move-Item dist\ctdozlite-setup-windows-x86_64.exe "dist\ctdozlite-$($env:VERSION)-setup-windows-x86_64.exe" -Force
+          Move-Item dist\zalo-next-setup-windows-x86_64.exe "dist\zalo-next-$($env:VERSION)-setup-windows-x86_64.exe" -Force
       - uses: actions/upload-artifact@v6
         with:
-          name: ctdozlite-windows-exe
+          name: zalo-next-windows-exe
           path: |
             dist/*.exe
             dist/*.zip
@@ -345,34 +350,34 @@ jobs:
 
           echo "=== [1/4] Building Apple Silicon (aarch64-apple-darwin) ==="
           CMAKE_TOOLCHAIN_FILE="$PWD/packaging/macos/toolchain-arm64.cmake" \
-            cargo build --release --locked --target aarch64-apple-darwin --bin ctdozlite
+            cargo build --release --locked --target aarch64-apple-darwin --bin zalo-next
 
           echo "=== [2/4] Building Mac Intel (x86_64-apple-darwin) ==="
           CMAKE_TOOLCHAIN_FILE="$PWD/packaging/macos/toolchain-x86_64.cmake" \
-            cargo build --release --locked --target x86_64-apple-darwin --bin ctdozlite
+            cargo build --release --locked --target x86_64-apple-darwin --bin zalo-next
 
           echo "=== [3/4] Creating Universal Binary (arm64 + x86_64) via lipo ==="
           mkdir -p target/universal-apple-darwin/release
           lipo -create \
-            target/aarch64-apple-darwin/release/ctdozlite \
-            target/x86_64-apple-darwin/release/ctdozlite \
-            -output target/universal-apple-darwin/release/ctdozlite
-          lipo -info target/universal-apple-darwin/release/ctdozlite
+            target/aarch64-apple-darwin/release/zalo-next \
+            target/x86_64-apple-darwin/release/zalo-next \
+            -output target/universal-apple-darwin/release/zalo-next
+          lipo -info target/universal-apple-darwin/release/zalo-next
 
           echo "=== Verifying zero Homebrew dynamic library dependencies ==="
-          otool -L target/aarch64-apple-darwin/release/ctdozlite
-          otool -L target/x86_64-apple-darwin/release/ctdozlite
-          if otool -L target/universal-apple-darwin/release/ctdozlite | grep -E '/opt/homebrew|/usr/local'; then
+          otool -L target/aarch64-apple-darwin/release/zalo-next
+          otool -L target/x86_64-apple-darwin/release/zalo-next
+          if otool -L target/universal-apple-darwin/release/zalo-next | grep -E '/opt/homebrew|/usr/local'; then
             echo "ERROR: Binary still links against Homebrew dylib!"
             exit 1
           fi
 
-          echo "=== Generating AppIcon.icns from src/assets/app_icon.png ==="
+          echo "=== Generating AppIcon.icns from src/assets/app_icon_1024.png ==="
           mkdir -p build_icon/AppIcon.iconset
           for sz in 16 32 128 256 512; do
-            sips -s format png -z $sz $sz src/assets/app_icon.png --out "build_icon/AppIcon.iconset/icon_${sz}x${sz}.png" >/dev/null
+            sips -s format png -z $sz $sz src/assets/app_icon_1024.png --out "build_icon/AppIcon.iconset/icon_${sz}x${sz}.png" >/dev/null
             sz2=$((sz * 2))
-            sips -s format png -z $sz2 $sz2 src/assets/app_icon.png --out "build_icon/AppIcon.iconset/icon_${sz}x${sz}@2x.png" >/dev/null
+            sips -s format png -z $sz2 $sz2 src/assets/app_icon_1024.png --out "build_icon/AppIcon.iconset/icon_${sz}x${sz}@2x.png" >/dev/null
           done
           iconutil -c icns build_icon/AppIcon.iconset -o build_icon/AppIcon.icns || true
 
@@ -384,29 +389,29 @@ jobs:
             local vol_name="$3"
             local stage_dir
             stage_dir="$(mktemp -d)"
-            mkdir -p "$stage_dir/ctdozlite.app/Contents/MacOS"
-            mkdir -p "$stage_dir/ctdozlite.app/Contents/Resources"
-            cp "$bin_path" "$stage_dir/ctdozlite.app/Contents/MacOS/ctdozlite"
-            chmod +x "$stage_dir/ctdozlite.app/Contents/MacOS/ctdozlite"
+            mkdir -p "$stage_dir/Zalo-next.app/Contents/MacOS"
+            mkdir -p "$stage_dir/Zalo-next.app/Contents/Resources"
+            cp "$bin_path" "$stage_dir/Zalo-next.app/Contents/MacOS/Zalo-next"
+            chmod +x "$stage_dir/Zalo-next.app/Contents/MacOS/Zalo-next"
             case "$bin_path" in
               target/aarch64-*) swift_targets="arm64-apple-macosx11.0" ;;
               target/x86_64-*) swift_targets="x86_64-apple-macosx11.0" ;;
               *) swift_targets="arm64-apple-macosx11.0,x86_64-apple-macosx11.0" ;;
             esac
             # Public builds deliberately omit externally licensed codec JS/WASM.
-            env -u HISTORY_CODEC_ASSETS SWIFT_TARGETS="$swift_targets" bash native/macos/build-native-helpers.sh "$stage_dir/ctdozlite.app"
+            env -u HISTORY_CODEC_ASSETS SWIFT_TARGETS="$swift_targets" bash native/macos/build-native-helpers.sh "$stage_dir/Zalo-next.app"
             helper_arches="$(lipo -archs "$bin_path" | xargs | tr ' ' ',')"
-            python3 packaging/macos/validate-native-bundle.py "$stage_dir/ctdozlite.app" --arches "$helper_arches"
-            cp packaging/macos/Info.plist "$stage_dir/ctdozlite.app/Contents/Info.plist"
-            plutil -replace CFBundleShortVersionString -string "$VER" "$stage_dir/ctdozlite.app/Contents/Info.plist"
-            printf 'APPL????' > "$stage_dir/ctdozlite.app/Contents/PkgInfo"
+            python3 packaging/macos/validate-native-bundle.py "$stage_dir/Zalo-next.app" --arches "$helper_arches"
+            cp packaging/macos/Info.plist "$stage_dir/Zalo-next.app/Contents/Info.plist"
+            plutil -replace CFBundleShortVersionString -string "$VER" "$stage_dir/Zalo-next.app/Contents/Info.plist"
+            printf 'APPL????' > "$stage_dir/Zalo-next.app/Contents/PkgInfo"
             if [ -f build_icon/AppIcon.icns ]; then
-              cp build_icon/AppIcon.icns "$stage_dir/ctdozlite.app/Contents/Resources/AppIcon.icns"
+              cp build_icon/AppIcon.icns "$stage_dir/Zalo-next.app/Contents/Resources/AppIcon.icns"
             fi
-            xattr -cr "$stage_dir/ctdozlite.app" || true
-            codesign --force --sign - "$stage_dir/ctdozlite.app/Contents/Helpers/DailyNotifier.app"
-            codesign --force --deep --sign - "$stage_dir/ctdozlite.app"
-            codesign --verify --deep --strict "$stage_dir/ctdozlite.app"
+            xattr -cr "$stage_dir/Zalo-next.app" || true
+            codesign --force --sign - "$stage_dir/Zalo-next.app/Contents/Helpers/DailyNotifier.app"
+            codesign --force --deep --sign - "$stage_dir/Zalo-next.app"
+            codesign --verify --deep --strict "$stage_dir/Zalo-next.app"
             ln -s /Applications "$stage_dir/Applications"
 
             for attempt in 1 2 3 4 5; do
@@ -421,14 +426,14 @@ jobs:
           }
 
           echo "=== [4/4] Packaging .dmg installers (Apple Silicon, Intel, Universal) ==="
-          package_dmg "target/aarch64-apple-darwin/release/ctdozlite" "dist/ctdozlite-${VER}-macos-arm64.dmg" "ctdozlite (Apple Silicon)"
-          package_dmg "target/x86_64-apple-darwin/release/ctdozlite" "dist/ctdozlite-${VER}-macos-x86_64.dmg" "ctdozlite (Intel)"
-          package_dmg "target/universal-apple-darwin/release/ctdozlite" "dist/ctdozlite-${VER}-macos.dmg" "ctdozlite"
+          package_dmg "target/aarch64-apple-darwin/release/zalo-next" "dist/zalo-next-${VER}-macos-arm64.dmg" "Zalo-next (Apple Silicon)"
+          package_dmg "target/x86_64-apple-darwin/release/zalo-next" "dist/zalo-next-${VER}-macos-x86_64.dmg" "Zalo-next (Intel)"
+          package_dmg "target/universal-apple-darwin/release/zalo-next" "dist/zalo-next-${VER}-macos.dmg" "Zalo-next"
           python3 tests/native_packaging.py
           ls -lh dist/*.dmg
       - uses: actions/upload-artifact@v6
         with:
-          name: ctdozlite-macos-dmg
+          name: zalo-next-macos-dmg
           path: dist/*.dmg
   release:
     name: Publish GitHub Release
@@ -464,7 +469,7 @@ jobs:
 
           ver = os.environ["VERSION"]
           tag = os.environ["TAG_NAME"]
-          repo = "https://github.com/ctdoteam1110/ctdozlite"
+          repo = "https://github.com/minhkhang1008/ctdozlite-next"
           assets = []
           for line in Path("SHA256SUMS.txt").read_text().splitlines():
               parts = line.strip().split(None, 1)
@@ -522,7 +527,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.tag_name }}
-          name: ctdozlite-next ${{ needs.prepare.outputs.tag_name }}
+          name: Zalo-next ${{ needs.prepare.outputs.tag_name }}
           files: release_assets/*
           generate_release_notes: false
           body_path: release_notes.md
@@ -536,16 +541,16 @@ jobs:
         run: |
           set -euo pipefail
           sums=release_assets/SHA256SUMS.txt
-          sha_for() { awk -v f="ctdozlite-${VERSION}-$1.dmg" '{ n = $2; sub(/^\*/, "", n); sub(/^\.\//, "", n); if (n == f) print $1 }' "$sums"; }
+          sha_for() { awk -v f="zalo-next-${VERSION}-$1.dmg" '{ n = $2; sub(/^\*/, "", n); sub(/^\.\//, "", n); if (n == f) print $1 }' "$sums"; }
           arm="$(sha_for macos-arm64)"; intel="$(sha_for macos-x86_64)"
           test -n "$arm" && test -n "$intel"
           git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/minhkhang1008/homebrew-tap.git" tap
-          cask=tap/Casks/ctdozlite-next.rb
+          cask=tap/Casks/zalo-next.rb
           sed -i -E "s/^  version \"[^\"]+\"/  version \"${VERSION}\"/" "$cask"
           sed -i -E "s/(sha256 arm: +\")[0-9a-f]{64}/\1${arm}/" "$cask"
           sed -i -E "s/(intel: +\")[0-9a-f]{64}/\1${intel}/" "$cask"
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "ctdozlite-next ${VERSION}" || exit 0
+          git commit -am "Zalo-next ${VERSION}" || exit 0
           git push

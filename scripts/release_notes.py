@@ -44,7 +44,7 @@ def short_bullet(body: str) -> str:
 
 
 def build(version: str, changelog: str, repo: str) -> str:
-    out = [f"## ctdozlite-next v{version}", ""]
+    out = [f"## Zalo-next v{version}", ""]
     for line in section(changelog, version):
         s = line.strip()
         if s.startswith("### "):
@@ -69,7 +69,7 @@ def build(version: str, changelog: str, repo: str) -> str:
         "(kiểm tra SHA-256 + chữ ký, hỏi trước khi cài):",
         "",
         "```bash",
-        "brew tap minhkhang1008/tap && brew trust minhkhang1008/tap && brew install --cask ctdozlite-next",
+        "brew tap minhkhang1008/tap && brew trust minhkhang1008/tap && brew install --cask zalo-next",
         f"curl -fsSL https://raw.githubusercontent.com/{repo or 'minhkhang1008/ctdozlite-next'}"
         "/main/scripts/install-macos.sh | bash",
         "```",

@@ -3151,7 +3151,7 @@ impl ZaloGuiApp {
                                             }
                                         } else {
                                             format!(
-                                                "🚀 Đã có bản cập nhật mới ctdozlite v{} trên GitHub Releases!",
+                                                "🚀 Đã có bản cập nhật mới Zalo-next v{} trên GitHub Releases!",
                                                 upd.latest_version
                                             )
                                         };

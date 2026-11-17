@@ -1,6 +1,6 @@
 # Glossary
 
-Ubiquitous language for `ctdozlite`. Use these terms verbatim in issues, ADRs, tests and code identifiers; do not drift to synonyms.
+Ubiquitous language for `zalo-next`. Use these terms verbatim in issues, ADRs, tests and code identifiers; do not drift to synonyms.
 
 > Purpose: keep protocol vocabulary, UI vocabulary and storage vocabulary aligned. Update via `/domain-modeling` when a term is resolved or renamed.
 

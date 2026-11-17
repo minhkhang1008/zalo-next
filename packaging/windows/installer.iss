@@ -1,4 +1,4 @@
-#define MyAppName "ctdozlite"
+#define MyAppName "Zalo-next"
 ; Sentinel default: CI injects the real version from Cargo.toml at build time via
 ;   iscc /DMyAppVersion=<version> packaging/windows/installer.iss
 ; A local build without that flag intentionally gets 0.0.0 instead of a stale version.
@@ -6,8 +6,8 @@
 #define MyAppVersion "0.0.0"
 #endif
 #define MyAppPublisher "ctdoteam1110"
-#define MyAppURL "https://github.com/ctdoteam1110/ctdozlite"
-#define MyAppExeName "ctdozlite.exe"
+#define MyAppURL "https://github.com/minhkhang1008/ctdozlite-next"
+#define MyAppExeName "zalo-next.exe"
 
 [Setup]
 AppId={{8F4E2D1A-9C3B-4E7F-A6D5-1B2C3D4E5F60}
@@ -23,7 +23,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..\..\dist
-OutputBaseFilename=ctdozlite-setup-windows-x86_64
+OutputBaseFilename=zalo-next-setup-windows-x86_64
 SetupIconFile=..\..\src\assets\app_icon.ico
 ; Use standard ZIP/DEFLATE non-solid packaging instead of solid LZMA2 streams and
 ; embed complete PE VersionInfo metadata so unsigned Inno Setup installers do not
@@ -33,7 +33,7 @@ SolidCompression=no
 SignedUninstaller=no
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription=ctdozlite Native Desktop Client Installer
+VersionInfoDescription=zalo-next Native Desktop Client Installer
 VersionInfoTextVersion={#MyAppVersion}
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}.0

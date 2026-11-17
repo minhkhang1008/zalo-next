@@ -8277,7 +8277,7 @@ pub(crate) async fn sync_device_name(s: &Session) -> String {
             }
         }
     }
-    "ctdozlite-next".into()
+    crate::APP_DISPLAY_NAME.into()
 }
 
 /// Compatibility wrapper for callers without a current thread snapshot.

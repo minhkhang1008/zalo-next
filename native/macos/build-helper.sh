@@ -40,9 +40,9 @@ if [[ "$HELPER" == DailyNotifier ]]; then
     ICONSET="$(mktemp -d)/AppIcon.iconset"
     mkdir -p "$ICONSET"
     for sz in 16 32 128 256 512; do
-        sips -s format png -z "$sz" "$sz" "$ROOT/src/assets/app_icon.png" --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
+        sips -s format png -z "$sz" "$sz" "$ROOT/src/assets/app_icon_1024.png" --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
         sz2=$((sz * 2))
-        sips -s format png -z "$sz2" "$sz2" "$ROOT/src/assets/app_icon.png" --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
+        sips -s format png -z "$sz2" "$sz2" "$ROOT/src/assets/app_icon_1024.png" --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
     done
     iconutil -c icns "$ICONSET" -o "$BUNDLE/Contents/Resources/AppIcon.icns"
     rm -rf "$(dirname "$ICONSET")"

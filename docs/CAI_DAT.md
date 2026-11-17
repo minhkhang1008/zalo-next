@@ -7,7 +7,7 @@
 ```bash
 brew tap minhkhang1008/tap
 brew trust minhkhang1008/tap     # Homebrew yêu cầu bạn xác nhận tin tap bên thứ ba
-brew install --cask ctdozlite-next
+brew install --cask zalo-next
 ```
 
 Homebrew bắt buộc xác nhận tin cậy (`brew trust`) với mọi tap ngoài kho chính thức. Tap
@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/minhkhang1008/ctdozlite-next/main/s
 ```
 
 Script (`scripts/install-macos.sh`) tải bản mới nhất đúng chip, đối chiếu SHA-256 với
-`SHA256SUMS.txt`, chép `ctdozlite.app` vào `/Applications`, gỡ cờ cách ly rồi mở app. Gatekeeper chỉ
+`SHA256SUMS.txt`, chép `Zalo-next.app` vào `/Applications`, gỡ cờ cách ly rồi mở app. Gatekeeper chỉ
 chặn tệp có cờ `com.apple.quarantine` mà trình duyệt gắn vào; `curl` không gắn cờ này. Tuỳ chọn:
 `CTDOZ_VERSION=0.2.1` (cài bản cụ thể), `CTDOZ_APP_DIR=~/Applications`, `CTDOZ_YES=1` (không hỏi),
 `CTDOZ_NO_OPEN=1`. Kiểm tra nguồn gốc tệp: `gh attestation verify <tệp> --repo minhkhang1008/ctdozlite-next`
@@ -39,16 +39,16 @@ Tải tại [Releases](https://github.com/minhkhang1008/ctdozlite-next/releases)
 
 | Máy | Tệp |
 |---|---|
-| Apple Silicon (M1–M4) | `ctdozlite-<phiên bản>-macos-arm64.dmg` |
-| Intel | `ctdozlite-<phiên bản>-macos-x86_64.dmg` |
-| Chạy được trên cả hai | `ctdozlite-<phiên bản>-macos.dmg` |
+| Apple Silicon (M1–M4) | `zalo-next-<phiên bản>-macos-arm64.dmg` |
+| Intel | `zalo-next-<phiên bản>-macos-x86_64.dmg` |
+| Chạy được trên cả hai | `zalo-next-<phiên bản>-macos.dmg` |
 
-Mở `.dmg`, kéo `ctdozlite.app` vào **Applications**. App chỉ được ký tạm (ad-hoc), chưa được Apple
+Mở `.dmg`, kéo `Zalo-next.app` vào **Applications**. App chỉ được ký tạm (ad-hoc), chưa được Apple
 công chứng, nên lần đầu mở macOS sẽ chặn. Vào **System Settings → Privacy & Security → Open Anyway**,
 hoặc chạy:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/ctdozlite.app
+xattr -dr com.apple.quarantine /Applications/Zalo-next.app
 ```
 
 Muốn kiểm tra tệp tải về còn nguyên vẹn: tải kèm `SHA256SUMS.txt`, đặt cùng thư mục rồi chạy
@@ -61,7 +61,7 @@ Sau khi cài, app tự kiểm tra bản mới khi mở và mỗi 30 phút. Khi c
 app tải `.dmg`, kiểm tra SHA-256 và chữ ký, thay chính nó rồi tự mở lại. Nếu app không nằm ở thư mục
 ghi được, app sẽ mở `.dmg` để bạn cài tay.
 
-Gỡ cài đặt: xoá `ctdozlite.app`; muốn xoá cả dữ liệu thì xoá thêm
+Gỡ cài đặt: xoá `Zalo-next.app`; muốn xoá cả dữ liệu thì xoá thêm
 `~/Library/Application Support/ctdozlite`.
 
 ## Tự build từ mã nguồn
@@ -77,7 +77,7 @@ cargo run --release -- --gui
 Đóng gói `.dmg` trên máy (đúng kiến trúc của máy đang dùng; số phiên bản đọc từ `Cargo.toml`):
 
 ```bash
-bash packaging/package-local.sh            # → dist/ctdozlite-<phiên bản>-macos-<arch>.dmg
+bash packaging/package-local.sh            # → dist/zalo-next-<phiên bản>-macos-<arch>.dmg
 ```
 
 `.dmg` này đã kèm helper thông báo DailyNotifier và icon. Trên Windows dùng
@@ -98,7 +98,7 @@ toàn nếu commit chỉ sửa tài liệu. Khi bạn đẩy một tag `v*`, CI 
    ```bash
    git commit -am "chore(release): v0.2.0"
    git push origin main
-   git tag -a v0.2.0 -m "ctdozlite-next v0.2.0"
+   git tag -a v0.2.0 -m "Zalo-next v0.2.0"
    git push origin v0.2.0
    ```
 

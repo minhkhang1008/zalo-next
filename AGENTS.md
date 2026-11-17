@@ -9,7 +9,7 @@ Operating guide for AI agents and humans working in this repository.
 
 ## Project
 
-`ctdozlite-next` (crate `ctdozlite`, library `zalo_rust`) is a native Zalo desktop client written in Rust: `egui` GUI, `ratatui` TUI, a Tokio worker for network I/O, and a local SQLite message store. No Node.js, no Electron, no Chromium.
+`Zalo-next` (crate `zalo-next`, library `zalo_rust`) is a native Zalo desktop client written in Rust: `egui` GUI, `ratatui` TUI, a Tokio worker for network I/O, and a local SQLite message store. No Node.js, no Electron, no Chromium.
 
 - Repository: <https://github.com/minhkhang1008/ctdozlite-next> (personal fork of <https://github.com/ctdoteam1110/ctdozlite>)
 - Rust 1.75+ / edition 2021
@@ -20,7 +20,7 @@ Operating guide for AI agents and humans working in this repository.
 | Task | Command |
 | :--- | :--- |
 | Build (debug) | `cargo build --locked` |
-| Build (release binary) | `cargo build --release --locked --bin ctdozlite` |
+| Build (release binary) | `cargo build --release --locked --bin zalo-next` |
 | Test | `cargo test --locked` |
 | Format | `cargo fmt --all` |
 | Lint | `cargo clippy --all-targets -- -D warnings` |
@@ -75,7 +75,7 @@ MUST read the corresponding standard file under `docs/standards/` before modifyi
 
 ---
 
-# Hướng dẫn dành cho Codex Agent (Bản cá nhân ctdozlite trên macOS)
+# Hướng dẫn dành cho Codex Agent (Bản cá nhân Zalo-next trên macOS)
 
 ## 1. Nguyên tắc bảo mật bất khả xâm phạm (ĐÃ VÁ - TUYỆT ĐỐI KHÔNG GỠ BỎ)
 1. **Không REST/MCP; Auto-Updater chỉ trỏ về fork:** REST/MCP server (`api_mcp.rs`) bị vô hiệu hóa chủ đích, không kích hoạt lại. Auto-updater được chủ repo bật lại (2026-11-12) và **chỉ** được kiểm tra/tải từ `github.com/minhkhang1008/ctdozlite-next` (`GITHUB_REPO` trong `src/gui/worker.rs`); luôn xác minh SHA-256 trước khi cài, không bao giờ gửi cookie/token Zalo tới GitHub, không thêm nguồn cập nhật khác.

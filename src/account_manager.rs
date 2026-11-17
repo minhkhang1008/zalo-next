@@ -1,4 +1,4 @@
-//! Multi-account management for ctdozlite.
+//! Multi-account management for Zalo-next.
 //!
 //! Stores isolated account sessions, thread caches, and history databases in `accounts/<uin>.*`.
 

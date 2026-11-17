@@ -1,12 +1,12 @@
 [package]
-name = "ctdozlite"
+name = "zalo-next"
 version = "0.3.2"
 edition = "2021"
 authors = ["TIPC1110 <tienichpc1110@gmail.com>"]
 description = "Lightweight, high-performance native Zalo PC client written in Rust (zero Node.js, zero Electron)"
 repository = "https://github.com/minhkhang1008/ctdozlite-next"
 license = "MIT OR Apache-2.0"
-default-run = "ctdozlite"
+default-run = "zalo-next"
 
 [dependencies]
 aes = "0.8"
@@ -49,7 +49,7 @@ zip = { version = "=9.5.1", default-features = false, features = ["deflate-flate
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 block2 = "0.5"
-objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSDictionary", "NSGeometry", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSDictionary", "NSGeometry", "NSProcessInfo", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.2", features = ["block2", "NSEvent", "NSPasteboard", "NSPasteboardItem", "NSBitmapImageRep", "NSImageRep", "NSScreen", "NSApplication", "NSResponder", "NSRunningApplication"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
@@ -60,7 +60,7 @@ name = "zalo_rust"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ctdozlite"
+name = "zalo-next"
 path = "src/main.rs"
 
 [[bin]]
@@ -88,7 +88,7 @@ name = "view_feed"
 path = "src/bin/view_feed.rs"
 
 [package.metadata.deb]
-name = "ctdozlite"
+name = "zalo-next"
 maintainer = "TIPC1110 <tienichpc1110@gmail.com>"
 copyright = "2026, TIPC1110 <tienichpc1110@gmail.com>"
 license-file = ["LICENSE-MIT", "0"]
@@ -97,11 +97,10 @@ recommends = "ffmpeg, zenity, xclip, wl-clipboard, fonts-noto-core"
 section = "net"
 priority = "optional"
 assets = [
-    ["target/release/ctdozlite", "usr/bin/", "755"],
-    ["packaging/linux/ctdozlite", "usr/bin/", "755"],
-    ["packaging/linux/ctdozlite.desktop", "usr/share/applications/", "644"],
-    ["src/assets/app_icon.png", "usr/share/icons/hicolor/256x256/apps/ctdozlite.png", "644"],
-    ["README.md", "usr/share/doc/ctdozlite/README.md", "644"],
+    ["target/release/zalo-next", "usr/bin/", "755"],
+    ["packaging/linux/zalo-next.desktop", "usr/share/applications/", "644"],
+    ["src/assets/app_icon.png", "usr/share/icons/hicolor/512x512/apps/zalo-next.png", "644"],
+    ["README.md", "usr/share/doc/zalo-next/README.md", "644"],
 ]
 
 [profile.release]

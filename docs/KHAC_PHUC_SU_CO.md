@@ -12,7 +12,7 @@ liệu khác lần trước không (bản `.app` dùng `~/Library/Application Su
 hoặc `--data-dir` dùng thư mục khác) và thư mục đó có quyền ghi không.
 
 **Chạy hai tài khoản bị đăng xuất lẫn nhau.** Mỗi tài khoản cần một thư mục riêng:
-`ctdozlite --data-dir ~/.ctdozlite-taikhoan2`.
+`zalo-next --data-dir ~/.zalo-next-taikhoan2`.
 
 **Không thấy tin nhắn cũ.** Lịch sử nằm trong thư mục dữ liệu đang dùng. Nếu trước đó bạn chạy với thư
 mục khác, nhập lại bằng **Cài đặt → Đồng bộ tin nhắn → Nhập lịch sử** và chọn tệp `zalo_history.db`
@@ -20,10 +20,10 @@ cũ (việc nhập chỉ gộp thêm, không xoá gì).
 
 ## macOS
 
-**"ctdozlite.app không thể mở được".** App chưa được Apple công chứng: chuột phải → **Open**, hoặc chạy
-`xattr -dr com.apple.quarantine /Applications/ctdozlite.app`.
+**"Zalo-next.app không thể mở được".** App chưa được Apple công chứng: chuột phải → **Open**, hoặc chạy
+`xattr -dr com.apple.quarantine /Applications/Zalo-next.app`.
 
-**Không có thông báo tin nhắn mới.** Vào **System Settings → Notifications** và cho phép ctdozlite (hoặc
+**Không có thông báo tin nhắn mới.** Vào **System Settings → Notifications** và cho phép Zalo-next (hoặc
 DailyNotifier) gửi thông báo.
 
 ## Biên dịch & hiển thị

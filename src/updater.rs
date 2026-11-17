@@ -487,7 +487,7 @@ pub fn parse_github_release_value(
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("ctdozlite v{latest_ver}"));
+        .unwrap_or_else(|| format!("Zalo-next v{latest_ver}"));
 
     let release_notes = rel
         .get("body")
@@ -560,13 +560,13 @@ pub fn parse_github_release_value(
     // Legacy single-asset `latest.json` fallback when `assets` array is absent
     if best_url.is_none() && rel.get("assets").is_none() {
         let fallback_name = match target_os {
-            "windows" => format!("ctdozlite-{latest_ver}-portable-windows-x86_64.exe"),
+            "windows" => format!("zalo-next-{latest_ver}-portable-windows-x86_64.exe"),
             "macos" => match target_arch {
-                "aarch64" => format!("ctdozlite-{latest_ver}-macos-arm64.dmg"),
-                "x86_64" => format!("ctdozlite-{latest_ver}-macos-x86_64.dmg"),
-                _ => format!("ctdozlite-{latest_ver}-macos.dmg"),
+                "aarch64" => format!("zalo-next-{latest_ver}-macos-arm64.dmg"),
+                "x86_64" => format!("zalo-next-{latest_ver}-macos-x86_64.dmg"),
+                _ => format!("zalo-next-{latest_ver}-macos.dmg"),
             },
-            _ => format!("ctdozlite-{latest_ver}-x86_64.AppImage"),
+            _ => format!("zalo-next-{latest_ver}-x86_64.AppImage"),
         };
         best_url = Some(format!(
             "https://github.com/{repo_slug}/releases/download/v{latest_ver}/{fallback_name}"
@@ -694,8 +694,8 @@ pub fn install_macos_app_from_dmg(dmg_bytes: &[u8], bundle: &Path) -> Result<(),
         )
         .map_err(|e| format!("Chữ ký ứng dụng mới không hợp lệ: {e}"))?;
 
-        let staging = parent.join(".ctdozlite-update-staging.app");
-        let backup = parent.join(".ctdozlite-update-backup.app");
+        let staging = parent.join(".zalo-next-update-staging.app");
+        let backup = parent.join(".zalo-next-update-backup.app");
         let _ = std::fs::remove_dir_all(&staging);
         let _ = std::fs::remove_dir_all(&backup);
         run_tool(

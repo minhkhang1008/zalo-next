@@ -1,4 +1,4 @@
-# Hướng dẫn sử dụng ctdozlite-next
+# Hướng dẫn sử dụng Zalo-next
 
 Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diện đồ họa (GUI) và bảng phím tắt của giao diện terminal (TUI).
 
@@ -8,16 +8,16 @@ Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diệ
 
 | Tham số | Ý nghĩa | Ví dụ |
 |---|---|---|
-| `--data-dir <PATH>` | Chọn thư mục lưu phiên, cache, log và cơ sở dữ liệu; đường dẫn tương đối tính từ thư mục khởi chạy. | `ctdozlite --data-dir ./local-data --gui` |
-| `--print-data-dir` | Chuẩn bị và in thư mục dữ liệu rồi thoát, không mở giao diện hay kết nối mạng. | `ctdozlite --print-data-dir` |
-| `--gui` | Chạy chế độ giao diện đồ họa (mặc định nếu không truyền tham số). | `ctdozlite --gui` |
-| `--tui` | Chạy chế độ giao diện dòng lệnh trong terminal. | `ctdozlite --tui` |
-| `--qr` | Yêu cầu tạo mã QR đăng nhập ngay khi khởi động TUI. | `ctdozlite --tui --qr` |
-| `--dev` | Bật thanh công cụ Dev Inspector để xem log mạng và payload giải mã. | `ctdozlite --gui --dev` |
-| `--logout` | Xóa phiên đăng nhập hiện tại (`session.json`) rồi thoát. | `ctdozlite --logout` |
-| `--phone <SỐ>` | Điền sẵn số điện thoại khi thử đăng nhập bằng mật khẩu. | `ctdozlite --tui --phone 0912345678` |
-| `--pass <MK>` | Điền sẵn mật khẩu. | `ctdozlite --tui --phone 0912345678 --pass ...` |
-| `--dump` | Lưu các gói phản hồi JSON ra thư mục `dump/` để phục vụ phân tích. | `ctdozlite --dump` |
+| `--data-dir <PATH>` | Chọn thư mục lưu phiên, cache, log và cơ sở dữ liệu; đường dẫn tương đối tính từ thư mục khởi chạy. | `zalo-next --data-dir ./local-data --gui` |
+| `--print-data-dir` | Chuẩn bị và in thư mục dữ liệu rồi thoát, không mở giao diện hay kết nối mạng. | `zalo-next --print-data-dir` |
+| `--gui` | Chạy chế độ giao diện đồ họa (mặc định nếu không truyền tham số). | `zalo-next --gui` |
+| `--tui` | Chạy chế độ giao diện dòng lệnh trong terminal. | `zalo-next --tui` |
+| `--qr` | Yêu cầu tạo mã QR đăng nhập ngay khi khởi động TUI. | `zalo-next --tui --qr` |
+| `--dev` | Bật thanh công cụ Dev Inspector để xem log mạng và payload giải mã. | `zalo-next --gui --dev` |
+| `--logout` | Xóa phiên đăng nhập hiện tại (`session.json`) rồi thoát. | `zalo-next --logout` |
+| `--phone <SỐ>` | Điền sẵn số điện thoại khi thử đăng nhập bằng mật khẩu. | `zalo-next --tui --phone 0912345678` |
+| `--pass <MK>` | Điền sẵn mật khẩu. | `zalo-next --tui --phone 0912345678 --pass ...` |
+| `--dump` | Lưu các gói phản hồi JSON ra thư mục `dump/` để phục vụ phân tích. | `zalo-next --dump` |
 
 ---
 
@@ -28,7 +28,7 @@ Trên macOS, bản `.app` mặc định lưu dữ liệu trong `~/Library/Applic
 ## 2. Giao diện đồ họa (GUI)
 
 ### 2.1. Đăng nhập
-1. Chạy `./target/release/ctdozlite --gui`.
+1. Chạy `./target/release/zalo-next --gui`.
 2. Mở ứng dụng Zalo trên điện thoại, quét mã QR hiển thị trên màn hình và bấm **Đăng nhập**.
 3. Sau khi xác nhận, phiên làm việc được lưu vào `session.json`. Ở những lần mở tiếp theo, ứng dụng tự nạp lại phiên này mà không cần quét lại mã QR.
 4. Mã QR có hạn khoảng 3 phút; app hiện đếm ngược và tự lấy mã mới khi hết hạn. Nếu điện thoại báo
@@ -68,7 +68,7 @@ Trên macOS, bản `.app` mặc định lưu dữ liệu trong `~/Library/Applic
 
 Khởi chạy:
 ```bash
-./target/release/ctdozlite --tui --qr
+./target/release/zalo-next --tui --qr
 ```
 
 | Phím tắt | Chức năng |

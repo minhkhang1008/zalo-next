@@ -4039,7 +4039,7 @@ impl ZaloGuiApp {
                                 ui.add(
                                     egui::Label::new(
                                         RichText::new(
-                                            "⚠ Lưu ý: Hiện tại ứng dụng không sử dụng máy chủ trung gian, nên chức năng hẹn giờ gửi tin nhắn chỉ khả dụng khi đang chạy ctdozlite.",
+                                            "⚠ Lưu ý: Hiện tại ứng dụng không sử dụng máy chủ trung gian, nên chức năng hẹn giờ gửi tin nhắn chỉ khả dụng khi đang chạy Zalo-next.",
                                         )
                                         .size(12.5)
                                         .color(warn_fg)

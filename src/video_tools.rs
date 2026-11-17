@@ -197,7 +197,7 @@ where
                 attempt.error("Untrusted video tools redirect")
             }
         }))
-        .user_agent(concat!("ctdozlite-next/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("zalo-next/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(180))
         .build()?;
     progress(0.05, "Đang tải công cụ gọi video…".into());

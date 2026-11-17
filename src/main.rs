@@ -18,6 +18,17 @@ pub use zalo_rust::{
 
 pub const POLL_SECS: u64 = 4;
 
+/// Make the default macOS app menu ("About / Hide / Quit …") read `name` even when the binary
+/// is not launched from the bundled `Zalo-next` executable (e.g. `cargo run`). winit builds the
+/// menu from `NSProcessInfo.processName`, so this must run before the event loop starts.
+#[cfg(target_os = "macos")]
+fn set_macos_process_name(name: &str) {
+    use objc2_foundation::{NSProcessInfo, NSString};
+    // SAFETY: called on the main thread before the event loop starts; `setProcessName` only
+    // mutates the process-name string AppKit reads when it builds the default menu.
+    unsafe { NSProcessInfo::processInfo().setProcessName(&NSString::from_str(name)) };
+}
+
 /// Make the live history files belong to the session's account before anything reads them
 /// (restores the parked copy after a logout, or merges a legacy split layout once).
 fn activate_logged_in_account(s: &Session) {
@@ -185,7 +196,7 @@ async fn main() -> Result<()> {
     // Open the native GUI window IMMEDIATELY without blocking on network requests!
     // Background worker in `gui.rs` handles `get_server_info`, `get_friends`, and `poll_new_messages`.
     if force_gui || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone"))) {
-        println!("🚀 Đang khởi chạy giao diện đồ họa ctdozlite (egui)…");
+        println!("🚀 Đang khởi chạy giao diện đồ họa Zalo-next (egui)…");
         #[cfg(target_os = "windows")]
         if dev_mode {
             #[link(name = "kernel32")]
@@ -197,7 +208,7 @@ async fn main() -> Result<()> {
             }
         }
         let mut viewport = eframe::egui::ViewportBuilder::default()
-            .with_app_id("ctdozlite")
+            .with_app_id("zalo-next")
             .with_decorations(false)
             .with_inner_size([1020.0, 700.0])
             .with_min_inner_size([480.0, 360.0])
@@ -225,8 +236,10 @@ async fn main() -> Result<()> {
         );
 
         let app_session = s;
+        #[cfg(target_os = "macos")]
+        set_macos_process_name(zalo_rust::APP_DISPLAY_NAME);
         let res = eframe::run_native(
-            "ctdozlite",
+            zalo_rust::APP_DISPLAY_NAME,
             native_options,
             Box::new(move |cc| {
                 Ok(Box::new(gui::ZaloGuiApp::new(
