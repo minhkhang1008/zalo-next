@@ -116,3 +116,7 @@ cargo run --release --bin test_fetch -- --send-group <GROUP_ID> "Nội dung tin 
    Nhóm chat luôn hỏi xác nhận lần đầu vì có tin nhắn của người khác. Liên kết, ảnh và tệp không bao giờ được gửi.
 5. API key nằm trong tệp riêng tư `ai_secret.json` (không nằm trong `app_settings.json`). Biến môi trường
    `CTDOZ_BASE_URL`, `CTDOZ_API_KEY`, `CTDOZ_MODEL` luôn ưu tiên hơn cài đặt.
+6. **Đọc trước ngữ cảnh (tùy chọn, mặc định tắt):** ở Cài đặt → Trợ lý AI, đồng ý cho AI đọc, chọn các cuộc trò chuyện
+   rồi bật công tắc. AI sẽ tóm tắt trước ở nền và giữ bản tóm tắt **chỉ trong bộ nhớ** (không lưu ra đĩa) để trả lời
+   `@AI` nhanh hơn. Xem `docs/AI_TRO_LY.md` mục 11.
+

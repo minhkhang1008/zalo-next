@@ -135,6 +135,14 @@ pub enum WorkerCmd {
     AiLoadThread {
         thread_id: String,
     },
+    /// Read one chosen conversation in advance and summarise it (kept in memory by the GUI).
+    AiPreload {
+        thread_id: String,
+        thread_name: String,
+        is_group: bool,
+        base_url: String,
+        model: String,
+    },
     AiDelete {
         msg_id: String,
     },
@@ -1274,6 +1282,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     _ => Vec::new(),
                                 };
                                 let _ = tx.send(GuiEvent::AiThreadLoaded { thread_id, messages });
+                            });
+                        }
+                        WorkerCmd::AiPreload { thread_id, thread_name, is_group, base_url, model } => {
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let result = run_ai_preload(&thread_id, &thread_name, is_group, base_url, model, "zalo_history.db".to_string()).await;
+                                let _ = tx.send(GuiEvent::AiDigest { thread_id, result });
                             });
                         }
                         WorkerCmd::AiDelete { msg_id } => {
@@ -4988,6 +5003,61 @@ fn spawn_voice_capture(
     (control, cancelled)
 }
 
+/// Read the chosen conversation from the local history and summarise it with the Assistant. The
+/// result goes back to the GUI and is held in memory only; nothing is written anywhere.
+async fn run_ai_preload(
+    thread_id: &str,
+    thread_name: &str,
+    is_group: bool,
+    base_url: String,
+    model: String,
+    db_path: String,
+) -> Result<crate::ai::Digest, String> {
+    let (id, name) = (thread_id.to_string(), thread_name.to_string());
+    let rows = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::store::StoredMessage>> {
+        let store = crate::store::MessageStore::open(&db_path)?;
+        store.messages_for(&id, 500)
+    })
+    .await
+    .map_err(|_| "Không đọc được lịch sử cục bộ".to_string())?
+    .map_err(|e| format!("Không đọc được lịch sử cục bộ: {e}"))?;
+    let mut covers_until = 0i64;
+    let lines: Vec<crate::ai::TranscriptLine> = rows
+        .iter()
+        .filter(|m| !m.text.trim().is_empty() && !m.msg_type.contains("system"))
+        .map(|m| {
+            let ts = normalize_ts_ms(m.ts);
+            covers_until = covers_until.max(ts);
+            crate::ai::TranscriptLine {
+                time: super::ai_ui::day_time(ts),
+                who: if m.is_outgoing {
+                    "Tôi".to_string()
+                } else if !m.sender_name.trim().is_empty() {
+                    m.sender_name.clone()
+                } else if !is_group {
+                    name.clone()
+                } else {
+                    "Thành viên".to_string()
+                },
+                text: m.text.trim().to_string(),
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return Err("Chưa có tin nhắn để đọc".to_string());
+    }
+    let cfg = tokio::task::spawn_blocking(move || crate::ai::AiConfig::resolve(&base_url, &model))
+        .await
+        .map_err(|_| "Không đọc được cấu hình trợ lý AI".to_string())?
+        .map_err(|e| e.to_string())?;
+    crate::ai::build_digest(thread_id, thread_name, is_group, lines, covers_until, |turns, max_tokens| {
+        let cfg = cfg.clone();
+        async move { crate::ai::chat_completion(&cfg, &turns, max_tokens).await }
+    })
+    .await
+    .map_err(|e| cfg.redact(&e.to_string()))
+}
+
 #[cfg(test)]
 mod ai_worker_tests {
     use super::*;
@@ -5054,6 +5124,7 @@ mod ai_worker_tests {
             quoted: None,
             reply_to_id: None,
             transcript: vec![crate::ai::TranscriptLine { time: "10:00".into(), who: "Sơn".into(), text: "hẹn 7h nhé".into() }],
+            digest: None,
             share,
             base_url: url.into(),
             model: "test-model".into(),
@@ -5109,6 +5180,45 @@ mod ai_worker_tests {
         let store = crate::store::MessageStore::open(&db).unwrap();
         let rows = crate::ai::load_thread(&store.conn, "thread-1", 10).unwrap();
         assert!(rows.iter().all(|m| m.role != AiRole::Error));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[tokio::test]
+    async fn preload_reads_local_history_and_returns_an_in_memory_digest() {
+        let dir = std::env::temp_dir().join(format!("zalo-next-ai-pre-{}-{}", std::process::id(), crate::ai::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history.db").to_string_lossy().to_string();
+        {
+            let mut store = crate::store::MessageStore::open(&db).unwrap();
+            for (i, text) in ["chào", "mai họp lúc 9h", "ok"].iter().enumerate() {
+                store
+                    .upsert_message(&crate::store::StoredMessage {
+                        msg_id: format!("m{i}"),
+                        thread_id: "thread-1".into(),
+                        sender_id: "peer".into(),
+                        sender_name: "Sơn".into(),
+                        text: (*text).into(),
+                        msg_type: "webchat".into(),
+                        ts: 1_700_000_000_000 + i as i64,
+                        is_outgoing: i == 2,
+                        raw_json: String::new(),
+                    })
+                    .unwrap();
+            }
+        }
+        let before: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let (url, server) = fake_ai(vec![r#"{"choices":[{"message":{"content":"Họp lúc 9h mai."}}]}"#]).await;
+        let digest = run_ai_preload("thread-1", "Sơn", false, url, "test-model".into(), db).await.unwrap();
+        assert_eq!(digest.text, "Họp lúc 9h mai.");
+        assert_eq!(digest.message_count, 3);
+        assert_eq!(digest.covers_until_ms, 1_700_000_000_002);
+        let sent = server.await.unwrap().remove(0);
+        assert!(sent.contains("mai họp lúc 9h") && sent.contains("Tôi: ok"));
+        // Nothing but the existing history database exists afterwards: the digest is not stored.
+        let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(before.len(), after.len());
+        // An empty conversation is reported, not summarised.
+        let err = run_ai_preload("nobody", "X", false, "http://127.0.0.1:1/v1".into(), "m".into(), dir.join("history.db").to_string_lossy().to_string()).await.unwrap_err();
+        assert!(err.contains("Chưa có tin nhắn"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

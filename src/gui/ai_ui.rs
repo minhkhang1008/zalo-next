@@ -43,6 +43,16 @@ pub(super) struct State {
     pub models: Vec<String>,
     /// Account the in-memory dialogue belongs to; a change drops it (each account has its own DB).
     pub account: String,
+    /// In-memory pre-read summaries (never persisted), by conversation id.
+    pub digests: HashMap<String, ai::Digest>,
+    /// Conversation being read in advance right now.
+    pub preload_inflight: Option<String>,
+    /// Earliest time the next pre-read may start (spreads the work out).
+    pub preload_next_at: Option<std::time::Instant>,
+    /// Conversations whose last pre-read failed, with the failure time (retry after 5 minutes).
+    pub preload_failed: HashMap<String, std::time::Instant>,
+    pub preload_error: String,
+    pub preload_search: String,
 }
 
 impl State {
@@ -72,7 +82,7 @@ fn hhmm(ts_ms: i64) -> String {
         .unwrap_or_default()
 }
 
-fn day_time(ts_ms: i64) -> String {
+pub(super) fn day_time(ts_ms: i64) -> String {
     use chrono::TimeZone;
     chrono::Local
         .timestamp_millis_opt(ts_ms)
@@ -83,11 +93,11 @@ fn day_time(ts_ms: i64) -> String {
 
 /// Conversation text to share: text only (no files or links), oldest first, newest 800 messages,
 /// capped at `ai::TRANSCRIPT_CAP_CHARS`.
-pub(super) fn transcript_for(thread: &Thread) -> Vec<TranscriptLine> {
+pub(super) fn transcript_for(thread: &Thread, after_ms: i64) -> Vec<TranscriptLine> {
     let mut lines: Vec<TranscriptLine> = thread
         .messages
         .iter()
-        .filter(|m| !is_system_notice_message(m))
+        .filter(|m| !is_system_notice_message(m) && normalize_ts_ms(m.ts) > after_ms)
         .rev()
         .take(800)
         .map(|m| {
@@ -126,6 +136,33 @@ pub(super) fn transcript_for(thread: &Thread) -> Vec<TranscriptLine> {
     lines
 }
 
+/// Next chosen conversation that needs a (re)read: no summary yet, or one that has fallen behind
+/// by more than `DIGEST_REFRESH_AFTER_NEW` messages and is over ten minutes old.
+pub(super) fn next_preload_target<'a>(
+    chosen: &HashSet<String>,
+    threads: &'a [Thread],
+    digests: &HashMap<String, ai::Digest>,
+    failed: &HashSet<String>,
+    now_ms: i64,
+) -> Option<&'a Thread> {
+    threads.iter().find(|t| {
+        if !chosen.contains(&t.id) || failed.contains(&t.id) {
+            return false;
+        }
+        match digests.get(&t.id) {
+            None => true,
+            Some(d) => {
+                let newer = t
+                    .messages
+                    .iter()
+                    .filter(|m| normalize_ts_ms(m.ts) > d.covers_until_ms)
+                    .count();
+                newer > ai::DIGEST_REFRESH_AFTER_NEW && now_ms - d.built_at_ms > 600_000
+            }
+        }
+    })
+}
+
 fn host_of(url: &str) -> String {
     reqwest::Url::parse(url)
         .ok()
@@ -140,7 +177,15 @@ impl ZaloGuiApp {
             .ai_share_threads
             .get(thread_id)
             .copied()
-            .unwrap_or(self.settings.ai_share_default)
+            .unwrap_or(self.ai_preload_active(thread_id) || self.settings.ai_share_default)
+    }
+
+    /// Pre-reading is on, consented to, and this conversation was chosen for it.
+    fn ai_preload_active(&self, thread_id: &str) -> bool {
+        self.settings.ai_enabled
+            && self.settings.ai_preload_enabled
+            && self.settings.ai_preload_consent
+            && self.settings.ai_preload_threads.contains(thread_id)
     }
 
     /// True when Enter in the composer should go to the Assistant instead of Zalo.
@@ -191,6 +236,22 @@ impl ZaloGuiApp {
     ) -> Option<AskRequest> {
         let thread = self.threads.iter().find(|t| t.id == thread_id)?;
         let share = self.ai_share_enabled(thread_id);
+        // With a fresh pre-read summary only the messages after it are sent; a summary that has
+        // fallen far behind is ignored (and rebuilt in the background).
+        let mut digest = None;
+        let mut transcript = Vec::new();
+        if share {
+            if let Some(d) = self.ai.digests.get(thread_id) {
+                let newer = transcript_for(thread, d.covers_until_ms);
+                if newer.len() <= ai::DIGEST_REFRESH_AFTER_NEW * 2 {
+                    digest = Some(d.clone());
+                    transcript = newer;
+                }
+            }
+            if digest.is_none() {
+                transcript = transcript_for(thread, 0);
+            }
+        }
         Some(AskRequest {
             thread_id: thread_id.to_string(),
             thread_name: thread.name.clone(),
@@ -200,11 +261,8 @@ impl ZaloGuiApp {
             user_msg_id,
             reply_to_id: quoted.as_ref().map(|(id, _)| id.clone()),
             quoted: quoted.map(|(_, text)| text),
-            transcript: if share {
-                transcript_for(thread)
-            } else {
-                Vec::new()
-            },
+            transcript,
+            digest,
             share,
             base_url: self.settings.ai_base_url.clone(),
             model: self.settings.ai_model.clone(),
@@ -231,8 +289,10 @@ impl ZaloGuiApp {
         let Some(req) = self.ai_build_request(thread_id, prompt, quoted, Some(user_msg), id) else {
             return;
         };
-        let needs_confirm =
-            req.share && req.is_group && !self.settings.ai_group_confirmed.contains(thread_id);
+        let needs_confirm = req.share
+            && req.is_group
+            && !self.settings.ai_group_confirmed.contains(thread_id)
+            && !self.ai_preload_active(thread_id);
         if needs_confirm {
             self.ai.pending_confirm = Some(req);
         } else {
@@ -320,6 +380,94 @@ impl ZaloGuiApp {
         }
     }
 
+    pub(super) fn ai_on_digest(&mut self, thread_id: String, result: Result<ai::Digest, String>) {
+        if self.ai.preload_inflight.as_deref() == Some(thread_id.as_str()) {
+            self.ai.preload_inflight = None;
+        }
+        // Spread the work out: the next conversation starts a few seconds later.
+        self.ai.preload_next_at =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+        if !self.ai_preload_active(&thread_id) {
+            return; // switched off or deselected while it was running: drop the result
+        }
+        match result {
+            Ok(d) => {
+                self.ai.preload_failed.remove(&thread_id);
+                self.ai.preload_error.clear();
+                self.ai.digests.insert(thread_id, d);
+            }
+            Err(e) => {
+                self.ai.preload_error = e;
+                self.ai
+                    .preload_failed
+                    .insert(thread_id, std::time::Instant::now());
+            }
+        }
+    }
+
+    /// Drop every pre-read summary (switch off, deselect, logout).
+    pub(super) fn ai_clear_digests(&mut self) {
+        self.ai.digests.clear();
+        self.ai.preload_inflight = None;
+        self.ai.preload_failed.clear();
+    }
+
+    /// Start the next pre-read when enabled, consented and idle. One conversation at a time.
+    fn ai_preload_tick(&mut self) {
+        let active = self.settings.ai_enabled
+            && self.settings.ai_preload_enabled
+            && self.settings.ai_preload_consent
+            && !self.settings.ai_preload_threads.is_empty();
+        if !active {
+            if !self.ai.digests.is_empty() || self.ai.preload_inflight.is_some() {
+                self.ai_clear_digests();
+            }
+            return;
+        }
+        if !self.is_logged_in || self.ai.preload_inflight.is_some() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let start_at = *self
+            .ai
+            .preload_next_at
+            .get_or_insert(now + std::time::Duration::from_secs(8));
+        if now < start_at {
+            return;
+        }
+        // Keep only digests of conversations that are still chosen.
+        let chosen = self.settings.ai_preload_threads.clone();
+        self.ai.digests.retain(|id, _| chosen.contains(id));
+        let failed: HashSet<String> = self
+            .ai
+            .preload_failed
+            .iter()
+            .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(300))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let Some(thread) = next_preload_target(
+            &chosen,
+            &self.threads,
+            &self.ai.digests,
+            &failed,
+            ai::now_ms(),
+        ) else {
+            self.ai.preload_next_at = Some(now + std::time::Duration::from_secs(15));
+            return;
+        };
+        let cmd = WorkerCmd::AiPreload {
+            thread_id: thread.id.clone(),
+            thread_name: thread.name.clone(),
+            is_group: thread.is_group,
+            base_url: self.settings.ai_base_url.clone(),
+            model: self.settings.ai_model.clone(),
+        };
+        let id = thread.id.clone();
+        if WORKER_TX.get().is_some_and(|tx| tx.send(cmd).is_ok()) {
+            self.ai.preload_inflight = Some(id);
+        }
+    }
+
     // ---- actions chosen in bubbles ----------------------------------------------------------
 
     pub(super) fn ai_handle_pending_action(&mut self, ctx: &egui::Context) {
@@ -330,8 +478,13 @@ impl ZaloGuiApp {
             self.ai.thinking.clear();
             self.ai.last_req.clear();
             self.ai.pending_confirm = None;
+            self.ai.digests.clear();
+            self.ai.preload_inflight = None;
+            self.ai.preload_next_at = None;
+            self.ai.preload_failed.clear();
             self.ai.account = self.user_uin.clone();
         }
+        self.ai_preload_tick();
         let Some(action) = self.ai.pending_action.take() else {
             return;
         };
@@ -761,6 +914,149 @@ impl ZaloGuiApp {
             );
         });
 
+        ui.add_space(14.0);
+        ui.label(
+            RichText::new("Đọc trước ngữ cảnh (tăng tốc)")
+                .color(pal.text_primary)
+                .size(13.5)
+                .strong(),
+        );
+        ui.add_space(6.0);
+        let host = host_of(&self.settings.ai_base_url);
+        card(ui, &mut |ui| {
+            ui.label(
+                RichText::new(format!("Mặc định tắt. Khi bật, sau khi mở ứng dụng AI sẽ đọc trước các cuộc trò chuyện bạn chọn và tóm tắt thành ghi nhớ tạm trong bộ nhớ, để lúc bạn hỏi @AI thì trả lời nhanh hơn. Zalo-next không lưu bản tóm tắt ra đĩa (tắt ứng dụng là mất); phần nội dung được đọc trước là văn bản tin nhắn gửi tới {host}."))
+                    .color(pal.text_secondary)
+                    .size(11.8),
+            );
+            ui.add_space(8.0);
+            let mut consent = self.settings.ai_preload_consent;
+            if ui
+                .checkbox(
+                    &mut consent,
+                    RichText::new(format!("Tôi đồng ý cho AI ({host}) đọc văn bản các cuộc trò chuyện đã chọn bên dưới")).size(12.4),
+                )
+                .changed()
+            {
+                self.settings.ai_preload_consent = consent;
+                if !consent {
+                    self.settings.ai_preload_enabled = false;
+                    self.ai_clear_digests();
+                }
+                save_settings = true;
+            }
+            ui.add_space(6.0);
+            let can_enable = self.settings.ai_preload_consent
+                && self.settings.ai_enabled
+                && !self.settings.ai_preload_threads.is_empty();
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Bật đọc trước ngữ cảnh")
+                        .color(pal.text_primary)
+                        .size(13.2),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_enabled_ui(can_enable || self.settings.ai_preload_enabled, |ui| {
+                        if render_toggle_switch(ui, &mut self.settings.ai_preload_enabled, pal)
+                            .changed()
+                        {
+                            if self.settings.ai_preload_enabled {
+                                self.ai.preload_next_at = None;
+                                self.ai.preload_failed.clear();
+                            } else {
+                                self.ai_clear_digests();
+                            }
+                            save_settings = true;
+                        }
+                    });
+                });
+            });
+            if !can_enable && !self.settings.ai_preload_enabled {
+                let why = if !self.settings.ai_enabled {
+                    "Hãy bật Trợ lý AI ở trên."
+                } else if !self.settings.ai_preload_consent {
+                    "Cần đồng ý cho AI đọc cuộc trò chuyện trước."
+                } else {
+                    "Chọn ít nhất một cuộc trò chuyện bên dưới."
+                };
+                ui.label(RichText::new(why).color(pal.text_muted).size(11.6));
+            }
+            ui.add_space(8.0);
+            label(ui, "Chọn cuộc trò chuyện được đọc trước");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.ai.preload_search)
+                    .hint_text("Tìm theo tên…")
+                    .desired_width(f32::INFINITY),
+            );
+            let needle = self.ai.preload_search.trim().to_lowercase();
+            egui::ScrollArea::vertical()
+                .id_salt("ai_preload_threads")
+                .max_height(210.0)
+                .show(ui, |ui| {
+                    for t in self.threads.iter().filter(|t| {
+                        !t.name.trim().is_empty()
+                            && (needle.is_empty() || t.name.to_lowercase().contains(&needle))
+                    }) {
+                        let mut on = self.settings.ai_preload_threads.contains(&t.id);
+                        let text = if t.is_group {
+                            format!("{}  · nhóm", t.name)
+                        } else {
+                            t.name.clone()
+                        };
+                        if ui
+                            .checkbox(&mut on, RichText::new(text).size(12.4))
+                            .changed()
+                        {
+                            if on {
+                                self.settings.ai_preload_threads.insert(t.id.clone());
+                            } else {
+                                self.settings.ai_preload_threads.remove(&t.id);
+                                self.ai.digests.remove(&t.id);
+                                if self.settings.ai_preload_threads.is_empty() {
+                                    self.settings.ai_preload_enabled = false;
+                                }
+                            }
+                            save_settings = true;
+                        }
+                    }
+                });
+            ui.add_space(6.0);
+            let chosen = self.settings.ai_preload_threads.len();
+            let ready = self.ai.digests.len();
+            let mut status = format!("Đã chọn {chosen} cuộc trò chuyện");
+            if self.settings.ai_preload_enabled {
+                status.push_str(&format!(" · đã đọc trước {ready}/{chosen}"));
+                if let Some(id) = &self.ai.preload_inflight {
+                    let name = self
+                        .threads
+                        .iter()
+                        .find(|t| &t.id == id)
+                        .map_or("…", |t| t.name.as_str());
+                    status.push_str(&format!(" · đang đọc \"{name}\"…"));
+                }
+            }
+            ui.label(RichText::new(status).color(pal.text_primary).size(12.2));
+            if !self.ai.preload_error.is_empty() {
+                ui.label(
+                    RichText::new(format!("⚠ {}", self.ai.preload_error))
+                        .color(pal.danger)
+                        .size(11.8),
+                );
+            }
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if self.settings.ai_preload_enabled && ui.button("Đọc trước ngay").clicked() {
+                    self.ai.preload_next_at = None;
+                    self.ai.preload_failed.clear();
+                    self.ai.preload_error.clear();
+                }
+                if !self.ai.digests.is_empty() && ui.button("Xóa dữ liệu đọc trước").clicked()
+                {
+                    self.ai_clear_digests();
+                }
+            });
+        });
+
         if save_settings && !self.settings.save() {
             self.show_toast("Không thể lưu cài đặt: tác vụ nền chưa sẵn sàng.");
         }
@@ -952,7 +1248,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let lines = transcript_for(&thread);
+        let lines = transcript_for(&thread, 0);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].who, "Sơn"); // numeric uid in a 1-1 chat -> conversation name
         assert_eq!(lines[1].who, "Tôi");
@@ -961,7 +1257,7 @@ mod tests {
             is_group: true,
             ..thread
         };
-        assert_eq!(transcript_for(&group)[0].who, "Thành viên");
+        assert_eq!(transcript_for(&group, 0)[0].who, "Thành viên");
     }
 
     #[test]
@@ -976,7 +1272,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let lines = transcript_for(&thread);
+        let lines = transcript_for(&thread, 0);
         let total: usize = lines.iter().map(|l| l.text.chars().count()).sum();
         assert!(total <= ai::TRANSCRIPT_CAP_CHARS);
         assert!(lines.last().unwrap().text.starts_with("59 "));
@@ -1018,5 +1314,75 @@ mod tests {
             });
             assert_eq!(actions, 0, "no action without a click");
         }
+    }
+    #[test]
+    fn preload_picks_unread_chosen_threads_and_refreshes_only_stale_digests() {
+        let thread = |id: &str, last_ts: i64, n: usize| Thread {
+            id: id.into(),
+            name: id.into(),
+            messages: (0..n as i64)
+                .map(|i| msg("x", "A", false, last_ts + i))
+                .collect(),
+            ..Default::default()
+        };
+        let threads = vec![
+            thread("a", 1_700_000_000_000, 3),
+            thread("b", 1_700_000_000_000, 3),
+            thread("c", 1_700_000_000_000, 3),
+        ];
+        let chosen: HashSet<String> = ["b".to_string(), "c".to_string()].into();
+        let mut digests: HashMap<String, ai::Digest> = HashMap::new();
+        let none = HashSet::new();
+        // Unchosen "a" is never read; the first chosen one without a summary comes first.
+        assert_eq!(
+            next_preload_target(&chosen, &threads, &digests, &none, 10)
+                .unwrap()
+                .id,
+            "b"
+        );
+        let d = |covers: i64, built: i64| ai::Digest {
+            text: "t".into(),
+            covers_until_ms: covers,
+            message_count: 3,
+            built_at_ms: built,
+        };
+        digests.insert("b".into(), d(1_700_000_000_010, 0));
+        assert_eq!(
+            next_preload_target(&chosen, &threads, &digests, &none, 10)
+                .unwrap()
+                .id,
+            "c"
+        );
+        // A failed thread is skipped (retry later); with everything summarised there is nothing to do.
+        let failed: HashSet<String> = ["c".to_string()].into();
+        assert!(next_preload_target(&chosen, &threads, &digests, &failed, 10).is_none());
+        digests.insert("c".into(), d(1_700_000_000_010, 0));
+        assert!(next_preload_target(&chosen, &threads, &digests, &none, 10).is_none());
+        // Many new messages AND an old digest -> rebuild; a recent digest is kept.
+        let busy = vec![thread("b", 1_700_000_001_000, 80)];
+        digests.insert("b".into(), d(1_700_000_000_500, 0));
+        assert_eq!(
+            next_preload_target(&chosen, &busy, &digests, &none, 700_000)
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert!(next_preload_target(&chosen, &busy, &digests, &none, 60_000).is_none());
+    }
+
+    #[test]
+    fn transcript_after_a_cutoff_returns_only_newer_messages() {
+        let thread = Thread {
+            id: "t".into(),
+            name: "Sơn".into(),
+            messages: vec![
+                msg("cũ", "Sơn", false, 1_700_000_000_000),
+                msg("mới", "Sơn", false, 1_700_000_100_000),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(transcript_for(&thread, 1_700_000_050_000).len(), 1);
+        assert_eq!(transcript_for(&thread, 1_700_000_050_000)[0].text, "mới");
+        assert_eq!(transcript_for(&thread, 0).len(), 2);
     }
 }

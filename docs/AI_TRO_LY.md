@@ -222,3 +222,23 @@ tin duy nhất trong bộ nhớ và chỉ ghi DB khi xong; Hủy khi người d�
 2. Có cho nhiều "persona"/prompt hệ thống tùy chỉnh không, hay chỉ một?
 3. Tin AI có đưa vào tìm kiếm toàn cục mặc định không (đề xuất: không)?
 4. Có cần giới hạn chi phí (ví dụ cảnh báo khi một lần tóm tắt dùng > N ký tự)?
+
+## 11. Đọc trước ngữ cảnh (tăng tốc)
+
+Đọc ngữ cảnh lúc hỏi chậm vì mô hình phải xử lý cả đoạn chat (và tóm tắt nhóm lớn cần nhiều lượt gọi). Tùy chọn này
+làm trước phần đó ở nền.
+
+- **Mặc định tắt.** Ở Cài đặt → Trợ lý AI → "Đọc trước ngữ cảnh": người dùng phải (1) tích đồng ý cho AI đọc văn bản
+  các cuộc trò chuyện đã chọn, (2) chọn ít nhất một cuộc trò chuyện trong danh sách có tìm kiếm, (3) bật công tắc.
+- Sau khi mở app (trễ khoảng 8 giây, mỗi lần một cuộc trò chuyện, cách nhau vài giây), worker đọc tối đa 500 tin gần
+  nhất của cuộc đó từ lịch sử cục bộ **đã có sẵn**, nhờ AI tóm tắt (chia khúc nếu dài) thành một bản ghi nhớ khoảng
+  300 từ, rồi trả về GUI.
+- Bản ghi nhớ chỉ nằm **trong bộ nhớ**: Zalo-next không ghi nó ra đĩa; tắt app, đăng xuất, đổi tài khoản, tắt tính
+  năng, bỏ chọn cuộc trò chuyện hoặc nhấn "Xóa dữ liệu đọc trước" là mất.
+- Khi hỏi `@AI` ở cuộc trò chuyện đã đọc trước, chỉ gửi: bản tóm tắt + các tin mới hơn nguyên văn. Nhanh hơn vì ngữ cảnh
+  nhỏ và không cần map-reduce. Câu trả lời ghi chú "Đã đọc trước · N tin mới".
+- Bản tóm tắt tự làm mới khi có hơn 40 tin mới và đã quá 10 phút; nếu tụt quá xa (hơn 80 tin mới) thì tạm bỏ qua và
+  dùng đường đọc thường. Lỗi được hiển thị và thử lại sau 5 phút.
+- Cuộc trò chuyện đã chọn được coi là đã đồng ý chia sẻ (kể cả nhóm), nhưng công tắc riêng từng cuộc ở khung soạn tin
+  vẫn có quyền ưu tiên cao hơn (tắt thì AI không đọc).
+

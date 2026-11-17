@@ -9,9 +9,12 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 ## [Unreleased]
 
 ### Added (Tính năng mới)
+- **Đọc trước ngữ cảnh cho @AI:** tùy chọn (mặc định tắt, cần đồng ý + chọn cuộc trò chuyện) để AI tóm tắt trước các cuộc trò chuyện đã chọn; bản tóm tắt chỉ nằm trong bộ nhớ nên hỏi `@AI` nhanh hơn mà Zalo-next không lưu gì ra đĩa.
 - **Trợ lý AI `@AI`:** gắn Base URL tương thích OpenAI, API key và model ở Cài đặt → Trợ lý AI, rồi gõ `@AI <câu hỏi>` trong bất kỳ cuộc trò chuyện nào. AI trả lời như một người thứ ba, **chỉ mình bạn thấy** (lưu cục bộ, không gửi tới Zalo); có thể sao chép, trả lời tiếp, tạo lại, xóa. Tùy chọn chia sẻ nội dung cuộc trò chuyện với AI (mặc định tắt, đổi riêng từng cuộc, nhóm chat hỏi xác nhận lần đầu), tóm tắt nhóm lớn bằng map-reduce. API key lưu trong `ai_secret.json` (quyền 0600), không nằm trong `app_settings.json`. Xem `docs/AI_TRO_LY.md`.
 
 ### Fixed (Sửa lỗi)
+- **Thông báo tin nhắn mất avatar và nền trong suốt khi chạy `cargo run`:** các helper Swift dựng sẵn trong `native/macos/build` bị xóa khỏi đĩa khi gỡ thư mục này khỏi git; build lại bằng `native/macos/build-native-helpers.sh`.
+- **Cuộc gọi đến:** ngoài cửa sổ cuộc gọi, giờ còn có thông báo hệ thống "Cuộc gọi đến" và log chẩn đoán phía giao diện.
 - **Đồng bộ cuộc gọi từ điện thoại (Sync V2):** nhật ký cuộc gọi giờ được nhận diện từ metadata đính kèm và hiển thị thành thẻ cuộc gọi (đến, đi, nhỡ, đã hủy, thời lượng); đồng bộ lại sẽ nâng cấp các dòng cũ đang hiện `0:18`. Gói giải phóng phiên Sync V2 (`cmd 591`) gửi mã số nguyên thay vì chuỗi để điện thoại không bị treo ở "Đang đồng bộ". Chưa kiểm chứng trên điện thoại thật.
 
 ### Changed (Thay đổi)

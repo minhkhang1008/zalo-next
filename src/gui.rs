@@ -134,6 +134,11 @@ pub enum GuiEvent {
     },
     AiTestResult(Result<String, String>),
     AiModels(Result<Vec<String>, String>),
+    /// Result of an in-memory "đọc trước" summary for one conversation.
+    AiDigest {
+        thread_id: String,
+        result: Result<crate::ai::Digest, String>,
+    },
     MessageQueuesRefreshed {
         account_uin: String,
         threads: Vec<Thread>,
@@ -604,6 +609,10 @@ struct AppSettings {
     ai_share_threads: HashMap<String, bool>,
     /// Group conversations whose first-time sharing prompt was accepted.
     ai_group_confirmed: HashSet<String>,
+    /// "Đọc trước ngữ cảnh": off by default; needs `ai_preload_consent` and chosen conversations.
+    ai_preload_enabled: bool,
+    ai_preload_consent: bool,
+    ai_preload_threads: HashSet<String>,
     // 4. Thông báo
     enable_notifications: bool,
     play_notification_sound: bool,
@@ -692,6 +701,9 @@ impl Default for AppSettings {
             ai_share_default: false,
             ai_share_threads: HashMap::new(),
             ai_group_confirmed: HashSet::new(),
+            ai_preload_enabled: false,
+            ai_preload_consent: false,
+            ai_preload_threads: HashSet::new(),
             enable_notifications: true,
             play_notification_sound: true,
             quick_messages_enabled: true,
@@ -1513,6 +1525,7 @@ impl ZaloGuiApp {
                 GuiEvent::AiFailed { thread_id, error } => self.ai_on_failed(thread_id, error),
                 GuiEvent::AiTestResult(result) => self.ai_on_test_result(result),
                 GuiEvent::AiModels(result) => self.ai_on_models(result),
+                GuiEvent::AiDigest { thread_id, result } => self.ai_on_digest(thread_id, result),
                 GuiEvent::VoiceProgress {
                     account,
                     generation,
@@ -2531,6 +2544,7 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Không gửi được: {error}");
                 }
                 GuiEvent::CallStateChanged(state) => {
+                    eprintln!("[call] GUI call state -> {state}");
                     if state == "free" {
                         // Keep modal open if there is a rejection reason so the user can read it
                         let has_error = self
@@ -2572,6 +2586,9 @@ impl ZaloGuiApp {
                     is_video,
                     is_group,
                 } => {
+                    eprintln!(
+                        "[call] GUI received IncomingCall caller={caller_id} video={is_video} group={is_group}"
+                    );
                     let resolved_name = self
                         .threads
                         .iter()

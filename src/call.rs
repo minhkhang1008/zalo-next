@@ -4615,6 +4615,22 @@ impl CallBridge {
                                         is_group,
                                     });
                                     ctx_clone.request_repaint();
+                                    // The overlay needs a running UI loop; a hidden or background
+                                    // window may not draw it. An OS notification works regardless,
+                                    // so the user always learns about the call.
+                                    {
+                                        let title = format!(
+                                            "{} {}",
+                                            if is_video { "📹 Cuộc gọi video đến" } else { "📞 Cuộc gọi đến" },
+                                            if is_group { "(nhóm)" } else { "" }
+                                        )
+                                        .trim()
+                                        .to_string();
+                                        let body = format!("{caller_name} đang gọi cho bạn. Mở Zalo-next để bắt máy.");
+                                        tokio::spawn(async move {
+                                            let _ = crate::native_notifications::notify(&title, &body).await;
+                                        });
+                                    }
                                 }
 
                                 // Bound ringing even when the remote termination event is lost.

@@ -578,6 +578,24 @@ pub fn combine_summary_turns(thread_name: &str, partials: &[String], prompt: &st
 // Orchestration
 // ---------------------------------------------------------------------------------------------
 
+/// Pre-read summary of one conversation (`docs/AI_TRO_LY.md` §11). Lives **in memory only**: it is
+/// never written to disk and is dropped on logout, account switch or when pre-reading is turned off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Digest {
+    pub text: String,
+    /// Timestamp (ms) of the newest message the digest covers; later messages are sent verbatim.
+    pub covers_until_ms: i64,
+    pub message_count: usize,
+    pub built_at_ms: i64,
+}
+
+/// A digest older than this many new messages is rebuilt, and is not used at all beyond twice that.
+pub const DIGEST_REFRESH_AFTER_NEW: usize = 40;
+const DIGEST_RECENT_BUDGET_CHARS: usize = 6_000;
+const DIGEST_PROMPT: &str = "Tóm tắt toàn bộ cuộc trò chuyện này để làm ngữ cảnh cho các câu hỏi sau: \
+những người tham gia và vai trò, các chủ đề chính, quyết định, việc cần làm kèm người phụ trách, mốc thời gian, \
+tên riêng và con số quan trọng. Viết gọn khoảng 300 từ, gạch đầu dòng, theo thứ tự thời gian.";
+
 /// Everything the worker needs to answer one `@AI` request. Built by the GUI from in-memory data.
 #[derive(Debug, Clone)]
 pub struct AskRequest {
@@ -594,6 +612,8 @@ pub struct AskRequest {
     pub reply_to_id: Option<String>,
     /// Conversation shared with the model; empty unless context sharing is on for this thread.
     pub transcript: Vec<TranscriptLine>,
+    /// Pre-read summary; when set, `transcript` holds only the messages newer than it.
+    pub digest: Option<Digest>,
     pub share: bool,
     pub base_url: String,
     pub model: String,
@@ -637,6 +657,30 @@ where
             note: note.into(),
         });
     }
+    if let Some(digest) = &req.digest {
+        // Fast path: the conversation was read in advance, so only the summary plus the
+        // messages that arrived since go to the model.
+        let (recent, used) = build_transcript(&req.transcript, DIGEST_RECENT_BUDGET_CHARS);
+        let mut context = format!(
+            "[Bản tóm tắt {} tin trước đó của cuộc trò chuyện]\n{}",
+            digest.message_count, digest.text
+        );
+        if used > 0 {
+            context.push_str(&format!("\n\n[{used} tin mới hơn, nguyên văn]\n{recent}"));
+        }
+        let turns = build_turns(
+            &req.thread_name,
+            req.is_group,
+            Some(&context),
+            history,
+            req.quoted.as_deref(),
+            &req.prompt,
+        );
+        return Ok(Answer {
+            text: complete(turns, 1024).await?,
+            note: format!("Đã đọc trước · {used} tin mới"),
+        });
+    }
     let total: usize = req
         .transcript
         .iter()
@@ -672,6 +716,44 @@ where
     Ok(Answer {
         text: complete(turns, 1024).await?,
         note: format!("Đã đọc {used} tin gần nhất"),
+    })
+}
+
+/// Build the pre-read summary of a conversation (map-reduce when it exceeds the budget).
+pub async fn build_digest<F, Fut>(
+    thread_id: &str,
+    thread_name: &str,
+    is_group: bool,
+    lines: Vec<TranscriptLine>,
+    covers_until_ms: i64,
+    complete: F,
+) -> Result<Digest, AiError>
+where
+    F: FnMut(Vec<Turn>, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<String, AiError>>,
+{
+    let message_count = lines.len();
+    let req = AskRequest {
+        thread_id: thread_id.to_string(),
+        thread_name: thread_name.to_string(),
+        is_group,
+        prompt: DIGEST_PROMPT.to_string(),
+        user_msg: None,
+        user_msg_id: String::new(),
+        quoted: None,
+        reply_to_id: None,
+        transcript: lines,
+        digest: None,
+        share: true,
+        base_url: String::new(),
+        model: String::new(),
+    };
+    let answer = answer(&req, &[], complete).await?;
+    Ok(Digest {
+        text: answer.text,
+        covers_until_ms,
+        message_count,
+        built_at_ms: now_ms(),
     })
 }
 
@@ -1037,6 +1119,7 @@ mod tests {
             quoted: None,
             reply_to_id: None,
             transcript: lines.clone(),
+            digest: None,
             share: false,
             base_url: String::new(),
             model: String::new(),
@@ -1105,6 +1188,71 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, AiError::Network("down".into()));
+    }
+
+    #[tokio::test]
+    async fn digest_is_built_with_map_reduce_and_used_with_only_newer_messages() {
+        let lines: Vec<_> = (0..300)
+            .map(|i| line("10:00", "Sơn", &format!("tin cũ {i} {}", "n".repeat(80))))
+            .collect();
+        let mut calls = 0usize;
+        let digest = build_digest("t", "Sơn", false, lines.clone(), 1_000, |_turns, _| {
+            calls += 1;
+            let n = calls;
+            async move { Ok(format!("tóm tắt {n}")) }
+        })
+        .await
+        .unwrap();
+        assert!(
+            calls >= 3,
+            "a long conversation is summarised in parts, calls = {calls}"
+        );
+        assert_eq!(digest.message_count, 300);
+        assert_eq!(digest.covers_until_ms, 1_000);
+
+        let req = AskRequest {
+            thread_id: "t".into(),
+            thread_name: "Sơn".into(),
+            is_group: false,
+            prompt: "ai hẹn mấy giờ?".into(),
+            user_msg: None,
+            user_msg_id: String::new(),
+            quoted: None,
+            reply_to_id: None,
+            transcript: vec![line("11:00", "Sơn", "hẹn 7h tối nhé")],
+            digest: Some(digest),
+            share: true,
+            base_url: String::new(),
+            model: String::new(),
+        };
+        let mut seen: Vec<Vec<Turn>> = Vec::new();
+        let out = answer(&req, &[], |turns, _| {
+            seen.push(turns);
+            async { Ok("7h".to_string()) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen.len(), 1, "one fast call");
+        let user = &seen[0].last().unwrap().content;
+        assert!(user.contains("tóm tắt") && user.contains("hẹn 7h tối nhé"));
+        assert!(!user.contains("tin cũ 0 "), "old lines are not resent");
+        assert!(out.note.starts_with("Đã đọc trước"));
+        // A short conversation needs a single call.
+        let mut n = 0;
+        let d = build_digest(
+            "t",
+            "A",
+            true,
+            vec![line("1:00", "B", "xin chào")],
+            5,
+            |_, _| {
+                n += 1;
+                async { Ok("ngắn".to_string()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!((n, d.text.as_str()), (1, "ngắn"));
     }
 
     #[test]
