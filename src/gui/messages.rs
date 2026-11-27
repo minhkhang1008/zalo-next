@@ -2423,8 +2423,15 @@ fn video_card_size(
     let scale = (max_width / source_width)
         .min(360.0 / source_height)
         .min(1.0);
-    Vec2::new(source_width * scale, source_height * scale)
+    // Keep room for the 50 pt play button even for a tiny or very thin source.
+    Vec2::new(
+        (source_width * scale).max(VIDEO_CARD_MIN.x.min(max_width)),
+        (source_height * scale).max(VIDEO_CARD_MIN.y),
+    )
 }
+
+/// Smallest video card that still fits the play button and the duration label.
+const VIDEO_CARD_MIN: Vec2 = Vec2::new(120.0, 90.0);
 
 fn message_duration_seconds(msg: &ChatMessage) -> Option<f32> {
     msg.history_source
@@ -5219,6 +5226,13 @@ mod video_message_tests {
             video_card_size(500.0, declared, Some([1_920, 1_080])),
             Vec2::new(340.0, 191.25)
         );
+    }
+
+    #[test]
+    fn video_card_size_keeps_the_play_button_clickable() {
+        assert_eq!(video_card_size(500.0, Some((16, 9)), None), VIDEO_CARD_MIN);
+        let thin = video_card_size(500.0, Some((20, 4_000)), None);
+        assert!(thin.x >= VIDEO_CARD_MIN.x && thin.y <= 360.0);
     }
 
     #[test]
