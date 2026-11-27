@@ -31,7 +31,9 @@ and files to be passed to the model without filtering on our side by model capab
      them for the AI);
    - with sharing on, the photo or file of the Zalo message being replied to, recent photos when the question is
      about images, and attachments the model asks for with `read_attachment`.
-   Only Zalo-hosted media (`is_trusted_zalo_url`) and local files are downloaded, within the existing caps. Images
+   Only Zalo media CDNs (`zdn.vn`, `zadn.vn` with the session; `dlfl.vn`, `dlmd.me` without cookies) and local files
+   are downloaded, within the existing caps. Zalo API hosts are excluded: a message URL is chosen by its sender, and
+   fetching an API URL with the session's cookies could forward private data to the AI host. Images
    are downscaled to 1024 px JPEG data URLs; documents go through `doc_preview` (PDF in the isolated helper). If
    the provider rejects images, the call is retried once without them. We do not filter by model name.
 5. Group consent recorded under the old "text only" wording is not reused: the settings keys are versioned

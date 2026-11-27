@@ -267,6 +267,11 @@ trừ tệp/ảnh bạn tự đính kèm vào câu hỏi `@AI`.
   chủ từ chối ảnh thì hỏi lại một lần không kèm ảnh; ghi chú "model không nhận ảnh". App không lọc theo tên model.
 - **Tệp:** PDF, DOCX, XLSX, PPTX, văn bản và mã nguồn được trích chữ (PDF chạy trong tiến trình cô lập), tối đa 12.000
   ký tự/tệp và 30.000 ký tự/lượt; loại khác chỉ gửi tên, loại và URL.
-- **Chỉ tải từ Zalo hoặc từ máy:** ảnh/tệp trên máy chủ khác Zalo không bao giờ được tải; giới hạn dung lượng giữ như
-  phần xem ảnh/xem trước tài liệu.
+- **Chỉ tải từ máy chủ media của Zalo hoặc từ máy:** chỉ `https` tới `*.zdn.vn`, `*.zadn.vn` (kèm phiên Zalo) và
+  `*.dlfl.vn`, `*.dlmd.me` (không cookie). URL trỏ tới máy chủ API của Zalo (`*.zalo.me`, `*.zaloapp.com`) hay máy chủ
+  khác không bao giờ được tải cho AI, vì URL trong tin nhắn do người gửi chọn. Giới hạn dung lượng giữ như phần xem
+  ảnh/xem trước tài liệu.
+- **Tìm kiếm** so khớp không phân biệt hoa thường kể cả chữ có dấu (`Đ`/`đ`), trên 5.000 tin mới nhất đã lưu của cuộc
+  trò chuyện cộng các tin đang hiện; `list_links` chỉ trả liên kết thật (không tính ảnh, tệp, video).
+- Lượt cuối của vòng tra cứu gửi kết quả dưới dạng văn bản và không kèm công cụ, để model buộc phải trả lời.
 - **Chưa kiểm chứng** với nhà cung cấp thật (công cụ và ảnh chỉ được kiểm thử với máy chủ giả cục bộ).

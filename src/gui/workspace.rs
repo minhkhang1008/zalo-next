@@ -6395,7 +6395,7 @@ fn paint_drop_zones(
 }
 
 impl ZaloGuiApp {
-    fn queue_pending_composer_file(
+    pub(super) fn queue_pending_composer_file(
         &mut self,
         ctx: &egui::Context,
         path: std::path::PathBuf,

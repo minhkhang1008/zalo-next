@@ -647,22 +647,29 @@ impl ZaloGuiApp {
                 if let Some(tx) = WORKER_TX.get() {
                     let _ = tx.send(WorkerCmd::AiDelete { msg_id: id });
                 }
-                // The last request for this question still knows its prompt and composer
-                // attachments; otherwise use the stored text without the attachment line.
-                let (prompt, local) = match self
+                // The last request for this question still knows its prompt, what it replied to
+                // and its composer attachments; otherwise use the stored text alone.
+                let input = match self
                     .ai
                     .last_req
                     .get(&thread_id)
                     .filter(|r| r.user_msg_id == question.id)
                 {
-                    Some(r) => (r.prompt.clone(), local_refs(&r.attachments)),
-                    None => (strip_attachment_line(&question.text), Vec::new()),
-                };
-                let input = AskInput {
-                    prompt,
-                    quoted: None,
-                    quoted_msg: None,
-                    local,
+                    Some(r) => AskInput {
+                        prompt: r.prompt.clone(),
+                        quoted: r
+                            .quoted
+                            .clone()
+                            .map(|q| (r.reply_to_id.clone().unwrap_or_default(), q)),
+                        quoted_msg: r.quoted_msg.clone(),
+                        local: local_refs(&r.attachments),
+                    },
+                    None => AskInput {
+                        prompt: strip_attachment_line(&question.text),
+                        quoted: None,
+                        quoted_msg: None,
+                        local: Vec::new(),
+                    },
                 };
                 if let Some(req) = self.ai_build_request(&thread_id, input, None, question.id) {
                     self.ai_dispatch(req);
@@ -766,7 +773,20 @@ impl ZaloGuiApp {
                 req.attachments = local_refs(&req.attachments);
                 self.ai_dispatch(req);
             }
-            Some(_) => self.ai.pending_confirm = None,
+            Some(_) => {
+                // Cancelled: give the question and its attachments back to the composer.
+                self.ai.pending_confirm = None;
+                if req.user_msg.is_some() {
+                    if self.input_message.trim().is_empty() {
+                        self.input_message = format!("@AI {}", req.prompt);
+                    }
+                    for r in local_refs(&req.attachments) {
+                        if let ai::AttachmentRef::Local { path, .. } = r {
+                            self.queue_pending_composer_file(ctx, path);
+                        }
+                    }
+                }
+            }
             None => {}
         }
     }

@@ -252,55 +252,6 @@ impl MessageStore {
         Ok(out)
     }
 
-    /// Messages of **one** thread whose text, sender name or stored metadata (link URL/title,
-    /// file name, quoted text) contains `query`, newest first. Used by the Assistant's tools.
-    pub fn search_thread_messages(
-        &self,
-        thread_id: &str,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<StoredMessage>> {
-        let q = query.trim();
-        if q.is_empty() {
-            return Ok(Vec::new());
-        }
-        let pattern = format!(
-            "%{}%",
-            q.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
-        self.query_stored(
-            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
-             FROM messages
-             WHERE thread_id = ?1
-               AND (LOWER(text) LIKE LOWER(?2) ESCAPE '\\'
-                    OR LOWER(sender_name) LIKE LOWER(?2) ESCAPE '\\'
-                    OR LOWER(raw_json) LIKE LOWER(?2) ESCAPE '\\')
-             ORDER BY ts DESC
-             LIMIT ?3",
-            &[&thread_id, &pattern, &(limit as i64)],
-        )
-    }
-
-    /// Messages of one thread that may carry a link (in the text or as a stored card), newest
-    /// first. Callers filter precisely; this only narrows the scan.
-    pub fn thread_link_candidates(
-        &self,
-        thread_id: &str,
-        limit: usize,
-    ) -> Result<Vec<StoredMessage>> {
-        self.query_stored(
-            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
-             FROM messages
-             WHERE thread_id = ?1
-               AND (text LIKE '%http%' OR text LIKE '%www.%' OR raw_json LIKE '%\"link_url\"%')
-             ORDER BY ts DESC
-             LIMIT ?2",
-            &[&thread_id, &(limit as i64)],
-        )
-    }
-
     /// Newest `limit` messages of a thread older than `before_ts` (all when `None`), oldest first.
     pub fn messages_before(
         &self,
@@ -1863,28 +1814,6 @@ mod tests {
             store.upsert_message(&m).unwrap();
         }
         let ids = |rows: Vec<StoredMessage>| rows.into_iter().map(|r| r.msg_id).collect::<Vec<_>>();
-        assert_eq!(
-            ids(store.search_thread_messages("A", "hẹn", 10).unwrap()),
-            ["a1"]
-        );
-        assert_eq!(
-            ids(store
-                .search_thread_messages("A", "example.org", 10)
-                .unwrap()),
-            ["a2"]
-        );
-        assert_eq!(
-            ids(store.search_thread_messages("A", "%_", 10).unwrap()),
-            ["a4"]
-        );
-        assert!(store
-            .search_thread_messages("A", "  ", 10)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            ids(store.thread_link_candidates("A", 10).unwrap()),
-            ["a3", "a2"]
-        );
         assert_eq!(
             ids(store.messages_before("A", Some(3), 10).unwrap()),
             ["a1", "a2"]

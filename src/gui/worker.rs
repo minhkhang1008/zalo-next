@@ -4793,8 +4793,10 @@ pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::C
     }
 }
 
-/// Persist the question, ask the Assistant and report the answer. Runs on the worker; nothing here
-/// touches the Zalo session or any Zalo endpoint (INV-5 / INV-6).
+/// Persist the question, ask the Assistant and report the answer. Runs on the worker. Nothing is
+/// sent to a Zalo endpoint (INV-5); `zalo_http` (the session client) is used only to download
+/// attachments from Zalo media CDNs (`ai::media_needs_session`), and only their decoded content
+/// goes to the AI host, over the Assistant's own client (INV-6).
 async fn run_ai_ask(
     mut req: crate::ai::AskRequest,
     tx: GuiTx,
@@ -4912,6 +4914,9 @@ async fn run_ai_ask(
     let _ = tx.send(GuiEvent::AiReply(reply));
 }
 
+/// Newest stored rows of the conversation that `search_messages`/`list_links` scan.
+const AI_TOOL_SCAN_ROWS: usize = 5_000;
+
 /// What the Assistant's tools may read: one conversation of the local history plus the lines the
 /// GUI sent (newest messages may not be stored yet).
 struct AiToolCtx {
@@ -4990,14 +4995,14 @@ async fn run_ai_tool(
     };
     let thread = ctx.thread_id.clone();
     let lines = match request {
-        ToolRequest::Search { query, limit } => {
-            let q = query.clone();
-            ctx.stored(move |s| s.search_thread_messages(&thread, &q, limit))
-                .await
-                .map(|rows| ctx.newest(rows, |l| crate::ai::line_matches(l, &query), limit))
-        }
+        // SQLite's LIKE/LOWER fold only ASCII, so Vietnamese matching runs in Rust over a bounded
+        // scan of the newest stored rows, with the same rules for stored and in-memory lines.
+        ToolRequest::Search { query, limit } => ctx
+            .stored(move |s| s.messages_before(&thread, None, AI_TOOL_SCAN_ROWS))
+            .await
+            .map(|rows| ctx.newest(rows, |l| crate::ai::line_matches(l, &query), limit)),
         ToolRequest::Links { query, limit } => ctx
-            .stored(move |s| s.thread_link_candidates(&thread, 1_000))
+            .stored(move |s| s.messages_before(&thread, None, AI_TOOL_SCAN_ROWS))
             .await
             .map(|rows| {
                 ctx.newest(
@@ -5812,6 +5817,14 @@ mod ai_worker_tests {
                     "bí mật https://secret.example",
                     "",
                 ),
+                ("A", "a0", 1_699_999_999_000, "Hẹn ở Đà Nẵng", ""),
+                (
+                    "A",
+                    "a5",
+                    1_699_999_998_000,
+                    "[Hình ảnh]",
+                    r#"{"link_url":"https://f1.zdn.vn/p.jpg","link_src":"Hình ảnh Zalo"}"#,
+                ),
             ] {
                 store
                     .upsert_message(&crate::store::StoredMessage {
@@ -5858,6 +5871,16 @@ mod ai_worker_tests {
         .await
         .text;
         assert!(found.contains("Không tìm thấy"));
+        // Vietnamese case folding works on stored rows (SQLite LOWER is ASCII-only).
+        let folded = run_ai_tool(
+            call("search_messages", r#"{"query":"đà nẵng"}"#),
+            ctx.clone(),
+        )
+        .await
+        .text;
+        assert!(folded.contains("#a0"), "{folded}");
+        // Photos are not links.
+        assert!(!links.contains("f1.zdn.vn"), "{links}");
         let around = run_ai_tool(
             call("get_messages_around", r#"{"message_id":"b1"}"#),
             ctx.clone(),
