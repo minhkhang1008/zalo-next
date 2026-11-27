@@ -550,7 +550,24 @@ mod windows_toast {
         deadline: Duration,
         operation: impl FnOnce(&ToastNotifier) -> Result<T, NotificationError> + Send + 'static,
     ) -> Result<T, NotificationError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        /// WinRT calls cannot be cancelled once started; a stalled toast API must not be able to
+        /// fill the shared blocking pool (SQLite work runs there too), so excess requests drop.
+        static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+        const MAX_IN_FLIGHT: usize = 2;
+        struct Slot;
+        impl Drop for Slot {
+            fn drop(&mut self) {
+                IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        if IN_FLIGHT.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+            IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            return Err(NotificationError::Timeout);
+        }
+        let slot = Slot;
         let mut task = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
             // SAFETY: We pair every successful initialization, including S_FALSE, with
             // RoUninitialize on this thread after the WinRT objects have been dropped.
             unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
@@ -612,6 +629,7 @@ mod windows_toast {
         body: String,
         attachment: Option<PathBuf>,
     ) -> Result<(), NotificationError> {
+        let started = std::time::Instant::now();
         with_notifier(NOTIFY_DEADLINE, move |notifier| {
             match windows_authorization_status(Some(read_setting(notifier)?)) {
                 AuthorizationStatus::Authorized => (),
@@ -619,6 +637,10 @@ mod windows_toast {
                 _ => return Err(NotificationError::WindowsApi),
             }
             let image_uri = attachment.as_deref().and_then(local_attachment_uri);
+            // The caller has already given up after the deadline; don't show a stale banner.
+            if started.elapsed() >= NOTIFY_DEADLINE {
+                return Err(NotificationError::Timeout);
+            }
             toast_document(&title, &body, image_uri.as_deref())
                 .and_then(|document| ToastNotification::CreateToastNotification(&document))
                 .and_then(|toast| notifier.Show(&toast))

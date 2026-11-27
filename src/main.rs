@@ -48,12 +48,10 @@ fn activate_logged_in_account(s: &Session) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let (wait_pid, args) = updater::take_wait_for_pid(std::env::args().skip(1).collect());
-    if let Some(pid) = wait_pid {
-        updater::wait_for_pid(pid);
-    }
-    #[cfg(windows)]
-    if let Ok(exe_path) = std::env::current_exe() {
-        let _ = std::fs::remove_file(updater::windows_portable_backup_path(&exe_path));
+    // Relaunched by the updater: never run next to the old instance (shared session and
+    // database). If it has not exited in time, quit; the old instance keeps running.
+    if wait_pid.is_some_and(|pid| !updater::wait_for_pid(pid)) {
+        std::process::exit(1);
     }
 
     if args.as_slice() == ["--internal-doc-preview"] {
@@ -111,6 +109,12 @@ async fn main() -> Result<()> {
     if args.iter().any(|a| a == "--print-data-dir") {
         println!("{}", data_path.display());
         return Ok(());
+    }
+    // The previous executable is kept until this build has at least selected its storage, so a
+    // replacement that cannot start still leaves `<exe>.exe.old` to restore by hand.
+    #[cfg(windows)]
+    if let Ok(exe_path) = std::env::current_exe() {
+        let _ = std::fs::remove_file(updater::windows_portable_backup_path(&exe_path));
     }
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write;

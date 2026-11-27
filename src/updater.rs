@@ -290,13 +290,16 @@ pub fn take_wait_for_pid(args: Vec<String>) -> (Option<u32>, Vec<String>) {
     (pid, forwarded)
 }
 
-/// Wait up to 60 seconds for a Windows updater's parent process to exit.
+/// Wait up to 60 seconds for a Windows updater's parent process to exit. Returns `false` when
+/// it is still running (or the wait failed), so the caller can refuse to start a second instance
+/// on the same data directory.
 #[cfg(windows)]
-pub fn wait_for_pid(pid: u32) {
+pub fn wait_for_pid(pid: u32) -> bool {
     use std::ffi::c_void;
 
     const SYNCHRONIZE: u32 = 0x0010_0000;
     const TIMEOUT_MS: u32 = 60_000;
+    const WAIT_OBJECT_0: u32 = 0;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -306,19 +309,24 @@ pub fn wait_for_pid(pid: u32) {
     }
 
     // SAFETY: OpenProcess accepts integer arguments. A non-null result is an owned
-    // process handle with SYNCHRONIZE access, held until the wait returns.
+    // process handle with SYNCHRONIZE access, held until the wait returns and then closed.
     unsafe {
         let handle = OpenProcess(SYNCHRONIZE, 0, pid);
-        if !handle.is_null() {
-            WaitForSingleObject(handle, TIMEOUT_MS);
-            CloseHandle(handle);
+        if handle.is_null() {
+            // No such process any more (same-user processes are always openable).
+            return true;
         }
+        let result = WaitForSingleObject(handle, TIMEOUT_MS);
+        CloseHandle(handle);
+        result == WAIT_OBJECT_0
     }
 }
 
 /// Other platforms strip the restart flag and use their own relaunch flows.
 #[cfg(not(windows))]
-pub fn wait_for_pid(_pid: u32) {}
+pub fn wait_for_pid(_pid: u32) -> bool {
+    true
+}
 
 /// Portable installation staged without replacing or launching the running executable.
 /// Dropping an uncommitted transaction preserves the original executable.
