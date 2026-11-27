@@ -4790,7 +4790,7 @@ pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::C
 
 /// Persist the question, ask the Assistant and report the answer. Runs on the worker; nothing here
 /// touches the Zalo session or any Zalo endpoint (INV-5 / INV-6).
-async fn run_ai_ask(req: crate::ai::AskRequest, tx: GuiTx, db_path: String) {
+async fn run_ai_ask(mut req: crate::ai::AskRequest, tx: GuiTx, db_path: String) {
     use crate::ai::{AiMessage, AiRole, Turn};
     let fail = |tx: &GuiTx, thread_id: &str, error: String| {
         let _ = tx.send(GuiEvent::AiFailed {
@@ -4798,21 +4798,35 @@ async fn run_ai_ask(req: crate::ai::AskRequest, tx: GuiTx, db_path: String) {
             error,
         });
     };
-    // 1. Persist the user's message and read the earlier dialogue (blocking SQLite).
+    // 1. Persist the question and load local context on the blocking pool.
     let (user_msg, thread_id, exclude) = (req.user_msg.clone(), req.thread_id.clone(), req.user_msg_id.clone());
+    let read_zalo_history = req.share && req.digest.is_none();
+    let (thread_name, is_group) = (req.thread_name.clone(), req.is_group);
     let db_for_load = db_path.clone();
-    let loaded = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<AiMessage>> {
+    let loaded = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let store = crate::store::MessageStore::open(&db_for_load)?;
         if let Some(m) = &user_msg {
             crate::ai::insert(&store.conn, m)?;
         }
-        Ok(crate::ai::load_thread(&store.conn, &thread_id, 24)?)
+        let dialogue = crate::ai::load_thread(&store.conn, &thread_id, 24)?;
+        let stored = if read_zalo_history {
+            match store.messages_for(&thread_id, 600) {
+                Ok(rows) => crate::ai::stored_transcript(&rows, &thread_name, is_group),
+                Err(err) => {
+                    logger::log_error("AI conversation history", &err.to_string());
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        Ok((dialogue, stored))
     })
     .await;
-    let rows = match loaded {
-        Ok(Ok(rows)) => rows,
-        _ => Vec::new(),
-    };
+    let (rows, stored) = loaded.ok().and_then(Result::ok).unwrap_or_default();
+    if read_zalo_history {
+        req.transcript = crate::ai::merge_transcripts(std::mem::take(&mut req.transcript), stored);
+    }
     let history: Vec<Turn> = rows
         .iter()
         .filter(|m| m.id != exclude)
@@ -5063,38 +5077,19 @@ async fn run_ai_preload(
     db_path: String,
 ) -> Result<crate::ai::Digest, String> {
     let (id, name) = (thread_id.to_string(), thread_name.to_string());
-    let rows = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::store::StoredMessage>> {
+    let lines = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let store = crate::store::MessageStore::open(&db_path)?;
-        store.messages_for(&id, 500)
+        let rows = store.messages_for(&id, 500)?;
+        Ok(crate::ai::stored_transcript(&rows, &name, is_group))
     })
     .await
     .map_err(|_| "Không đọc được lịch sử cục bộ".to_string())?
     .map_err(|e| format!("Không đọc được lịch sử cục bộ: {e}"))?;
-    let mut covers_until = 0i64;
-    let lines: Vec<crate::ai::TranscriptLine> = rows
+    let covers_until = lines
         .iter()
-        .filter(|m| !m.text.trim().is_empty() && !m.msg_type.contains("system"))
-        .map(|m| {
-            let ts = normalize_ts_ms(m.ts);
-            covers_until = covers_until.max(ts);
-            crate::ai::TranscriptLine {
-                time: super::ai_ui::day_time(ts),
-                who: if m.is_outgoing {
-                    "Tôi".to_string()
-                } else if !m.sender_name.trim().is_empty() {
-                    m.sender_name.clone()
-                } else if !is_group {
-                    name.clone()
-                } else {
-                    "Thành viên".to_string()
-                },
-                text: m.text.trim().to_string(),
-            }
-        })
-        .collect();
-    if lines.is_empty() {
-        return Err("Chưa có tin nhắn để đọc".to_string());
-    }
+        .map(|line| line.ts)
+        .max()
+        .ok_or_else(|| "Chưa có tin nhắn để đọc".to_string())?;
     let cfg = tokio::task::spawn_blocking(move || crate::ai::AiConfig::resolve(&base_url, &model))
         .await
         .map_err(|_| "Không đọc được cấu hình trợ lý AI".to_string())?
@@ -5171,8 +5166,14 @@ mod ai_worker_tests {
             }),
             user_msg_id: id,
             quoted: None,
+            quoted_msg: None,
             reply_to_id: None,
-            transcript: vec![crate::ai::TranscriptLine { time: "10:00".into(), who: "Sơn".into(), text: "hẹn 7h nhé".into() }],
+            transcript: vec![crate::ai::TranscriptLine {
+                time: "10:00".into(),
+                who: "Sơn".into(),
+                text: "hẹn 7h nhé".into(),
+                ..Default::default()
+            }],
             digest: None,
             share,
             base_url: url.into(),
@@ -5185,23 +5186,49 @@ mod ai_worker_tests {
         let dir = std::env::temp_dir().join(format!("zalo-next-ai-{}-{}", std::process::id(), crate::ai::now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("history.db").to_string_lossy().to_string();
+        let mut store = crate::store::MessageStore::open(&db).unwrap();
+        let mut older = crate::store::StoredMessage::from(&crate::chat::ChatMessage {
+            id: "msg-old".into(),
+            sender: "Sơn".into(),
+            ts: 1_700_000_000_000,
+            link_url: Some("https://example.org/history".into()),
+            ..Default::default()
+        });
+        older.thread_id = "thread-1".into();
+        store.upsert_message(&older).unwrap();
+        let stale = crate::store::StoredMessage {
+            msg_id: "msg-new".into(),
+            text: "bản cũ".into(),
+            ts: older.ts + 1,
+            raw_json: String::new(),
+            ..older.clone()
+        };
+        store.upsert_message(&stale).unwrap();
+        drop(store);
         let (url, server) = fake_ai(vec![r#"{"choices":[{"message":{"content":"Rust là ngôn ngữ hệ thống."}}]}"#]).await;
         let (tx, rx) = std::sync::mpsc::channel();
         let gui_tx = GuiTx::new(tx, egui::Context::default());
-        run_ai_ask(request(&url, true), gui_tx, db.clone()).await;
+        let mut req = request(&url, true);
+        req.transcript[0].id = stale.msg_id.clone();
+        req.transcript[0].ts = stale.ts;
+        run_ai_ask(req, gui_tx, db.clone()).await;
         let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         let GuiEvent::AiReply(reply) = event else { panic!("expected AiReply") };
         assert_eq!(reply.role, AiRole::Assistant);
         assert_eq!(reply.text, "Rust là ngôn ngữ hệ thống.");
-        assert_eq!(reply.note.as_deref(), Some("Đã đọc 1 tin gần nhất"));
+        assert_eq!(reply.note.as_deref(), Some("Đã đọc 2 tin gần nhất"));
         // The request carried the shared conversation as data.
         let sent = server.await.unwrap().remove(0);
         assert!(sent.contains("hẹn 7h nhé") && sent.contains("cuoc_tro_chuyen"));
-        // Both sides are stored in the local table; the real messages table is empty.
+        assert!(
+            sent.find("https://example.org/history").unwrap() < sent.find("hẹn 7h nhé").unwrap()
+        );
+        assert!(!sent.contains("bản cũ"));
+        // Both sides are stored in the local table, and Zalo messages are unchanged.
         let store = crate::store::MessageStore::open(&db).unwrap();
         let rows = crate::ai::load_thread(&store.conn, "thread-1", 10).unwrap();
         assert_eq!(rows.iter().map(|m| m.role).collect::<Vec<_>>(), [AiRole::User, AiRole::Assistant]);
-        assert!(store.messages_for("thread-1", 10).unwrap().is_empty());
+        assert_eq!(store.messages_for("thread-1", 10).unwrap(), [older, stale]);
         // Deleting the conversation removes the dialogue too.
         let mut store = store;
         store.delete_thread("thread-1").unwrap();
@@ -5238,7 +5265,7 @@ mod ai_worker_tests {
         let db = dir.join("history.db").to_string_lossy().to_string();
         {
             let mut store = crate::store::MessageStore::open(&db).unwrap();
-            for (i, text) in ["chào", "mai họp lúc 9h", "ok"].iter().enumerate() {
+            for (i, text) in ["chào", "mai họp lúc 9h", "ok", ""].iter().enumerate() {
                 store
                     .upsert_message(&crate::store::StoredMessage {
                         msg_id: format!("m{i}"),
@@ -5249,7 +5276,11 @@ mod ai_worker_tests {
                         msg_type: "webchat".into(),
                         ts: 1_700_000_000_000 + i as i64,
                         is_outgoing: i == 2,
-                        raw_json: String::new(),
+                        raw_json: if i == 3 {
+                            r#"{"link_url":"https://example.org/agenda"}"#.into()
+                        } else {
+                            String::new()
+                        },
                     })
                     .unwrap();
             }
@@ -5258,10 +5289,11 @@ mod ai_worker_tests {
         let (url, server) = fake_ai(vec![r#"{"choices":[{"message":{"content":"Họp lúc 9h mai."}}]}"#]).await;
         let digest = run_ai_preload("thread-1", "Sơn", false, url, "test-model".into(), db).await.unwrap();
         assert_eq!(digest.text, "Họp lúc 9h mai.");
-        assert_eq!(digest.message_count, 3);
-        assert_eq!(digest.covers_until_ms, 1_700_000_000_002);
+        assert_eq!(digest.message_count, 4);
+        assert_eq!(digest.covers_until_ms, 1_700_000_000_003);
         let sent = server.await.unwrap().remove(0);
         assert!(sent.contains("mai họp lúc 9h") && sent.contains("Tôi: ok"));
+        assert!(sent.contains("[Liên kết: https://example.org/agenda]"));
         // Nothing but the existing history database exists afterwards: the digest is not stored.
         let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(before.len(), after.len());

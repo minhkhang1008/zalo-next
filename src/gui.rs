@@ -608,9 +608,11 @@ struct AppSettings {
     /// Per-conversation override of `ai_share_default`.
     ai_share_threads: HashMap<String, bool>,
     /// Group conversations whose first-time sharing prompt was accepted.
+    #[serde(rename = "ai_group_confirmed_v2")]
     ai_group_confirmed: HashSet<String>,
     /// "Đọc trước ngữ cảnh": off by default; needs `ai_preload_consent` and chosen conversations.
     ai_preload_enabled: bool,
+    #[serde(rename = "ai_preload_consent_v2")]
     ai_preload_consent: bool,
     ai_preload_threads: HashSet<String>,
     // 4. Thông báo

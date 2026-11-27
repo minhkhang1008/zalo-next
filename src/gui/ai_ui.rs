@@ -82,16 +82,7 @@ fn hhmm(ts_ms: i64) -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn day_time(ts_ms: i64) -> String {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_millis_opt(ts_ms)
-        .single()
-        .map(|d| d.format("%d/%m %H:%M").to_string())
-        .unwrap_or_default()
-}
-
-/// Conversation text to share: text only (no files or links), oldest first, newest 800 messages,
+/// Conversation messages to share, oldest first, newest 800 messages,
 /// capped at `ai::TRANSCRIPT_CAP_CHARS`.
 pub(super) fn transcript_for(thread: &Thread, after_ms: i64) -> Vec<TranscriptLine> {
     let mut lines: Vec<TranscriptLine> = thread
@@ -100,33 +91,24 @@ pub(super) fn transcript_for(thread: &Thread, after_ms: i64) -> Vec<TranscriptLi
         .filter(|m| !is_system_notice_message(m) && normalize_ts_ms(m.ts) > after_ms)
         .rev()
         .take(800)
-        .map(|m| {
-            let who = if m.is_outgoing {
-                "Tôi".to_string()
-            } else if !m.sender.trim().is_empty() && !m.sender.chars().all(|c| c.is_ascii_digit()) {
-                m.sender.clone()
-            } else if !thread.is_group {
-                thread.name.clone()
-            } else {
-                "Thành viên".to_string()
-            };
-            let text = if m.text.trim().is_empty() {
-                "[tệp hoặc hình ảnh]".to_string()
-            } else {
-                m.text.trim().to_string()
-            };
-            TranscriptLine {
-                time: day_time(normalize_ts_ms(m.ts)),
-                who,
-                text,
-            }
-        })
+        .map(|m| ai::line_from_chat(m, thread))
+        .filter(|line| !line.text.is_empty() || line.attachment.is_some())
         .collect();
     lines.reverse();
     let mut total = 0usize;
     let mut keep_from = 0usize;
     for (i, l) in lines.iter().enumerate().rev() {
-        total += l.text.chars().count() + l.who.chars().count() + 24;
+        total += [&l.id, &l.time, &l.who, &l.text]
+            .into_iter()
+            .chain(l.reply_to.iter())
+            .chain(
+                l.attachment
+                    .iter()
+                    .flat_map(|a| [&a.url, &a.title, &a.desc].into_iter().flatten()),
+            )
+            .map(|field| field.chars().count())
+            .sum::<usize>()
+            + 24;
         if total > ai::TRANSCRIPT_CAP_CHARS {
             keep_from = i + 1;
             break;
@@ -217,13 +199,19 @@ impl ZaloGuiApp {
             return;
         }
         self.input_message.clear();
-        let quoted = self
-            .replying_to
-            .take()
-            .filter(|q| ai::is_ai_id(&q.id))
-            .map(|q| (q.id, q.text));
+        let (quoted, quoted_msg) = match self.replying_to.take() {
+            Some(q) if replying_ai => (Some((q.id, q.text)), None),
+            Some(q) if self.ai_share_enabled(thread_id) => (
+                None,
+                self.threads
+                    .iter()
+                    .find(|t| t.id == thread_id)
+                    .map(|thread| ai::line_from_chat(&q, thread)),
+            ),
+            _ => (None, None),
+        };
         self.reply_auto_mention = None;
-        self.ai_begin_ask(thread_id, prompt, quoted);
+        self.ai_begin_ask(thread_id, prompt, quoted, quoted_msg);
     }
 
     fn ai_build_request(
@@ -231,6 +219,7 @@ impl ZaloGuiApp {
         thread_id: &str,
         prompt: String,
         quoted: Option<(String, String)>,
+        quoted_msg: Option<TranscriptLine>,
         user_msg: Option<AiMessage>,
         user_msg_id: String,
     ) -> Option<AskRequest> {
@@ -261,6 +250,7 @@ impl ZaloGuiApp {
             user_msg_id,
             reply_to_id: quoted.as_ref().map(|(id, _)| id.clone()),
             quoted: quoted.map(|(_, text)| text),
+            quoted_msg: quoted_msg.filter(|_| share),
             transcript,
             digest,
             share,
@@ -269,11 +259,12 @@ impl ZaloGuiApp {
         })
     }
 
-    pub(super) fn ai_begin_ask(
+    fn ai_begin_ask(
         &mut self,
         thread_id: &str,
         prompt: String,
         quoted: Option<(String, String)>,
+        quoted_msg: Option<TranscriptLine>,
     ) {
         let id = ai::make_id();
         let user_msg = AiMessage {
@@ -286,21 +277,22 @@ impl ZaloGuiApp {
             model: None,
             note: None,
         };
-        let Some(req) = self.ai_build_request(thread_id, prompt, quoted, Some(user_msg), id) else {
-            return;
-        };
-        let needs_confirm = req.share
-            && req.is_group
-            && !self.settings.ai_group_confirmed.contains(thread_id)
-            && !self.ai_preload_active(thread_id);
-        if needs_confirm {
-            self.ai.pending_confirm = Some(req);
-        } else {
+        if let Some(req) =
+            self.ai_build_request(thread_id, prompt, quoted, quoted_msg, Some(user_msg), id)
+        {
             self.ai_dispatch(req);
         }
     }
 
     fn ai_dispatch(&mut self, req: AskRequest) {
+        if req.share
+            && req.is_group
+            && !self.settings.ai_group_confirmed.contains(&req.thread_id)
+            && !self.ai_preload_active(&req.thread_id)
+        {
+            self.ai.pending_confirm = Some(req);
+            return;
+        }
         let thread_id = req.thread_id.clone();
         if let Some(m) = &req.user_msg {
             self.ai
@@ -563,26 +555,25 @@ impl ZaloGuiApp {
                     question.text.clone(),
                     None,
                     None,
+                    None,
                     question.id,
                 ) {
                     self.ai_dispatch(req);
                 }
             }
             AiAction::Retry => {
-                if let Some(mut req) = self.ai.last_req.get(&thread_id).cloned() {
-                    req.user_msg = None; // already shown and stored
-                                         // Rebuild the transcript so a retry sees the latest messages.
-                    if let Some(fresh) = self.ai_build_request(
+                if let Some(req) = self.ai.last_req.get(&thread_id).cloned() {
+                    // Rebuild the transcript so a retry sees the latest messages.
+                    let Some(req) = self.ai_build_request(
                         &thread_id,
-                        req.prompt.clone(),
-                        req.quoted
-                            .clone()
-                            .map(|q| (req.reply_to_id.clone().unwrap_or_default(), q)),
+                        req.prompt,
+                        req.quoted.map(|q| (req.reply_to_id.unwrap_or_default(), q)),
+                        req.quoted_msg,
                         None,
-                        req.user_msg_id.clone(),
-                    ) {
-                        req = fresh;
-                    }
+                        req.user_msg_id,
+                    ) else {
+                        return;
+                    };
                     if let Some(l) = self.ai.messages.get_mut(&thread_id) {
                         l.retain(|m| m.role != AiRole::Error);
                     }
@@ -616,7 +607,7 @@ impl ZaloGuiApp {
                 ui.set_max_width(380.0);
                 ui.label(
                     RichText::new(format!(
-                        "Để trả lời, AI cần đọc tin nhắn gần đây của nhóm \"{}\". Văn bản tin nhắn của tất cả thành viên sẽ được gửi tới {host}.",
+                        "Để trả lời, AI cần đọc tin nhắn gần đây của nhóm \"{}\". Văn bản, liên kết, ảnh và tệp trong tin nhắn của tất cả thành viên có thể được gửi tới {host}.",
                         req.thread_name
                     ))
                     .color(pal.text_primary)
@@ -624,7 +615,7 @@ impl ZaloGuiApp {
                 );
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new("Chỉ gửi văn bản (không gửi liên kết, ảnh hay tệp). Lựa chọn này được nhớ cho nhóm này và có thể tắt bất cứ lúc nào ở khung soạn tin.")
+                    RichText::new("Lựa chọn này được nhớ cho nhóm này và có thể tắt bất cứ lúc nào ở khung soạn tin.")
                         .color(pal.text_secondary)
                         .size(12.0),
                 );
@@ -662,6 +653,8 @@ impl ZaloGuiApp {
                 let mut req = req;
                 req.share = false;
                 req.transcript.clear();
+                req.quoted_msg = None;
+                req.digest = None;
                 self.ai_dispatch(req);
             }
             Some(_) => self.ai.pending_confirm = None,
@@ -696,7 +689,7 @@ impl ZaloGuiApp {
                     let (label, tip) = if share {
                         (
                             "AI đọc cuộc trò chuyện: Bật",
-                            format!("Văn bản tin nhắn gần đây sẽ được gửi tới {host}. Bấm để tắt."),
+                            format!("Văn bản, liên kết, ảnh và tệp trong tin nhắn gần đây có thể được gửi tới {host}. Bấm để tắt."),
                         )
                     } else {
                         (
@@ -895,7 +888,7 @@ impl ZaloGuiApp {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Chia sẻ nội dung cuộc trò chuyện với AI").color(pal.text_primary).size(13.2));
                     ui.label(
-                        RichText::new("Mặc định cho mọi cuộc trò chuyện. Khi bật, AI đọc văn bản các tin gần đây để trả lời và tóm tắt tốt hơn. Có thể đổi riêng từng cuộc ngay ở khung soạn tin khi gõ @AI.")
+                        RichText::new("Mặc định cho mọi cuộc trò chuyện. Khi bật, AI đọc các tin gần đây để trả lời và tóm tắt tốt hơn. Có thể đổi riêng từng cuộc ngay ở khung soạn tin khi gõ @AI.")
                             .color(pal.text_secondary)
                             .size(11.8),
                     );
@@ -908,7 +901,7 @@ impl ZaloGuiApp {
             });
             ui.add_space(4.0);
             ui.label(
-                RichText::new(format!("Nếu bật, văn bản tin nhắn sẽ được gửi tới {}. Liên kết, ảnh và tệp không bao giờ được gửi. Nhóm chat luôn hỏi xác nhận lần đầu.", host_of(&self.settings.ai_base_url)))
+                RichText::new(format!("Nếu bật, văn bản, liên kết, ảnh và tệp trong tin nhắn có thể được gửi tới {}. Nhóm chat luôn hỏi xác nhận lần đầu.", host_of(&self.settings.ai_base_url)))
                     .color(pal.text_muted)
                     .size(11.6),
             );
@@ -925,7 +918,7 @@ impl ZaloGuiApp {
         let host = host_of(&self.settings.ai_base_url);
         card(ui, &mut |ui| {
             ui.label(
-                RichText::new(format!("Mặc định tắt. Khi bật, sau khi mở ứng dụng AI sẽ đọc trước các cuộc trò chuyện bạn chọn và tóm tắt thành ghi nhớ tạm trong bộ nhớ, để lúc bạn hỏi @AI thì trả lời nhanh hơn. Zalo-next không lưu bản tóm tắt ra đĩa (tắt ứng dụng là mất); phần nội dung được đọc trước là văn bản tin nhắn gửi tới {host}."))
+                RichText::new(format!("Mặc định tắt. Khi mở ứng dụng, AI đọc trước các cuộc trò chuyện bạn chọn để trả lời nhanh hơn. Văn bản, liên kết, ảnh và tệp trong các tin nhắn đó có thể được gửi tới {host}. Bản tóm tắt chỉ được giữ trong bộ nhớ đến khi tắt ứng dụng."))
                     .color(pal.text_secondary)
                     .size(11.8),
             );
@@ -934,7 +927,7 @@ impl ZaloGuiApp {
             if ui
                 .checkbox(
                     &mut consent,
-                    RichText::new(format!("Tôi đồng ý cho AI ({host}) đọc văn bản các cuộc trò chuyện đã chọn bên dưới")).size(12.4),
+                    RichText::new(format!("Tôi đồng ý cho AI ({host}) đọc nội dung các cuộc trò chuyện đã chọn bên dưới")).size(12.4),
                 )
                 .changed()
             {
@@ -1236,7 +1229,29 @@ mod tests {
     }
 
     #[test]
-    fn transcript_labels_senders_hides_files_and_keeps_order() {
+    fn old_assistant_consent_requires_confirmation_again() {
+        let old: AppSettings = serde_json::from_value(serde_json::json!({
+            "ai_group_confirmed": ["group-1"],
+            "ai_preload_consent": true,
+            "ai_preload_enabled": true,
+            "ai_preload_threads": ["group-1"],
+        }))
+        .unwrap();
+        assert!(old.ai_group_confirmed.is_empty());
+        assert!(!old.ai_preload_consent);
+        assert!(old.ai_preload_enabled && old.ai_preload_threads.contains("group-1"));
+
+        let new: AppSettings = serde_json::from_value(serde_json::json!({
+            "ai_group_confirmed_v2": ["group-1"],
+            "ai_preload_consent_v2": true,
+        }))
+        .unwrap();
+        assert!(new.ai_group_confirmed.contains("group-1"));
+        assert!(new.ai_preload_consent);
+    }
+
+    #[test]
+    fn transcript_labels_senders_includes_files_and_keeps_order() {
         let thread = Thread {
             id: "t".into(),
             name: "Sơn".into(),
@@ -1244,7 +1259,12 @@ mod tests {
             messages: vec![
                 msg("chào", "1234567", false, 1_700_000_000_000),
                 msg("hi", "Tôi", true, 1_700_000_060_000),
-                msg("", "1234567", false, 1_700_000_120_000),
+                ChatMessage {
+                    link_src: Some("Tập tin Zalo".into()),
+                    link_title: Some("agenda.pdf".into()),
+                    link_url: Some("https://files.example/agenda.pdf".into()),
+                    ..msg("", "1234567", false, 1_700_000_120_000)
+                },
             ],
             ..Default::default()
         };
@@ -1252,7 +1272,8 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].who, "Sơn"); // numeric uid in a 1-1 chat -> conversation name
         assert_eq!(lines[1].who, "Tôi");
-        assert_eq!(lines[2].text, "[tệp hoặc hình ảnh]");
+        let (transcript, _) = ai::build_transcript(&lines, ai::CONTEXT_BUDGET_CHARS);
+        assert!(transcript.contains("[Tệp: agenda.pdf — https://files.example/agenda.pdf]"));
         let group = Thread {
             is_group: true,
             ..thread
