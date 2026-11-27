@@ -12,6 +12,14 @@ pub fn macos_default_dir(home: &Path) -> PathBuf {
     home.join("Library/Application Support/ctdozlite")
 }
 
+/// Platform paths supplied by the caller, independently of the test or build host.
+#[derive(Clone, Copy)]
+pub enum Platform<'a> {
+    MacOs(Option<&'a Path>),
+    Windows(Option<&'a Path>),
+    Other,
+}
+
 /// Resolve paths without changing process state, including in parallel tests.
 ///
 /// # Errors
@@ -20,8 +28,7 @@ pub fn resolve(
     args: &[String],
     cwd: &Path,
     executable: &Path,
-    home: Option<&Path>,
-    macos: bool,
+    platform: Platform<'_>,
 ) -> Result<(PathBuf, bool)> {
     let mut explicit = None;
     let mut profile_name = None;
@@ -93,14 +100,17 @@ pub fn resolve(
     // On macOS every run (the .app, `cargo run`, the TUI, helper CLIs) shares one private data
     // directory, so they all see the same session and message database. Only a developer run
     // without HOME falls back to the working directory; a bundle without HOME is an error.
-    let (base, is_private) = match (macos, home) {
-        (true, Some(home)) => {
+    let (base, is_private) = match platform {
+        Platform::MacOs(Some(home)) => {
             if !home.is_absolute() && !home.to_str().is_some_and(|s| s.starts_with('/')) {
                 bail!("HOME phải là đường dẫn tuyệt đối");
             }
             (macos_default_dir(home), true)
         }
-        (true, None) if bundled => bail!("Cần HOME để xác định Application Support"),
+        Platform::MacOs(None) if bundled => bail!("Cần HOME để xác định Application Support"),
+        Platform::Windows(Some(local_app_data)) if local_app_data.is_absolute() => {
+            (local_app_data.join("ctdozlite"), true)
+        }
         _ => (cwd.to_path_buf(), false),
     };
     if let Some(prof) = profile_name {
@@ -147,41 +157,110 @@ pub fn initialize(args: &[String]) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("Không xác định được thư mục làm việc")?;
     let executable =
         std::env::current_exe().context("Không xác định được đường dẫn chương trình")?;
+    #[cfg(target_os = "macos")]
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let (path, private) = resolve(
-        args,
-        &cwd,
-        &executable,
-        home.as_deref(),
-        cfg!(target_os = "macos"),
-    )?;
+    #[cfg(target_os = "macos")]
+    let platform = Platform::MacOs(home.as_deref());
+    #[cfg(windows)]
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    #[cfg(windows)]
+    let platform = Platform::Windows(local_app_data.as_deref());
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let platform = Platform::Other;
+    let (path, private) = resolve(args, &cwd, &executable, platform)?;
+    let print_only = args.iter().any(|arg| arg == "--print-data-dir");
+    let explicit = args
+        .iter()
+        .any(|arg| arg == "--data-dir" || arg.starts_with("--data-dir="));
+    #[cfg(windows)]
+    if print_only && !explicit {
+        // Report the resolved path without creating the new per-user directory.
+        return Ok(path);
+    }
     prepare(&path, private)?;
-    // First launch after the data-dir rule changed: bring over session/history that older builds
-    // left in the working directory. Never for explicit `--data-dir` / `--profile`, and not for
-    // `--print-data-dir`, which must have no side effects.
-    if cfg!(target_os = "macos")
-        && !args.iter().any(|a| a == "--print-data-dir")
-        && home
-            .as_deref()
-            .is_some_and(|home| path == macos_default_dir(home))
-    {
-        let report = migrate_legacy_cwd_storage(&cwd, &path);
-        if !report.moved.is_empty() {
-            eprintln!(
-                "ℹ Đã chuyển dữ liệu cũ từ {} sang {}: {} (bản gốc đổi tên thành *.bak).",
-                cwd.display(),
-                path.display(),
-                report.moved.join(", ")
-            );
+    let profile = args
+        .iter()
+        .any(|arg| arg == "--profile" || arg.starts_with("--profile="));
+    let selected = if private && !print_only && !explicit && !profile {
+        match platform {
+            Platform::MacOs(_) => {
+                migrate_and_report(&cwd, &path);
+                path.as_path()
+            }
+            #[cfg(windows)]
+            Platform::Windows(_) => {
+                let selected = migrate_windows_storage(&cwd, &executable, &path, probe_legacy_db);
+                if selected != path.as_path() {
+                    prepare(selected, false)?;
+                }
+                selected
+            }
+            _ => path.as_path(),
         }
-        for error in &report.errors {
-            eprintln!("! Không chuyển được dữ liệu cũ: {error}");
+    } else {
+        path.as_path()
+    };
+    // Legacy storage callers use relative paths; switch once before creating workers.
+    std::env::set_current_dir(selected)
+        .with_context(|| format!("Không chọn được thư mục dữ liệu {}", selected.display()))?;
+    Ok(selected.to_path_buf())
+}
+
+fn migrate_and_report(source: &Path, target: &Path) -> bool {
+    let report = migrate_legacy_cwd_storage(source, target);
+    let moved = !report.moved.is_empty();
+    if moved {
+        eprintln!(
+            "ℹ Đã chuyển dữ liệu cũ từ {} sang {}: {} (bản gốc đổi tên thành *.bak).",
+            source.display(),
+            target.display(),
+            report.moved.join(", ")
+        );
+    }
+    for error in &report.errors {
+        eprintln!("! Không chuyển được dữ liệu cũ: {error}");
+    }
+    moved
+}
+
+#[cfg(any(windows, test))]
+fn migrate_windows_storage<'a>(
+    cwd: &'a Path,
+    executable: &'a Path,
+    target: &'a Path,
+    probe_db: impl Fn(&Path) -> std::io::Result<()>,
+) -> &'a Path {
+    let exe_dir = executable.parent().filter(|dir| !same_directory(cwd, dir));
+    for source in std::iter::once(cwd).chain(exe_dir) {
+        if !can_migrate_legacy_storage(source, target) {
+            continue;
+        }
+        if matches!(
+            probe_db(&source.join("zalo_history.db")),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound
+        ) {
+            eprintln!("! Không thể mở độc quyền cơ sở dữ liệu cũ. Sẽ thử chuyển dữ liệu vào lần khởi động sau.");
+            // Keep using the legacy data for this launch while the old process closes its DB.
+            return source;
+        }
+        if migrate_and_report(source, target) {
+            break;
         }
     }
-    // Legacy storage callers use relative paths; switch once before creating workers.
-    std::env::set_current_dir(&path)
-        .with_context(|| format!("Không chọn được thư mục dữ liệu {}", path.display()))?;
-    Ok(path)
+    target
+}
+
+#[cfg(windows)]
+fn probe_legacy_db(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // The updater may relaunch us before the old build closes its WAL-mode database.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(path)
+        .map(drop)
 }
 
 /// Files that older builds wrote next to the working directory. SQLite sidecars travel with the
@@ -267,8 +346,22 @@ fn backup_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.with_file_name(format!("{base}.bak")))
 }
 
-/// Move session, history and settings that older builds kept in the working directory into the
-/// macOS data directory.
+fn same_directory(first: &Path, second: &Path) -> bool {
+    first == second
+        || match (first.canonicalize(), second.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
+fn can_migrate_legacy_storage(source: &Path, target: &Path) -> bool {
+    !same_directory(source, target)
+        && !LEGACY_ANCHORS.iter().any(|n| target.join(n).exists())
+        && LEGACY_ANCHORS.iter().any(|n| source.join(n).exists())
+}
+
+/// Move session, history and settings that older builds kept in a launch directory into the
+/// per-user data directory.
 ///
 /// Non-destructive and idempotent: each item is copied (owner-only), verified by size, and only
 /// then renamed to `<name>.bak` in the source (the `*.bak` pattern is git-ignored). Items already
@@ -276,14 +369,7 @@ fn backup_path(path: &Path) -> PathBuf {
 /// session/history yet and the source holds some. Errors are reported, never fatal.
 pub fn migrate_legacy_cwd_storage(cwd: &Path, target: &Path) -> MigrationReport {
     let mut report = MigrationReport::default();
-    let same = match (cwd.canonicalize(), target.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => cwd == target,
-    };
-    if same
-        || LEGACY_ANCHORS.iter().any(|n| target.join(n).exists())
-        || !LEGACY_ANCHORS.iter().any(|n| cwd.join(n).exists())
-    {
+    if !can_migrate_legacy_storage(cwd, target) {
         return report;
     }
     for name in LEGACY_FILES.iter().chain(LEGACY_DIRS) {
@@ -548,18 +634,24 @@ mod tests {
         let cwd = Path::new("/work");
         let exe = Path::new("/Applications/Zalo.app/Contents/MacOS/ctdozlite");
         assert_eq!(
-            resolve(&[], cwd, exe, Some(Path::new("/Users/fixture")), true).unwrap(),
+            resolve(
+                &[],
+                cwd,
+                exe,
+                Platform::MacOs(Some(Path::new("/Users/fixture")))
+            )
+            .unwrap(),
             (
                 PathBuf::from("/Users/fixture/Library/Application Support/ctdozlite"),
                 true
             )
         );
         assert_eq!(
-            resolve(&[], cwd, Path::new("/bin/ctdozlite"), None, true).unwrap(),
+            resolve(&[], cwd, Path::new("/bin/ctdozlite"), Platform::MacOs(None)).unwrap(),
             (cwd.to_path_buf(), false)
         );
         assert_eq!(
-            resolve(&[], cwd, exe, None, false).unwrap(),
+            resolve(&[], cwd, exe, Platform::Other).unwrap(),
             (cwd.to_path_buf(), false)
         );
         assert_eq!(
@@ -567,21 +659,19 @@ mod tests {
                 &["--data-dir".into(), "fixture".into()],
                 cwd,
                 exe,
-                None,
-                true
+                Platform::MacOs(None)
             )
             .unwrap(),
             (cwd.join("fixture"), true)
         );
-        assert!(resolve(&[], cwd, exe, None, true).is_err());
-        assert!(resolve(&["--data-dir".into()], cwd, exe, None, true).is_err());
-        assert!(resolve(&["--data-dir=".into()], cwd, exe, None, true).is_err());
+        assert!(resolve(&[], cwd, exe, Platform::MacOs(None)).is_err());
+        assert!(resolve(&["--data-dir".into()], cwd, exe, Platform::MacOs(None)).is_err());
+        assert!(resolve(&["--data-dir=".into()], cwd, exe, Platform::MacOs(None)).is_err());
         assert!(resolve(
             &["--data-dir=a".into(), "--data-dir=b".into()],
             cwd,
             exe,
-            None,
-            true
+            Platform::MacOs(None)
         )
         .is_err());
         assert_eq!(
@@ -589,8 +679,7 @@ mod tests {
                 &["--profile".into(), "acc_2".into()],
                 cwd,
                 Path::new("/bin/ctdozlite"),
-                None,
-                true
+                Platform::MacOs(None)
             )
             .unwrap(),
             (cwd.join("profiles").join("acc_2"), true)
@@ -625,17 +714,28 @@ mod tests {
         let cwd = Path::new("/work");
         let exe = Path::new("/Applications/Fixture.app/Contents/MacOS/ctdozlite");
         assert_eq!(
-            resolve(&["--data-dir=/fixture-data".into()], cwd, exe, None, true).unwrap(),
+            resolve(
+                &["--data-dir=/fixture-data".into()],
+                cwd,
+                exe,
+                Platform::MacOs(None)
+            )
+            .unwrap(),
             (PathBuf::from("/fixture-data"), true)
         );
-        assert!(resolve(&[], cwd, exe, Some(Path::new("relative-home")), true).is_err());
+        assert!(resolve(
+            &[],
+            cwd,
+            exe,
+            Platform::MacOs(Some(Path::new("relative-home")))
+        )
+        .is_err());
         assert_eq!(
             resolve(
                 &[],
                 cwd,
                 Path::new("/Fixture.app/Contents/MacOS-extra/ctdozlite"),
-                None,
-                true
+                Platform::MacOs(None)
             )
             .unwrap(),
             (cwd.to_path_buf(), false)
@@ -675,7 +775,13 @@ mod tests {
         let exe = Path::new("/bin/ctdozlite");
         for flag in ["-d", "-v", "-V", "--logout"] {
             assert!(
-                resolve(&["--data-dir".into(), flag.into()], cwd, exe, None, true).is_err(),
+                resolve(
+                    &["--data-dir".into(), flag.into()],
+                    cwd,
+                    exe,
+                    Platform::MacOs(None)
+                )
+                .is_err(),
                 "accepted {flag}"
             );
         }
@@ -683,7 +789,7 @@ mod tests {
             vec!["--data-dir=-d".into()],
             vec!["--data-dir".into(), "./-d".into()],
         ] {
-            let (path, private) = resolve(&args, cwd, exe, None, true).unwrap();
+            let (path, private) = resolve(&args, cwd, exe, Platform::MacOs(None)).unwrap();
             assert_eq!(path, cwd.join("-d"));
             assert!(private);
         }
@@ -723,8 +829,7 @@ mod tests {
                 &[],
                 cwd,
                 Path::new("/work/repo/target/debug/zalo-next"),
-                Some(home),
-                true
+                Platform::MacOs(Some(home))
             )
             .unwrap(),
             (expected.clone(), true)
@@ -735,8 +840,7 @@ mod tests {
                 &["--profile=acc2".into()],
                 cwd,
                 Path::new("/bin/zalo-next"),
-                Some(home),
-                true
+                Platform::MacOs(Some(home))
             )
             .unwrap(),
             (expected.join("profiles").join("acc2"), true)
@@ -746,23 +850,21 @@ mod tests {
                 &["--data-dir=/tmp/x".into()],
                 cwd,
                 Path::new("/bin/zalo-next"),
-                Some(home),
-                true
+                Platform::MacOs(Some(home))
             )
             .unwrap(),
             (PathBuf::from("/tmp/x"), true)
         );
-        // Linux / Windows keep the working directory.
+        // Linux keeps the working directory.
         assert_eq!(
-            resolve(&[], cwd, Path::new("/bin/zalo-next"), Some(home), false).unwrap(),
+            resolve(&[], cwd, Path::new("/bin/zalo-next"), Platform::Other).unwrap(),
             (cwd.to_path_buf(), false)
         );
         assert!(resolve(
             &[],
             cwd,
             Path::new("/bin/zalo-next"),
-            Some(Path::new("rel")),
-            true
+            Platform::MacOs(Some(Path::new("rel")))
         )
         .is_err());
     }
@@ -770,6 +872,147 @@ mod tests {
     fn write(path: &Path, contents: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn windows_default_and_profile_use_private_local_app_data() {
+        let root = fixture();
+        let cwd = root.join("cwd");
+        let exe = root.join("bin/zalo-next.exe");
+        let local_app_data = root.join("Local");
+        let platform = Platform::Windows(Some(&local_app_data));
+        let base = local_app_data.join("ctdozlite");
+        assert_eq!(
+            resolve(&[], &cwd, &exe, platform).unwrap(),
+            (base.clone(), true)
+        );
+        assert_eq!(
+            resolve(&["--profile=work".into()], &cwd, &exe, platform).unwrap(),
+            (base.join("profiles").join("work"), true)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_missing_or_relative_local_app_data_falls_back_to_cwd() {
+        let root = fixture();
+        let exe = root.join("bin/zalo-next.exe");
+        for local_app_data in [None, Some(Path::new("relative-app-data"))] {
+            let platform = Platform::Windows(local_app_data);
+            assert_eq!(
+                resolve(&[], &root, &exe, platform).unwrap(),
+                (root.clone(), false)
+            );
+            assert_eq!(
+                resolve(&["--profile=work".into()], &root, &exe, platform).unwrap(),
+                (root.join("profiles").join("work"), true)
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_storage_wins_on_all_platforms() {
+        let root = fixture();
+        let exe = root.join("bin/zalo-next");
+        let absolute = root.join("absolute-data");
+        for platform in [
+            Platform::MacOs(Some(&root)),
+            Platform::Windows(Some(&root)),
+            Platform::Other,
+        ] {
+            for (arg, expected) in [
+                (
+                    format!("--data-dir={}", absolute.display()),
+                    absolute.clone(),
+                ),
+                (
+                    "--data-dir=relative-data".into(),
+                    root.join("relative-data"),
+                ),
+            ] {
+                assert_eq!(
+                    resolve(&[arg, "--profile=work".into()], &root, &exe, platform).unwrap(),
+                    (expected, true)
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_migration_prefers_cwd_then_uses_executable_directory() {
+        let root = fixture();
+        let cwd = root.join("cwd");
+        let exe = root.join("bin/zalo-next.exe");
+        let exe_dir = exe.parent().unwrap();
+        let target = root.join("storage");
+        write(&cwd.join("session.json"), b"cwd fixture");
+        write(&exe_dir.join("session.json"), b"executable fixture");
+        let missing_db = |_: &Path| Err(std::io::ErrorKind::NotFound.into());
+
+        assert_eq!(
+            migrate_windows_storage(&cwd, &exe, &target, missing_db),
+            target
+        );
+        assert_eq!(
+            std::fs::read(target.join("session.json")).unwrap(),
+            b"cwd fixture"
+        );
+        assert!(cwd.join("session.json.bak").is_file());
+        assert!(exe_dir.join("session.json").is_file());
+
+        let second_target = root.join("second-storage");
+        assert_eq!(
+            migrate_windows_storage(&cwd, &exe, &second_target, missing_db),
+            second_target
+        );
+        assert_eq!(
+            std::fs::read(second_target.join("session.json")).unwrap(),
+            b"executable fixture"
+        );
+        assert!(exe_dir.join("session.json.bak").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_migration_uses_locked_legacy_directory_and_retries_later() {
+        let root = fixture();
+        let cwd = root.join("cwd");
+        let exe = root.join("bin/zalo-next.exe");
+        let exe_dir = exe.parent().unwrap();
+        let target = root.join("storage");
+        prepare(&target, true).unwrap();
+        for source in [cwd.as_path(), exe_dir] {
+            write(&source.join("session.json"), b"legacy fixture");
+            write(&source.join("zalo_history.db"), b"db fixture");
+        }
+        let locked = |_: &Path| Err(std::io::ErrorKind::PermissionDenied.into());
+        assert_eq!(migrate_windows_storage(&cwd, &exe, &target, locked), cwd);
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        assert!(cwd.join("session.json").is_file());
+        assert!(exe_dir.join("session.json").is_file());
+
+        let clean_cwd = root.join("empty-cwd");
+        std::fs::create_dir(&clean_cwd).unwrap();
+        assert_eq!(
+            migrate_windows_storage(&clean_cwd, &exe, &target, locked),
+            exe_dir
+        );
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        assert!(exe_dir.join("zalo_history.db").is_file());
+
+        assert_eq!(
+            migrate_windows_storage(&cwd, &exe, &target, |_| Ok(())),
+            target
+        );
+        assert!(target.join("zalo_history.db").is_file());
+        assert!(cwd.join("zalo_history.db.bak").is_file());
+        assert_eq!(
+            migrate_windows_storage(&clean_cwd, &exe, &target, locked),
+            target
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

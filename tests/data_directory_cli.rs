@@ -139,26 +139,23 @@ fn finder_bundle_with_root_cwd_selects_private_application_support() {
 }
 
 #[test]
-fn legacy_cli_keeps_cwd_and_version_does_not_prepare_storage() {
-    eprintln!(
-        "CARGO_BIN_EXE_zalo-next={}",
-        env!("CARGO_BIN_EXE_zalo-next")
-    );
+fn cli_selects_platform_default_and_version_does_not_prepare_storage() {
     let fixture = Fixture::new();
-    // macOS: every run (not only the .app) shares ~/Library/Application Support/ctdozlite.
-    // Other platforms keep the working directory.
     let home = fixture.0.join("home");
     std::fs::create_dir(&home).unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_zalo-next"))
         .args(["--print-data-dir", "--logout"])
         .env("HOME", &home)
+        .env("LOCALAPPDATA", &home)
         .current_dir(&fixture.0)
         .output()
         .unwrap();
     assert!(result.status.success());
     #[cfg(target_os = "macos")]
     let expected = home.join("Library/Application Support/ctdozlite");
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let expected = home.join("ctdozlite");
+    #[cfg(not(any(target_os = "macos", windows)))]
     let expected = fixture.0.clone();
     assert_eq!(
         String::from_utf8_lossy(&result.stdout).trim(),
@@ -187,7 +184,7 @@ fn legacy_cli_keeps_cwd_and_version_does_not_prepare_storage() {
 }
 
 #[test]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn print_data_dir_never_migrates_legacy_working_directory_files() {
     let fixture = Fixture::new();
     let home = fixture.0.join("home");
@@ -196,18 +193,23 @@ fn print_data_dir_never_migrates_legacy_working_directory_files() {
     let result = Command::new(env!("CARGO_BIN_EXE_zalo-next"))
         .args(["--print-data-dir", "--logout"])
         .env("HOME", &home)
+        .env("LOCALAPPDATA", &home)
         .current_dir(&fixture.0)
         .output()
         .unwrap();
     assert!(result.status.success());
-    // Side-effect free: the legacy file stays put and nothing is copied.
     assert_eq!(
         std::fs::read(fixture.0.join("session.json")).unwrap(),
         b"legacy session"
     );
-    assert!(!home
-        .join("Library/Application Support/ctdozlite/session.json")
-        .exists());
+    #[cfg(target_os = "macos")]
+    let data = home.join("Library/Application Support/ctdozlite");
+    #[cfg(windows)]
+    let data = home.join("ctdozlite");
+    assert!(!data.join("session.json").exists());
+    assert!(!fixture.0.join("session.json.bak").exists());
+    #[cfg(windows)]
+    assert!(!data.exists());
 }
 
 #[test]
