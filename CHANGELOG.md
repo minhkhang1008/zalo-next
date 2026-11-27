@@ -8,10 +8,18 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+### Changed (Thay đổi)
+- **Windows dùng một thư mục dữ liệu cố định `%LOCALAPPDATA%\ctdozlite`** (trước đây là thư mục khởi chạy, nên mở từ Start menu, từ file `.exe` hay từ terminal có thể thấy phiên đăng nhập khác nhau). Lần mở đầu tiên tự chuyển dữ liệu cũ sang, giữ bản gốc `*.bak`. Chưa kiểm thử trên máy thật.
+
+### Added (Tính năng mới)
+- **Thông báo trên Windows:** tin nhắn mới, nhắc hẹn, bản cập nhật và cuộc gọi đến hiện thông báo của Windows, kèm ảnh đại diện người gửi. Chưa kiểm thử trên máy thật (đặc biệt với bản portable).
+
 ### Fixed (Sửa lỗi)
 - **Emoji màu trên Windows:** emoji trong tin nhắn và bảng Emoji giờ hiện màu từ phông Segoe UI Emoji (trước đây chỉ macOS có, Windows vẫn hiện emoji trắng đen). Chưa kiểm thử trên máy Windows thật; cờ quốc gia trên Windows vẫn là chữ như mặc định của Segoe UI Emoji. Linux cũng hiện màu với bản Noto Color Emoji dạng vector (COLRv1).
 - **Kéo-thả tệp trên Windows/Linux** (chưa kiểm thử trên máy thật): trước đây vùng thả dựa vào vị trí chuột cũ (trước khi kéo) nên có thể **gửi ngay** dù bạn thả vào ô soạn tin. Windows giờ đọc vị trí chuột thật trong lúc kéo và chỉ gửi ngay khi cả lúc kéo lẫn lúc thả đều ở vùng tin nhắn; Linux luôn đính kèm để xem trước khi gửi.
 - **Chụp màn hình trên Windows** (chưa kiểm thử trên máy thật): mở Snipping Tool mà không còn nháy cửa sổ PowerShell, và báo lỗi khi không mở được công cụ chụp.
+- **Tự cập nhật trên Windows:** bản mới chỉ mở sau khi bản cũ đã thoát (trước đây hai bản chạy cùng lúc trên cùng dữ liệu), thay file có hoàn tác khi lỗi, và khi không thay được bản cài (ví dụ cài cho mọi người dùng trong Program Files) thì báo tải bộ cài thay vì mở bản portable trong Downloads. Chưa kiểm thử trên máy thật.
+- Chuyển dữ liệu cũ sang thư mục dữ liệu mới (macOS, Windows) giờ làm trọn một lượt: lỗi giữa chừng không còn để lại lịch sử thiếu.
 - Tệp nhận về có tên trùng tên thiết bị của Windows (`CON`, `NUL.txt`, `COM1.log`…) được đổi thành `_CON`… để lưu được.
 - Phông chữ hệ thống trên Windows được tìm theo thư mục Windows thật (`%WINDIR%`), không mặc định `C:\Windows`. Trên macOS, gợi ý phím tắt dán ảnh/tìm kiếm ghi `Cmd+V`/`Cmd+F` thay vì `Ctrl`.
 

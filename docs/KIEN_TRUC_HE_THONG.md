@@ -115,7 +115,8 @@ trong `src/bin/`.
 1. `main.rs` đọc cờ dòng lệnh. `--version` và `--check-update` chạy rồi thoát mà không đụng tới dữ liệu.
    `--print-data-dir` chuẩn bị thư mục (tạo, thử ghi) nhưng không chuyển dữ liệu cũ, in đường dẫn rồi thoát.
 2. `data_dir::resolve` chọn thư mục; `initialize` tạo thư mục (quyền `0700` với thư mục riêng tư trên Unix),
-   chuyển dữ liệu cũ khi cần (macOS) rồi `chdir` vào đó.
+   chuyển dữ liệu cũ khi cần (macOS, Windows; sao chép vào thư mục tạm, kiểm tra rồi mới đưa vào một lượt) rồi
+   `chdir` vào đó. Sau khi tự cập nhật trên Windows, bản mới nhận `--wait-for-pid` và chờ bản cũ thoát trước khi mở dữ liệu.
 3. Nạp `session.json`. Nếu còn hạn, GUI hiện ngay danh sách từ `threads_cache.json`. Worker kết nối
    WebSocket và đồng bộ phần còn thiếu từ máy chủ và SQLite.
 
@@ -155,7 +156,7 @@ và khoá sắp xếp danh sách được cache để giảm CPU lúc rảnh.
 | `stickers_cache/`, `media_cache/` | Cache ảnh sticker và media |
 | `ai_secret.json`, `sync_identity.json` | API key trợ lý, danh tính Sync V2 (bí mật, `0600`) |
 
-Thư mục dữ liệu trên macOS là `~/Library/Application Support/ctdozlite`. Tên cũ được giữ để không mất đăng
+Thư mục dữ liệu trên macOS là `~/Library/Application Support/ctdozlite`, trên Windows là `%LOCALAPPDATA%\ctdozlite`. Tên cũ được giữ để không mất đăng
 nhập và quyền hệ thống (ADR-0005).
 
 ---

@@ -87,7 +87,7 @@ Gặp lỗi: [Xử lý sự cố](docs/KHAC_PHUC_SU_CO.md).
 - Không tự tải liên kết trong tin nhắn đến để tạo bản xem trước.
 - Trợ lý AI mặc định **không** đọc nội dung cuộc trò chuyện; bạn bật riêng từng cuộc. API key lưu trong tệp riêng tư, không nằm trong cài đặt thường.
 
-Dữ liệu nằm ở `~/Library/Application Support/ctdozlite` (giữ tên cũ để không mất đăng nhập khi đổi tên app).
+Dữ liệu nằm ở `~/Library/Application Support/ctdozlite` trên macOS và `%LOCALAPPDATA%\ctdozlite` trên Windows (giữ tên cũ để không mất đăng nhập khi đổi tên app).
 **Không chia sẻ `session.json` cho bất kỳ ai.**
 
 **Gỡ cài đặt:** kéo `Zalo-next.app` vào Thùng rác; muốn xóa cả dữ liệu thì xóa thêm thư mục trên.

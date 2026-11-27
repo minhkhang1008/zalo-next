@@ -1172,3 +1172,38 @@ Entry template:
   only via WinGet; Linux AppImage self-update path, tray, apt-only FFmpeg; Windows CI only on tags/labels.
   Inferred only (need a live Windows session): image-only Ctrl+V quick taps missed; Telex Space recovery.
 - Status: committed locally, not pushed.
+
+## 2026-11-27 — Windows data dir, toast notifications, updater relaunch  (agent: Claude Code, claude-opus-5-5 (orchestrator) + Codex (worker ×4, adversarial reviewer ×4))
+- Request: owner picked three items from the Windows audit (data dir to %LOCALAPPDATA%, updater flow, Windows
+  notifications) and approved pushing `fix/windows-parity` to run the Windows CI job.
+- Changes (branch `fix/windows-parity`, Codex wrote from Claude's briefs, Claude read every diff and re-ran tests):
+  - `data_dir.rs`: `resolve` takes a `Platform` (pure); Windows base `%LOCALAPPDATA%\ctdozlite` (cwd fallback if
+    unset). Migration (also macOS) now stages every item in `<target>/.migration-staging`, size-checks, publishes in
+    one pass, then renames sources to `.bak`; failure rolls back and retries next launch. Windows: sources ranked
+    session > accounts > db (cwd before exe dir), `profiles/` carried, per-profile migration for `--profile`, waits
+    ≤30 s for other same-name processes (ToolHelp) and probes the DB with `share_mode(0)`, else uses the legacy dir
+    for that run.
+  - `native_notifications.rs`: WinRT toast via `windows` 0.54 (already locked by cpal; feature edge only). Fixed
+    XML template + DOM `SetInnerText`/`SetAttribute`, avatar only as a local `file:///` (UNC rejected), AUMID
+    `com.ctdoteam1110.ctdozlite` registered in HKCU and on the Inno shortcuts, ≤2 in-flight calls, stale toasts
+    dropped. `status()` maps ToastNotifier.Setting.
+  - Updater: transactional Windows swap with rollback (`try_install_windows_portable_release`), relaunch with
+    hidden `--wait-for-pid` (stripped, never accumulates); the new exe exits if the old one outlives 60 s;
+    swap failure returns a release-page error instead of running the portable exe from Downloads; `.exe.old`
+    removed only after storage is selected.
+- Verification: `cargo test --locked` green here (453 lib + integration). Windows CI (`workflow_dispatch` on the
+  branch) green on runs 46008274032 and 46010264987: compiles the WinRT/ToolHelp/kernel32 code, runs the Windows
+  data-dir and toast unit tests, and the Segoe UI Emoji test (now asserts the font is found on Windows).
+- Reviews: adversarial ×3 (one per area) + round 2 on the fixes; `security-audit` skill in guidance mode found no
+  boundary violation (toast text only via DOM, no remote image, updater keeps SHA-256/pinned URLs).
+  Fixed in round 1: non-atomic migration, DB-probe race, empty-DB shadowing, stranded profiles, wait timeout
+  starting a 2nd instance, early `.exe.old` delete, toast pool exhaustion.
+  Open after the 2-round cap (owner decision): crash mid-publish then launch from another dir can reuse a partial
+  target; macOS opens an empty target after a rolled-back migration (blocks retry); two simultaneous first
+  launches can both fall back to the legacy dir; a destination `profiles/` created first blocks importing sibling
+  legacy profiles; relaunch after update forwards a relative `--data-dir` that then resolves against the data dir.
+  Not fixed: portable builds may not show toasts (HKCU AUMID without a Start-menu shortcut; Microsoft documents
+  the shortcut).
+- NOT verified: anything at runtime on Windows — a real update from v0.4.0, migration on a real profile, toasts
+  appearing (setup and portable), Windows 10 vs 11.
+- Status: committed on `fix/windows-parity`, pushed (branch only). Not merged to main, no release.

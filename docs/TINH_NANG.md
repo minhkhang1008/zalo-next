@@ -77,7 +77,7 @@ Chỉ đổi trạng thái khi có bằng chứng (chạy thật hoặc chủ d�
 | Chạy nền khi đóng cửa sổ | ✅ | Icon ở menu bar (macOS) / khay (Windows); Linux chỉ thu nhỏ, Windows chưa kiểm thử |
 | Trợ lý AI `@AI` | ✅ | Chỉ mình bạn thấy, không gửi tới Zalo; cần tự cấu hình nhà cung cấp tương thích OpenAI. Chưa kiểm chứng với nhà cung cấp thật; chưa có streaming. Xem [AI_TRO_LY.md](AI_TRO_LY.md) |
 | Giao diện terminal (TUI) | ✅ | `--tui` |
-| Thông báo tin nhắn mới (macOS) | ✅ | Notification Center |
+| Thông báo tin nhắn mới | ✅ | macOS: Notification Center. Windows: thông báo (toast) của Windows, chưa kiểm thử trên máy thật; Linux chưa có |
 | Emoji màu, hiển thị tiếng Việt/CJK | ✅ | Dùng font hệ thống: Apple Color Emoji (macOS), Segoe UI Emoji (Windows, chưa kiểm thử trên máy thật), Noto Color Emoji (Linux) |
-| Tự động cập nhật | ✅ | Kiểm tra Releases của repo này khi mở app và mỗi 30 phút; tải, xác minh SHA-256, thay app tại chỗ rồi mở lại (macOS). **Cài đặt → Kiểm tra cập nhật** để kiểm tra thủ công |
+| Tự động cập nhật | ✅ | Kiểm tra Releases của repo này khi mở app và mỗi 30 phút; tải, xác minh SHA-256, thay app tại chỗ rồi mở lại (macOS; Windows bản portable/cài theo người dùng — mở lại sau khi bản cũ đã thoát, chưa kiểm thử trên máy thật). **Cài đặt → Kiểm tra cập nhật** để kiểm tra thủ công |
 | REST API cục bộ & MCP server | 🚫 | Tắt để không mở cổng mạng |
