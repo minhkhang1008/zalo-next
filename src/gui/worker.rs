@@ -1099,7 +1099,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         let client = if crate::session::is_trusted_zalo_url(&url) {
                                             session.lock().await.clone().http
                                         } else {
-                                            crate::media_resources::credential_free_client()
+                                            crate::media_resources::playback_client()
                                                 .map_err(|_| "Không chuẩn bị được kết nối tải video.".to_string())?
                                         };
                                         let progress_tx = tx.clone();
@@ -1218,7 +1218,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         let client = if crate::session::is_trusted_zalo_url(&url) {
                                             session.lock().await.clone().http
                                         } else {
-                                            crate::media_resources::credential_free_client()
+                                            crate::media_resources::playback_client()
                                                 .map_err(|_| "Không chuẩn bị được kết nối tải ghi âm.".to_string())?
                                         };
                                         crate::media_resources::stream_original(

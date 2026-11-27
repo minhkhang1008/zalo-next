@@ -47,6 +47,39 @@ pub fn credential_free_client() -> Result<reqwest::Client, reqwest::Error> {
         )
         .build()
 }
+/// Client for videos and voice notes the user chose to play from a Zalo message. Zalo's video CDN
+/// answers with a 301 to the server that holds the file, and that server is not always a Zalo
+/// domain, so redirects are followed (≤5 hops) to any public http(s) host — as the browser does —
+/// but never to loopback/private addresses, and no cookies are sent anywhere.
+///
+/// # Errors
+/// Returns an error when the TLS client cannot be constructed.
+pub fn playback_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let target = attempt.url();
+            // Scheme and host only: the query carries a signed token.
+            eprintln!(
+                "[media] redirect {} -> {}://{}",
+                attempt.status().as_u16(),
+                target.scheme(),
+                target.host_str().unwrap_or_default()
+            );
+            if attempt.previous().len() < MAX_MEDIA_REDIRECTS
+                && crate::chat::is_safe_external_image_url(target.as_str())
+            {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
+        )
+        .build()
+}
 pub const ACTIVE_JOBS: usize = 4;
 pub const PENDING_JOBS: usize = 128;
 
