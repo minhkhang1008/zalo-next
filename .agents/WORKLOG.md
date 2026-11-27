@@ -1250,3 +1250,18 @@ Entry template:
   photo/file URLs need the session or work cookie-free), large real groups.
 - Status: committed on `feature/ai-context`, not pushed or merged. Follow-up: mandatory Codex adversarial review
   (AI client is high-risk) once Codex quota resets; live test with a real provider.
+
+## 2026-11-27 — Clickable links in `@AI` answers; in-app video loading  (agent: Claude Code, claude-opus-5-5)
+- Request: URLs in AI answers could not be clicked; in-app video mostly failed with "Không tải được video từ Zalo."
+- Root causes: (1) `render_ai_bubble` called `Response::context_menu` on the bubble frame after its labels; egui's
+  `context_interaction` re-registers that rect with `Sense::click()` last, so it sat on top of the link labels and
+  took the click. URLs inside `code`/**bold** or glued to punctuation were also never treated as links.
+  (2) Inferred, not captured: video URLs live on `*.dlmd.me`, fetched with `credential_free_client`, which had
+  redirects off, so a CDN 3xx became `MediaError::Http(3xx)`; browsers follow it.
+- Changes: `ai_ui.rs` registers the right-click target (last frame's rect) before the content; `messages.rs`
+  `embedded_url` fallback makes a line clickable when it contains a URL anywhere; `media_resources.rs`
+  `credential_free_client` follows ≤5 redirects to https Zalo media hosts only (`media_redirect_allowed`) and uses
+  the ZaloPC user agent; the video arm logs `MediaError` + host (no query) and shows the HTTP code.
+- Verification: cargo check, `media_redirects_stay_on_zalo_media_hosts`; release build launched for the owner.
+- NOT verified: that redirects were the real video cause (no capture) — if videos still fail, the log line
+  `video download` names the error; link clicks need the owner's GUI check.
