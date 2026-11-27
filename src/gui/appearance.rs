@@ -223,6 +223,7 @@ impl ZaloGuiApp {
                         });
                 });
             });
+            render_font_licences(ui, pal);
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(8.0);
@@ -513,4 +514,35 @@ mod tests {
         assert!(s.animations_enabled);
         assert!(s.custom_primary_color.is_none());
     }
+}
+
+/// Bundled fonts and their licences. The SIL OFL asks for the licence to travel with the font;
+/// showing it here covers every package, since the fonts are compiled into the binary.
+const FONT_LICENCES: &[(&str, &str)] = &[
+    (
+        "Be Vietnam Pro",
+        include_str!("../assets/fonts/BeVietnamPro-OFL.txt"),
+    ),
+    ("Open Sans", include_str!("../assets/fonts/OpenSans-OFL.txt")),
+];
+
+fn render_font_licences(ui: &mut egui::Ui, pal: &ThemePalette) {
+    egui::CollapsingHeader::new(
+        RichText::new("Giấy phép phông chữ")
+            .color(pal.text_secondary)
+            .size(11.8),
+    )
+    .id_salt("appearance_font_licences")
+    .show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("appearance_font_licences_text")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for (font, licence) in FONT_LICENCES {
+                    ui.label(RichText::new(*font).color(pal.text_primary).strong());
+                    ui.label(RichText::new(*licence).color(pal.text_secondary).size(11.0));
+                    ui.add_space(8.0);
+                }
+            });
+    });
 }
