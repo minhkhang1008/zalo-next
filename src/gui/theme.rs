@@ -1263,7 +1263,7 @@ const FONT_CHOICES: &[(&str, &str, &[&str])] = &[
 pub(super) fn available_font_choices() -> Vec<(&'static str, &'static str)> {
     FONT_CHOICES
         .iter()
-        .filter(|(key, _, files)| {
+        .filter(|(_, _, files)| {
             files.is_empty()
                 || files
                     .iter()
