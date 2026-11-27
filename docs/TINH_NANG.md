@@ -75,7 +75,7 @@ Chỉ đổi trạng thái khi có bằng chứng (chạy thật hoặc chủ d�
 |---|---|---|
 | Giao diện đồ hoạ kiểu Zalo PC, sáng/tối/hệ thống | ✅ | **Cài đặt → Giao diện**: bảng màu, phông chữ, thu phóng, hiệu ứng, màu tùy chỉnh |
 | Chạy nền khi đóng cửa sổ | ✅ | Icon ở menu bar (macOS) / khay (Windows); Linux chỉ thu nhỏ, Windows chưa kiểm thử |
-| Trợ lý AI `@AI` | ✅ | Chỉ mình bạn thấy, không gửi tới Zalo; cần tự cấu hình nhà cung cấp tương thích OpenAI. Chưa kiểm chứng với nhà cung cấp thật; chưa có streaming. Xem [AI_TRO_LY.md](AI_TRO_LY.md) |
+| Trợ lý AI `@AI` | ✅ | Chỉ mình bạn thấy, không gửi tới Zalo; cần tự cấu hình nhà cung cấp tương thích OpenAI. Khi bật chia sẻ: liên kết, ảnh, tệp, tra cứu lịch sử của cuộc trò chuyện (ADR-0007). Chưa kiểm chứng với nhà cung cấp thật (công cụ và ảnh chỉ thử với máy chủ giả); chưa có streaming. Xem [AI_TRO_LY.md](AI_TRO_LY.md) |
 | Giao diện terminal (TUI) | ✅ | `--tui` |
 | Thông báo tin nhắn mới | ✅ | macOS: Notification Center. Windows: thông báo (toast) của Windows, chưa kiểm thử trên máy thật; Linux chưa có |
 | Emoji màu, hiển thị tiếng Việt/CJK | ✅ | Dùng font hệ thống: Apple Color Emoji (macOS), Segoe UI Emoji (Windows, chưa kiểm thử trên máy thật), Noto Color Emoji (Linux) |

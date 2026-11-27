@@ -12,9 +12,13 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Windows dùng một thư mục dữ liệu cố định `%LOCALAPPDATA%\ctdozlite`** (trước đây là thư mục khởi chạy, nên mở từ Start menu, từ file `.exe` hay từ terminal có thể thấy phiên đăng nhập khác nhau). Lần mở đầu tiên tự chuyển dữ liệu cũ sang, giữ bản gốc `*.bak`. Chưa kiểm thử trên máy thật.
 
 ### Added (Tính năng mới)
+- **Trợ lý `@AI` đọc sâu hơn** (khi bật chia sẻ cho cuộc trò chuyện): thấy liên kết, ai trả lời ai, giờ và id từng tin, đọc thêm lịch sử đã lưu trên máy (không chỉ các tin đang hiện), và tự **tra cứu** trong chính cuộc trò chuyện đó (tìm tin, liệt kê liên kết, xem tin cũ hơn, mở ảnh/tệp). Trả lời một tin Zalo bằng `@AI` để hỏi về tin đó. Chưa kiểm chứng với nhà cung cấp AI thật.
+- **Gửi ảnh và tệp cho `@AI`:** dán ảnh hoặc kéo tệp vào khung soạn tin rồi gõ `@AI …`; AI cũng xem được ảnh/tệp của tin được trả lời và ảnh gần đây khi câu hỏi nói về ảnh. PDF, Word, Excel, PowerPoint, văn bản và mã nguồn được đọc chữ. Chỉ tải từ máy chủ Zalo hoặc từ máy bạn. Model không nhận ảnh hoặc không hỗ trợ tra cứu thì tự hỏi lại không kèm phần đó.
 - **Thông báo trên Windows:** tin nhắn mới, nhắc hẹn, bản cập nhật và cuộc gọi đến hiện thông báo của Windows, kèm ảnh đại diện người gửi. Chưa kiểm thử trên máy thật (đặc biệt với bản portable).
 
 ### Fixed (Sửa lỗi)
+- **`@AI` không tìm được liên kết** đã gửi trong cuộc trò chuyện: trước đây mọi liên kết bị thay bằng `[liên kết]` và thẻ liên kết, tệp, ảnh bị bỏ khỏi ngữ cảnh.
+- Gõ `@AI …` khi đang có ảnh dán hoặc tệp kéo vào khung soạn tin không còn **gửi ảnh/tệp lên Zalo** kèm câu hỏi làm chú thích; trả lời một tin Zalo bằng `@AI` không còn làm mất tin đó.
 - **Emoji màu trên Windows:** emoji trong tin nhắn và bảng Emoji giờ hiện màu từ phông Segoe UI Emoji (trước đây chỉ macOS có, Windows vẫn hiện emoji trắng đen). Chưa kiểm thử trên máy Windows thật; cờ quốc gia trên Windows vẫn là chữ như mặc định của Segoe UI Emoji. Linux cũng hiện màu với bản Noto Color Emoji dạng vector (COLRv1).
 - **Kéo-thả tệp trên Windows/Linux** (chưa kiểm thử trên máy thật): trước đây vùng thả dựa vào vị trí chuột cũ (trước khi kéo) nên có thể **gửi ngay** dù bạn thả vào ô soạn tin. Windows giờ đọc vị trí chuột thật trong lúc kéo và chỉ gửi ngay khi cả lúc kéo lẫn lúc thả đều ở vùng tin nhắn; Linux luôn đính kèm để xem trước khi gửi.
 - **Chụp màn hình trên Windows** (chưa kiểm thử trên máy thật): mở Snipping Tool mà không còn nháy cửa sổ PowerShell, và báo lỗi khi không mở được công cụ chụp.
@@ -24,6 +28,7 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - Phông chữ hệ thống trên Windows được tìm theo thư mục Windows thật (`%WINDIR%`), không mặc định `C:\Windows`. Trên macOS, gợi ý phím tắt dán ảnh/tìm kiếm ghi `Cmd+V`/`Cmd+F` thay vì `Ctrl`.
 
 ### Security (Bảo mật)
+- Vì `@AI` giờ có thể gửi liên kết, ảnh và tệp, các nhóm đã đồng ý chia sẻ (khi trước chỉ gửi văn bản) và tính năng Đọc trước sẽ **hỏi lại một lần**.
 - **Tự cập nhật an toàn hơn:** chỉ cài khi kiểm tra được mã SHA-256 (thiếu mã thì hướng dẫn tải thủ công); chỉ tải từ trang phát hành của repo này, kể cả khi bị chuyển hướng.
 - **Không tự tải ảnh từ máy chủ lạ:** ảnh, album, ảnh bìa video và ảnh xem trước liên kết từ máy chủ ngoài Zalo chỉ hiện khi bạn bấm **Hiện ảnh**. Ảnh từ Zalo vẫn hiện như cũ. Mọi lượt tải ảnh đều có giới hạn dung lượng và không gửi cookie Zalo tới máy chủ khác.
 - Cookie phiên `zpw_sek` không bao giờ được gửi qua kết nối không mã hoá; tệp `threads_cache.json` chỉ chủ máy đọc được (quyền `0600`).

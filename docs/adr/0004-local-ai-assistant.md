@@ -1,6 +1,7 @@
 # ADR-0004: Local-only AI assistant as a virtual participant
 
-- **Status:** accepted (implemented 2026-11-17; pending live verification with a real provider)
+- **Status:** accepted (implemented 2026-11-17; pending live verification with a real provider). Decision 4 is
+  superseded by [ADR-0007](0007-ai-rich-context-and-tools.md): links, attachments and older history are now shared.
 - **Date:** 2026-11-17
 - **Deciders:** repository owner
 

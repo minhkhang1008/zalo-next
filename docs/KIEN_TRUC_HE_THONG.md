@@ -170,7 +170,7 @@ nhập và quyền hệ thống (ADR-0005).
 | `api.github.com`, `github.com` (repo này) | Kiểm tra và tải bản cập nhật | Không |
 | `chat.zalo.me/libs/…wasm` | Runtime Sync V2 | Không |
 | `osxexperts.net`, `evermeet.cx` (cho phép chuyển hướng tới mirror `e.deolaha.ca`) | Tải FFmpeg (macOS) | Không |
-| Địa chỉ trợ lý AI do người dùng cấu hình | `@AI` | Không, chỉ API key của trợ lý |
+| Địa chỉ trợ lý AI do người dùng cấu hình | `@AI` (văn bản, liên kết, ảnh/tệp đã thu nhỏ hoặc trích chữ khi bật chia sẻ; ADR-0007) | Không, chỉ API key của trợ lý |
 
 App không chạy máy chủ cục bộ nào (REST/MCP đã tắt); cuộc gọi chỉ mở cổng UDP tạm cho RTP/RTCP. App không tự
 tải các liên kết trong tin nhắn đến. Ảnh và ảnh thu nhỏ từ máy chủ ngoài Zalo chỉ được tải khi người dùng bấm

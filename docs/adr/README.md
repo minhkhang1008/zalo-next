@@ -10,9 +10,10 @@ One decision per file: `NNNN-<kebab-name>.md`, numbered from `0001`, never renum
 | [0001](0001-history-sync.md) | History sync and backup import (inherited from ctdozlite) | Partly superseded, see the note in the file |
 | [0002](0002-self-updater.md) | Self-updater contract and `latest.json` (inherited) | Accepted; update source is this repo only |
 | [0003](0003-changelog-policy.md) | Changelog and release notes (inherited) | Accepted |
-| [0004](0004-local-ai-assistant.md) | Local-only AI assistant as a virtual participant | Accepted; not verified with a real provider |
+| [0004](0004-local-ai-assistant.md) | Local-only AI assistant as a virtual participant | Accepted; decision 4 superseded by ADR-0007 |
 | [0005](0005-independence-from-upstream.md) | Zalo-next is independent of upstream ctdozlite | Accepted |
 | [0006](0006-multi-agent-workflow.md) | Claude Code orchestrates, Codex implements and cross-reviews | Accepted |
+| [0007](0007-ai-rich-context-and-tools.md) | AI assistant reads links, attachments and older history | Accepted; not verified with a real provider |
 
 Domain language: [`GLOSSARY.md`](../../GLOSSARY.md).
 

@@ -7,6 +7,9 @@
 > `Thread.messages`, nên các chỗ chặn ở mục 3.2 gần như tự thỏa mãn; (2) API key lưu ở `ai_secret.json`
 > (quyền `0600`) hoặc biến môi trường, chưa dùng Keychain; (3) chưa có streaming (trả lời hiện một lần);
 > (4) gợi ý nhanh là các nút bấm ở khung soạn tin khi gõ `@AI`.
+>
+> **Cập nhật 2026-11-27 ([ADR 0007](adr/0007-ai-rich-context-and-tools.md)):** khi bật chia sẻ, AI thấy cả liên kết,
+> tên/nội dung tệp, ảnh, id tin, quan hệ trả lời, và có công cụ tra cứu lịch sử của chính cuộc trò chuyện đó. Xem mục 12.
 
 ## 1. Mục tiêu
 
@@ -24,7 +27,7 @@ như "Tóm tắt cuộc trò chuyện", đặc biệt hữu ích với nhóm l�
 ### Ngoài phạm vi (lượt này)
 
 - AI tự động trả lời hộ (auto-reply) hoặc tự gửi tin sang Zalo.
-- Gọi hàm/công cụ (tool calling), tạo ảnh, đọc nội dung tệp đính kèm.
+- Tạo ảnh. (Gọi công cụ tra cứu và đọc tệp/ảnh đính kèm đã có từ 2026-11-27, xem mục 12.)
 - Đồng bộ lịch sử chat với AI giữa nhiều máy.
 - Giữ nguyên REST/MCP bị vô hiệu hóa (xem `AGENTS.md`).
 
@@ -134,7 +137,8 @@ Từ khảo sát code hiện tại, mọi chỗ sau phải bỏ qua hoặc xử 
 2. **Lộ thông tin xác thực Zalo cho host AI hoặc ngược lại**: hai client tách biệt, không chung cookie jar, header
    hay redirect.
 3. **Prompt injection** từ tin nhắn người khác ("hãy bỏ qua hướng dẫn trước…"): tin nhắn đưa vào model là *dữ liệu*,
-   không phải lệnh (xem 6.3). AI ở lượt này không có công cụ nên hậu quả giới hạn ở nội dung câu trả lời.
+   không phải lệnh (xem 6.3). Công cụ của AI chỉ **đọc** lịch sử của chính cuộc trò chuyện đang hỏi (không nhận id cuộc trò chuyện làm tham số),
+   có giới hạn số vòng và kích thước kết quả, nên hậu quả giới hạn ở nội dung câu trả lời.
 4. **Lộ API key**: không đặt trong `app_settings.json` (có thể bị sao lưu/chia sẻ), không đưa vào dòng lệnh
    (`ps`), không ghi log.
 5. **SSRF/chuyển hướng**: tắt redirect, chỉ `https` (hoặc loopback), timeout cứng, giới hạn kích thước phản hồi.
@@ -147,8 +151,9 @@ trong thư mục dữ liệu. Base URL và Model lưu trong `app_settings.json`.
 
 ### 4.3 Quy tắc riêng với Zalo
 
-`AGENTS.md`: "Không tự động gửi HTTP GET tới URL của tin nhắn đến" — AI không được tự mở link trong chat; chỉ gửi
-văn bản. Tệp/ảnh đính kèm không gửi cho AI ở lượt này.
+`AGENTS.md`: "Không tự động gửi HTTP GET tới URL của tin nhắn đến" — app không tự mở link trong chat; URL chỉ được
+gửi cho AI dưới dạng **chữ**. Ảnh/tệp chỉ được tải khi nằm trên máy chủ Zalo (`is_trusted_zalo_url`) hoặc là tệp trên
+máy do người dùng đính kèm vào câu hỏi `@AI`; ảnh/tệp ở máy chủ khác chỉ gửi tên và URL.
 
 ## 5. Chia sẻ ngữ cảnh
 
@@ -162,15 +167,18 @@ văn bản. Tệp/ảnh đính kèm không gửi cho AI ở lượt này.
   gửi tới <host AI>". Ghi nhớ lựa chọn theo cuộc trò chuyện (lưu như `muted_threads`/`thread_labels` trong
   `AppSettings`).
 - Huy hiệu nhỏ ở khung soạn thảo cho biết trạng thái hiện tại ("AI đọc cuộc trò chuyện" / "AI không đọc").
-- Chỉ gửi **văn bản**: không URL đính kèm, ảnh, tệp, thông tin số điện thoại; tên người gửi lấy theo tên hiển thị.
+- Khi bật: gửi văn bản, liên kết, thông tin tệp/ảnh và (khi cần) nội dung ảnh/tệp, xem mục 12; tên người gửi lấy
+  theo tên hiển thị. Sự đồng ý cũ (thời "chỉ văn bản") không được dùng lại: mỗi nhóm và tính năng đọc trước hỏi lại
+  một lần.
 
 ## 6. Dựng ngữ cảnh và tóm tắt
 
 ### 6.1 Ngân sách
 
-Cắt theo số ký tự (xấp xỉ token): mặc định ~12.000 ký tự cho ngữ cảnh + ~2.000 cho lịch sử với AI + giới hạn độ dài
+Cắt theo số ký tự (xấp xỉ token): mặc định ~24.000 ký tự cho ngữ cảnh + ~2.000 cho lịch sử với AI + giới hạn độ dài
 trả lời (`max_tokens`). Luôn giữ **đuôi mới nhất** của cuộc trò chuyện và câu hỏi; bỏ phần cũ nhất trước. Sắp xếp theo
-thời gian tăng dần, mỗi dòng dạng `[HH:mm] Tên: nội dung`, đánh dấu tin của bạn là `Tôi`.
+thời gian tăng dần, mỗi dòng dạng `[#id · dd/mm HH:mm] Tên (trả lời Người: …): nội dung [Liên kết: tiêu đề — URL]`,
+đánh dấu tin của bạn là `Tôi`. Ngữ cảnh gộp tin đang có trong bộ nhớ với tối đa 600 tin trong lịch sử cục bộ.
 
 ### 6.2 Nhóm lớn: tóm tắt
 
@@ -178,7 +186,7 @@ thời gian tăng dần, mỗi dòng dạng `[HH:mm] Tên: nội dung`, đánh d
 - "Tóm tắt từ lần đọc cuối": dùng mốc `unread` có sẵn.
 - Rất dài (vượt ngân sách): **map-reduce** — chia khúc, tóm tắt từng khúc (tuần tự, có hủy), rồi tóm tắt các bản tóm
   tắt. Có thanh tiến độ và nút Hủy; kết quả ghi rõ khoảng thời gian đã tóm.
-- Câu hỏi theo ngữ cảnh ("ai hẹn mấy giờ?") dùng cùng cơ chế cửa sổ gần nhất; không có tìm kiếm ngữ nghĩa ở lượt này.
+- Câu hỏi theo ngữ cảnh ("ai hẹn mấy giờ?") dùng cửa sổ gần nhất; nếu chưa đủ, AI tự gọi công cụ tra cứu (mục 12).
 
 ### 6.3 Mẫu prompt (rút gọn)
 
@@ -209,7 +217,7 @@ tin duy nhất trong bộ nhớ và chỉ ghi DB khi xong; Hủy khi người d�
 
 ## 9. Kiểm thử
 
-- **Đơn vị**: dựng ngữ cảnh (ngân sách, thứ tự, che URL), parse phản hồi (`choices[0].message.content` rỗng, lỗi
+- **Đơn vị**: dựng ngữ cảnh (ngân sách, thứ tự, giữ nguyên URL), parse phản hồi (`choices[0].message.content` rỗng, lỗi
   JSON, `error.message`), che key, kiểm tra `https`/loopback, id `ai_` bị loại khỏi mọi đường gửi Zalo.
 - **Tích hợp (HTTP giả cục bộ)**: 200 / 401 / 429 / timeout / phản hồi khổng lồ / redirect; xác nhận không có cookie
   hay header Zalo nào xuất hiện ở request tới host AI.
@@ -242,3 +250,23 @@ làm trước phần đó ở nền.
 - Cuộc trò chuyện đã chọn được coi là đã đồng ý chia sẻ (kể cả nhóm), nhưng công tắc riêng từng cuộc ở khung soạn tin
   vẫn có quyền ưu tiên cao hơn (tắt thì AI không đọc).
 
+
+## 12. Ngữ cảnh mở rộng: liên kết, công cụ tra cứu, ảnh và tệp (2026-11-27)
+
+Quyết định ở [ADR 0007](adr/0007-ai-rich-context-and-tools.md). Chỉ áp dụng khi **bật chia sẻ** cho cuộc trò chuyện,
+trừ tệp/ảnh bạn tự đính kèm vào câu hỏi `@AI`.
+
+- **Liên kết và siêu dữ liệu:** mỗi tin gửi kèm id, giờ, người gửi, tin được trả lời và phần đính kèm
+  (`[Liên kết|Ảnh|Tệp|Video|Tin thoại|Nhãn dán: tiêu đề — URL — mô tả]`). URL giữ nguyên văn để AI trích lại.
+- **Trả lời một tin Zalo bằng `@AI`:** tin đó (kèm liên kết, ảnh hoặc tệp của nó) được gửi như `<tin_duoc_tra_loi nguon="zalo">`.
+- **Công cụ tra cứu** (chỉ trong cuộc trò chuyện đang hỏi): `search_messages`, `list_links`, `get_recent_messages`,
+  `get_messages_around`, `read_attachment`. Tối đa 4 vòng gọi, 8 lần tra cứu, mỗi kết quả tối đa 8.000 ký tự. Nếu máy
+  chủ AI từ chối `tools` (HTTP 400/415/422) thì hỏi lại một lần không kèm công cụ; ghi chú "model không hỗ trợ tra cứu".
+- **Ảnh:** ảnh đính kèm câu hỏi, ảnh của tin được trả lời, tối đa 3 ảnh gần nhất khi câu hỏi nói về ảnh, và ảnh AI
+  yêu cầu qua `read_attachment`. Thu nhỏ còn cạnh dài 1024 px, JPEG, gửi dạng `data:` URL; tối đa 4 ảnh/lượt. Nếu máy
+  chủ từ chối ảnh thì hỏi lại một lần không kèm ảnh; ghi chú "model không nhận ảnh". App không lọc theo tên model.
+- **Tệp:** PDF, DOCX, XLSX, PPTX, văn bản và mã nguồn được trích chữ (PDF chạy trong tiến trình cô lập), tối đa 12.000
+  ký tự/tệp và 30.000 ký tự/lượt; loại khác chỉ gửi tên, loại và URL.
+- **Chỉ tải từ Zalo hoặc từ máy:** ảnh/tệp trên máy chủ khác Zalo không bao giờ được tải; giới hạn dung lượng giữ như
+  phần xem ảnh/xem trước tài liệu.
+- **Chưa kiểm chứng** với nhà cung cấp thật (công cụ và ảnh chỉ được kiểm thử với máy chủ giả cục bộ).

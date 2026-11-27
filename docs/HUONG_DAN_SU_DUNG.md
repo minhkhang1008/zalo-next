@@ -102,8 +102,13 @@ Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dù
 3. Chuột phải vào tin của AI để **Sao chép**, **Trả lời** (tiếp tục hỏi AI), **Tạo lại câu trả lời** hoặc **Xóa**
    (chỉ xóa trên máy này).
 4. **Chia sẻ nội dung cuộc trò chuyện**: mặc định tắt, AI chỉ thấy câu hỏi của bạn. Bật ở Cài đặt (mặc định chung) hoặc
-   ngay ở khung soạn tin khi gõ `@AI` (từng cuộc trò chuyện) để AI đọc văn bản các tin gần đây và tóm tắt/gợi ý tốt hơn.
-   Nhóm chat luôn hỏi xác nhận lần đầu vì có tin nhắn của người khác. Liên kết, ảnh và tệp không bao giờ được gửi.
+   ngay ở khung soạn tin khi gõ `@AI` (từng cuộc trò chuyện). Khi bật, AI đọc các tin gần đây kèm liên kết, tên người gửi,
+   tin được trả lời, ảnh và tệp, và tự tra cứu lịch sử cũ hơn của **chính cuộc trò chuyện đó** (ví dụ `@AI tìm link
+   bảng tính hôm qua`). Nhóm chat luôn hỏi xác nhận lần đầu vì có tin nhắn của người khác.
+   - Trả lời (Reply) một tin Zalo rồi gõ `@AI …`: AI đọc tin đó, kể cả ảnh hoặc tệp của nó.
+   - Dán ảnh hoặc kéo tệp vào khung soạn tin rồi gõ `@AI …`: ảnh/tệp gửi cho AI (không gửi lên Zalo), kể cả khi tắt chia sẻ.
+   - Chỉ ảnh/tệp trên máy chủ Zalo hoặc trên máy bạn mới được tải; PDF, Word, Excel, PowerPoint, văn bản và mã nguồn được
+     đọc chữ. Model không nhận ảnh hoặc không hỗ trợ tra cứu thì app tự hỏi lại không kèm phần đó và ghi chú dưới câu trả lời.
 5. API key nằm trong tệp riêng tư `ai_secret.json` (không nằm trong `app_settings.json`). Biến môi trường
    `CTDOZ_BASE_URL`, `CTDOZ_API_KEY`, `CTDOZ_MODEL` luôn ưu tiên hơn cài đặt.
 6. **Đọc trước ngữ cảnh (tùy chọn, mặc định tắt):** ở Cài đặt → Trợ lý AI, đồng ý cho AI đọc, chọn các cuộc trò chuyện
