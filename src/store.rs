@@ -573,6 +573,7 @@ impl MessageStore {
                 let mut link_thumb = None;
                 let mut link_src = None;
                 let mut media_size = None;
+                let mut poll_id = None;
                 if !sm.raw_json.is_empty() {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sm.raw_json) {
                         sticker_id = val
@@ -652,6 +653,10 @@ impl MessageStore {
                             .get("media_size")
                             .and_then(|value| <(u32, u32)>::deserialize(value).ok())
                             .filter(crate::chat::valid_media_size);
+                        poll_id = val
+                            .get("poll_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
                     }
                 }
                 let cm = ChatMessage {
@@ -681,20 +686,28 @@ impl MessageStore {
                     link_thumb,
                     link_src,
                     media_size,
+                    poll_id,
 
                     ..Default::default()
                 };
                 if let Some(existing) = t.messages.iter_mut().find(|existing| {
                     (!existing.id.is_empty() && existing.id == cm.id)
-                        || (existing.text == cm.text
+                        || (existing.poll_id.is_none()
+                            && cm.poll_id.is_none()
+                            && existing.text == cm.text
                             && existing.is_outgoing == cm.is_outgoing
                             && (existing.ts == cm.ts
                                 || (existing.ts != 0
                                     && cm.ts != 0
                                     && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
-                    if existing.id == cm.id && existing.media_size.is_none() {
-                        existing.media_size = cm.media_size;
+                    if existing.id == cm.id {
+                        if existing.media_size.is_none() {
+                            existing.media_size = cm.media_size;
+                        }
+                        if existing.poll_id.is_none() {
+                            existing.poll_id = cm.poll_id;
+                        }
                     }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
@@ -773,6 +786,8 @@ impl From<&ChatMessage> for StoredMessage {
             meta.insert("cateId".into(), serde_json::json!(cid));
             meta.insert("type".into(), serde_json::json!(st));
             "chat.sticker".to_string()
+        } else if m.poll_id.is_some() {
+            "group.poll".to_string()
         } else {
             "chat.text".to_string()
         };
@@ -817,6 +832,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if let Some((width, height)) = m.media_size {
             meta.insert("media_size".into(), serde_json::json!([width, height]));
+        }
+        if let Some(poll_id) = &m.poll_id {
+            meta.insert("poll_id".into(), serde_json::json!(poll_id));
         }
         let raw_json = if meta.is_empty() {
             String::new()

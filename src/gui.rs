@@ -18,6 +18,7 @@ use eframe::egui::{
 
 use crate::chat::{ChatMessage, Thread};
 use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
+use crate::poll::PollDetail;
 use crate::qr::QrLogin;
 use crate::session::Session;
 use crate::storage_usage::{ClearReport, ClearTarget, Usage};
@@ -36,6 +37,7 @@ mod messages;
 mod modals;
 mod photo_gallery;
 mod picker;
+mod poll_card;
 mod productivity;
 mod reactions_dialog;
 mod stickers;
@@ -83,6 +85,16 @@ pub enum GuiEvent {
         account: String,
         generation: u64,
         result: Result<String, String>,
+    },
+    PollLoaded {
+        account: String,
+        poll_id: String,
+        result: Result<PollDetail, String>,
+    },
+    PollVoted {
+        account: String,
+        poll_id: String,
+        result: Result<PollDetail, String>,
     },
     Productivity {
         account: String,
@@ -910,9 +922,17 @@ impl GuiTx {
     }
 }
 
+/// In-memory state of a group poll for the current account.
+pub enum PollState {
+    Loading,
+    Loaded(PollDetail),
+    Error(String),
+}
+
 pub struct ZaloGuiApp {
     productivity: productivity::State,
     doc_preview: doc_preview_ui::State,
+    group_polls: HashMap<String, PollState>,
     voice: voice_ui::State,
     video_tools_status: String,
     video_tools_progress: f32,
@@ -1373,6 +1393,7 @@ impl ZaloGuiApp {
         let app = Self {
             productivity: Default::default(),
             doc_preview: Default::default(),
+            group_polls: HashMap::new(),
             voice: Default::default(),
             video_tools_status: "Đang kiểm tra công cụ gọi video…".into(),
             video_tools_progress: 0.0,
@@ -1731,6 +1752,16 @@ impl ZaloGuiApp {
                     }
                 }
                 GuiEvent::Productivity { account, update } => self.local_update(account, update),
+                GuiEvent::PollLoaded { account, poll_id, result }
+                | GuiEvent::PollVoted { account, poll_id, result } => {
+                    if self.is_logged_in && account == self.user_uin {
+                        let state = match result {
+                            Ok(detail) => PollState::Loaded(detail),
+                            Err(error) => PollState::Error(error),
+                        };
+                        self.group_polls.insert(poll_id, state);
+                    }
+                }
                 GuiEvent::NotificationAuthorization { request_id, result } => {
                     self.notification_authorization.finish(request_id, result);
                 }
@@ -1771,6 +1802,7 @@ impl ZaloGuiApp {
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
                     if !self.is_logged_in || self.user_uin != uin {
                         self.invalidate_storage_usage();
+                        self.group_polls.clear();
                     }
                     if let Some(tx) = WORKER_TX.get() {
                         self.conv_labels_loading = true;
@@ -2036,6 +2068,7 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::SessionExpired(reason) => {
                     self.invalidate_storage_usage();
+                    self.group_polls.clear();
                     self.productivity = Default::default();
                     self.voice = Default::default();
                     self.doc_preview = Default::default();
@@ -2058,6 +2091,7 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::LoggedOut => {
                     self.invalidate_storage_usage();
+                    self.group_polls.clear();
                     self.close_image_viewer();
                     self.productivity = Default::default();
                     self.voice = Default::default();
@@ -2078,6 +2112,7 @@ impl ZaloGuiApp {
                     threads,
                 } => {
                     self.invalidate_storage_usage();
+                    self.group_polls.clear();
                     // The viewer holds the previous account's photos.
                     self.close_image_viewer();
                     self.is_logged_in = true;
