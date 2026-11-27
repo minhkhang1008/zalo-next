@@ -30,6 +30,7 @@ pub mod reactions;
 pub mod session;
 pub mod single_instance;
 pub mod socket;
+pub mod storage_usage;
 pub mod store;
 /// Location of the operating system's font files.
 pub mod system_fonts;
