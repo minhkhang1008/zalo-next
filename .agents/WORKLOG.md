@@ -1268,3 +1268,36 @@ Entry template:
   `playback_client` (= credential-free client, redirects only to Zalo media hosts). Owner confirmed video plays.
 - Originally NOT verified: that redirects were the real video cause (no capture) — if videos still fail, the log line
   `video download` names the error; link clicks need the owner's GUI check.
+
+## 2026-11-28 — Image viewer: step through a conversation's photos like Zalo Web  (agent: Claude Code, claude-opus-5-5 (orchestrator, wrote it) + Codex (reviewer, 2 rounds))
+- Request: implement Zalo Web's multi-photo viewer UX (observed by Claude on chat.zalo.me, My Documents, 2026-11-27:
+  conversation-wide photo list with album members flattened, vertical day-grouped thumbnail strip on the right, ▲/▼
+  buttons, ↑/← older and ↓/→ newer with no wrap, instant swap, wheel = zoom, zoom resets per photo; Zalo mounts one
+  full-size image and flashes an empty stage while it loads). Kept with Claude rather than delegated: GUI judgment work
+  that needs the owner's live check.
+- Changes: new `src/gui/photo_gallery.rs` (photo collection with the bubbles' own rules, lookup by message id then
+  thumbnail key then URL, day labels in UTC+7, `may_auto_fetch`, virtualised strip renderer with a cached row layout).
+  `ImageViewerModal` (gui.rs) gains the photo list, index and texture bookkeeping; `ImageViewerModal::single` for
+  cover/feed photos. `workspace.rs`: `open_photo_viewer`, `show_viewer_photo`, `load_viewer_originals`,
+  `release_hd_textures`, `close_image_viewer`; chat bubbles, albums and the info drawer open the gallery
+  (`BubbleAction::OpenImagePopup` now carries `msg_id`). `modals.rs`: keys, side column, wheel zoom only over the
+  stage, thumbnail placeholder while the original loads (Zalo shows a blank), "tải ảnh gốc"/retry states, focus taken
+  from the composer once. `messages.rs`: `message_sender_label`, `photo_open_target`, `photo_title_label` extracted.
+  `worker.rs`: `hd_` textures capped at 4096 px (GPU texture limit; copy/save still use the original bytes on disk).
+  `gui.rs`: `discard_textures` drops downloads released before they arrive; viewer closed on logout/account switch.
+- Loading policy: originals of the current photo ±1 load only after a 180 ms pause on a photo (a held arrow key only
+  shows thumbnails); the viewer keeps at most those three `hd_` textures and releases the rest plus strip-loaded
+  thumbnails on close. Neighbours preload only from trusted Zalo media hosts or our own sent `local://` files.
+- Review: round 1 (10 findings) fixed: GPU size cap, `local://` provenance, eviction of in-flight originals, wrong
+  message for a shared thumbnail, failure state, strip virtualisation, original-load prompt, focus, moved strip out of
+  modals.rs. Round 2 (9) fixed: close on account switch, debounce, strip thumbnails released on close, stage-click
+  ownership, per-message thumbnail gate, prompt after an unsupported URL, cached layout. Rejected: (a) redirect
+  allowlist for session-client `FetchStickerImage` downloads — pre-existing for every auto-loaded Zalo thumbnail, not
+  new to this change, worth its own task; (b) sorting photos by normalised timestamp — the gallery follows the chat's
+  own message order; a mixed s/ms ordering bug would be in thread loading, not here. Known limit: the strip can still
+  hold many 720 px thumbnails while open in a very photo-heavy chat (released on close).
+- Verification: cargo check; `cargo test --locked` 494 passed (11 new `photo_gallery` tests); rustfmt on clean files,
+  no rustfmt drift added to messages.rs/gui.rs; no clippy warnings on changed lines.
+- NOT verified: anything visual or interactive (layout, keys, strip scrolling, zoom reset, placeholder, toggle) — needs
+  the owner's GUI run; Windows/Linux.
+- Status: done pending the owner's live check.

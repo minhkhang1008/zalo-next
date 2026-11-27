@@ -611,6 +611,10 @@ fn use_session_for_sticker_image(fetch_url: &str) -> bool {
 /// grid thumbnails, so they get their own, still bounded, body limit.
 const ORIGINAL_IMAGE_LIMIT: usize = 64 * 1024 * 1024;
 
+/// Longest side of an `hd_` texture. Well under the 8192–16384 px texture limit of the GPUs we
+/// run on, and still sharper than any screen the viewer fills.
+const HD_TEXTURE_MAX: u32 = 4096;
+
 fn sticker_image_body_limit(key: &str) -> usize {
     if key.starts_with("hd_") {
         ORIGINAL_IMAGE_LIMIT
@@ -3381,9 +3385,18 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     }
                                     // Bubbles draw images up to 360 pt wide; resize large photos to 720px max
                                     // so inline thumbnails stay crisp on Retina/HiDPI displays (#72).
-                                    // The viewer's `hd_` textures stay full size.
-                                    if !key.starts_with("ava_")
-                                        && !key.starts_with("hd_")
+                                    // The viewer's `hd_` textures keep up to `HD_TEXTURE_MAX` px: the GPU
+                                    // refuses (and egui panics on) textures past its size limit, and the
+                                    // viewer now preloads neighbouring originals. Copy/save read the
+                                    // untouched bytes from the disk cache.
+                                    if key.starts_with("hd_") {
+                                        if dyn_img.width() > HD_TEXTURE_MAX
+                                            || dyn_img.height() > HD_TEXTURE_MAX
+                                        {
+                                            dyn_img =
+                                                dyn_img.resize(HD_TEXTURE_MAX, HD_TEXTURE_MAX, image::imageops::FilterType::Triangle);
+                                        }
+                                    } else if !key.starts_with("ava_")
                                         && (dyn_img.width() > 720 || dyn_img.height() > 720)
                                     {
                                         dyn_img = dyn_img.thumbnail(720, 720);

@@ -183,6 +183,7 @@ pub(super) fn render_album_grid(
 ) -> Option<BubbleAction> {
     let (sticker_textures, failed_message_thumbnails) = thumbnail_cache;
     struct Cell {
+        msg_id: String,
         thumbnail: MessageThumbnail,
         open_target: String,
         aspect: f32,
@@ -196,12 +197,7 @@ pub(super) fn render_album_grid(
             continue;
         };
         let thumbnail = MessageThumbnail::new(msg, thumb_url, "thumb_");
-        let open_target = msg
-            .link_url
-            .as_deref()
-            .filter(|u| !u.is_empty() && crate::chat::is_zalo_photo_cdn_url(u))
-            .unwrap_or(thumb_url)
-            .to_string();
+        let open_target = photo_open_target(msg, thumb_url);
         let tex_size = thumbnail
             .texture(ui.ctx(), sticker_textures)
             .map(|t| t.size())
@@ -214,6 +210,7 @@ pub(super) fn render_album_grid(
                 .unwrap_or(1.0),
         };
         cells.push(Cell {
+            msg_id: msg.id.clone(),
             thumbnail,
             open_target,
             aspect,
@@ -336,6 +333,7 @@ pub(super) fn render_album_grid(
             }
             if resp.clicked() && !needs_click {
                 action = Some(BubbleAction::OpenImagePopup {
+                    msg_id: cell.msg_id.clone(),
                     tex_key: cell.thumbnail.key.clone(),
                     full_url: cell.open_target.clone(),
                     title: cell.title.clone(),

@@ -2486,7 +2486,7 @@ fn is_voice_message(msg: &ChatMessage) -> bool {
         || msg.link_src.as_deref() == Some("Thoại Zalo")
 }
 
-fn should_auto_load_message_thumbnail(url: &str) -> bool {
+pub(super) fn should_auto_load_message_thumbnail(url: &str) -> bool {
     let trusted_https = |url: &str| {
         url.starts_with("https://") && crate::session::is_trusted_zalo_media_url(url)
     };
@@ -2502,6 +2502,7 @@ fn should_request_message_thumbnail(
     !loading && (clicked || (auto_load && !failed))
 }
 
+#[derive(Clone)]
 pub(super) struct MessageThumbnail {
     pub(super) key: String,
     url: String,
@@ -2534,6 +2535,12 @@ impl MessageThumbnail {
             self.auto_load
                 || ctx.data(|data| data.get_temp::<bool>(self.request_id).unwrap_or(false))
         })
+    }
+
+    /// Whether this thumbnail loads by itself (trusted Zalo media or our own local file), as
+    /// opposed to only after a click.
+    pub(super) fn auto_loads(&self) -> bool {
+        self.auto_load
     }
 
     pub(super) fn needs_click(&self, failed: &HashSet<String>) -> bool {
@@ -2632,13 +2639,7 @@ pub(super) fn render_message_body(
         ui.add_space(2.0);
     }
 
-    let sender_label = if msg.is_outgoing {
-        "Bạn".to_string()
-    } else if !msg.sender.is_empty() && msg.sender != "0" {
-        msg.sender.clone()
-    } else {
-        thread_name.to_string()
-    };
+    let sender_label = message_sender_label(msg, thread_name);
 
     // Dedicated inline Photo Card when the message is an uploaded/received Zalo photo (#72)
     let is_zalo_photo = is_zalo_photo_message(msg);
@@ -2670,30 +2671,8 @@ pub(super) fn render_message_body(
         if let Some(thumb_url) = photo_primary_url(msg) {
             let thumbnail = MessageThumbnail::new(msg, thumb_url, "thumb_");
             let texture = thumbnail.texture(ui.ctx(), sticker_textures);
-            let open_target = msg
-                .link_url
-                .as_deref()
-                .filter(|u| !u.is_empty() && crate::chat::is_zalo_photo_cdn_url(u))
-                .unwrap_or(thumb_url)
-                .to_string();
-            let title_label = msg
-                .link_title
-                .as_deref()
-                .map(str::trim)
-                .filter(|t| {
-                    !t.is_empty()
-                        && !t.starts_with("http://")
-                        && !t.starts_with("https://")
-                        && !t.ends_with(".zdn.vn")
-                        && !t.ends_with(".zadn.vn")
-                        && !t.ends_with(".dlfl.vn")
-                        && !t.contains("zpcloud")
-                        && !t.contains("zpg-r")
-                        && !t.contains("photo-stal")
-                        && !t.contains("photo-zmp")
-                })
-                .unwrap_or("Hình ảnh")
-                .to_string();
+            let open_target = photo_open_target(msg, thumb_url);
+            let title_label = photo_title_label(msg);
 
             if let Some(tex) = texture {
                 let [tw, th] = tex.size();
@@ -2787,6 +2766,7 @@ pub(super) fn render_message_body(
                     }
                     if resp.clicked() {
                         body_action = Some(BubbleAction::OpenImagePopup {
+                            msg_id: msg.id.clone(),
                             tex_key: thumbnail.key,
                             full_url: open_target,
                             title: title_label,
@@ -2857,6 +2837,7 @@ pub(super) fn render_message_body(
                     .clicked()
                 {
                     body_action = Some(BubbleAction::OpenImagePopup {
+                        msg_id: msg.id.clone(),
                         tex_key: thumbnail.key,
                         full_url: open_target,
                         title: title_label,
@@ -3410,6 +3391,49 @@ pub(super) fn photo_primary_url(msg: &ChatMessage) -> Option<&str> {
         }
     }
     None
+}
+
+/// Who sent `msg`, as shown in bubbles and the image viewer ("Bạn" for our own messages).
+pub(super) fn message_sender_label(msg: &ChatMessage, thread_name: &str) -> String {
+    if msg.is_outgoing {
+        "Bạn".to_string()
+    } else if !msg.sender.is_empty() && msg.sender != "0" {
+        msg.sender.clone()
+    } else {
+        thread_name.to_string()
+    }
+}
+
+/// The URL the image viewer opens for a photo message: the original on Zalo's photo CDN when the
+/// message carries one, otherwise the thumbnail URL itself.
+pub(super) fn photo_open_target(msg: &ChatMessage, thumb_url: &str) -> String {
+    msg.link_url
+        .as_deref()
+        .filter(|u| !u.is_empty() && crate::chat::is_zalo_photo_cdn_url(u))
+        .unwrap_or(thumb_url)
+        .to_string()
+}
+
+/// A human title for a photo message. Zalo often puts the CDN host or URL in `link_title`; those
+/// are replaced by "Hình ảnh".
+pub(super) fn photo_title_label(msg: &ChatMessage) -> String {
+    msg.link_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| {
+            !t.is_empty()
+                && !t.starts_with("http://")
+                && !t.starts_with("https://")
+                && !t.ends_with(".zdn.vn")
+                && !t.ends_with(".zadn.vn")
+                && !t.ends_with(".dlfl.vn")
+                && !t.contains("zpcloud")
+                && !t.contains("zpg-r")
+                && !t.contains("photo-stal")
+                && !t.contains("photo-zmp")
+        })
+        .unwrap_or("Hình ảnh")
+        .to_string()
 }
 
 pub(super) fn is_zalo_photo_message(msg: &ChatMessage) -> bool {
@@ -4067,6 +4091,9 @@ pub(super) enum BubbleAction {
         is_video: bool,
     },
     OpenImagePopup {
+        /// The photo message, so the viewer opens exactly the clicked one even when two messages
+        /// share a thumbnail.
+        msg_id: String,
         tex_key: String,
         full_url: String,
         title: String,
@@ -4350,6 +4377,7 @@ fn message_extra_menu_items(
         if let Some(thumb_url) = photo_primary_url(msg) {
             if menu_item(ui, lucide::SEARCH, "Xem ảnh phóng to", pal.text_primary).clicked() {
                 *action = Some(BubbleAction::OpenImagePopup {
+                    msg_id: msg.id.clone(),
                     tex_key: format!("thumb_{}", crate::crypto::md5_hex(thumb_url)),
                     full_url: msg
                         .link_url

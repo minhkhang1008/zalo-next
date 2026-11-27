@@ -33,6 +33,7 @@ mod macos_clipboard;
 mod macos_drag;
 mod messages;
 mod modals;
+mod photo_gallery;
 mod picker;
 mod productivity;
 mod reactions_dialog;
@@ -465,7 +466,10 @@ struct ActiveCallOverlay {
     invite_search_query: String,
 }
 
-#[derive(Debug, Clone)]
+/// The full-screen image viewer. The first eight fields describe the photo on screen; `photos`
+/// holds the whole conversation's photos when the viewer was opened from a chat (empty for a
+/// single image such as a cover photo).
+#[derive(Clone)]
 struct ImageViewerModal {
     tex_key: String,
     hd_tex_key: Option<String>,
@@ -475,6 +479,58 @@ struct ImageViewerModal {
     time: String,
     zoom: f32,
     pan: Vec2,
+    photos: std::sync::Arc<[photo_gallery::ViewerPhoto]>,
+    index: usize,
+    /// Scroll the thumbnail strip to the current photo on the next frame (set on open and on
+    /// every step, so the user can still scroll the strip freely in between).
+    scroll_strip: bool,
+    /// `hd_` texture keys this viewer requested while stepping; released when they fall out of
+    /// the current ±1 window and when the viewer closes.
+    hd_owned: Vec<String>,
+    /// Thumbnail keys first loaded by the strip; released when the viewer closes (the chat
+    /// reloads the ones it shows from the disk cache).
+    thumbs_owned: Vec<String>,
+    /// The current photo's original was requested (automatically or by a click), so the stage
+    /// no longer offers to load it.
+    original_requested: bool,
+    /// Load the current photo's original (and its neighbours') once this time passes; stepping
+    /// with a held arrow key only shows thumbnails until the user stops on a photo.
+    load_originals_at: Option<std::time::Instant>,
+    /// Strip row positions, computed once per photo list.
+    strip_layout: Option<std::sync::Arc<photo_gallery::StripLayout>>,
+    /// The composer's keyboard focus was taken away on the first frame.
+    focus_taken: bool,
+}
+
+impl ImageViewerModal {
+    fn single(
+        tex_key: String,
+        hd_tex_key: Option<String>,
+        full_url: String,
+        title: String,
+        sender: String,
+        time: String,
+    ) -> Self {
+        Self {
+            tex_key,
+            hd_tex_key,
+            full_url,
+            title,
+            sender,
+            time,
+            zoom: 1.0,
+            pan: Vec2::ZERO,
+            photos: std::sync::Arc::from(Vec::new()),
+            index: 0,
+            scroll_strip: false,
+            hd_owned: Vec::new(),
+            thumbs_owned: Vec::new(),
+            original_requested: false,
+            load_originals_at: None,
+            strip_layout: None,
+            focus_taken: false,
+        }
+    }
 }
 
 struct VideoPlayerModal {
@@ -912,6 +968,9 @@ pub struct ZaloGuiApp {
     pub(crate) last_typing_ping_at: std::time::Instant,
     active_call: Option<ActiveCallOverlay>,
     image_viewer: Option<ImageViewerModal>,
+    /// Texture downloads that are no longer wanted (e.g. originals the image viewer stepped
+    /// past); `GuiEvent::StickerImageReady` drops them instead of uploading.
+    discard_textures: HashSet<String>,
     video_player: Option<VideoPlayerModal>,
 
     info_drawer_open: bool,
@@ -1295,6 +1354,7 @@ impl ZaloGuiApp {
             last_typing_ping_at: std::time::Instant::now(),
             active_call: None,
             image_viewer: None,
+            discard_textures: HashSet::new(),
             video_player: None,
             status_msg: "Trực tuyến · Sẵn sàng".into(),
             info_drawer_open: loaded_settings.info_drawer_open,
@@ -1918,6 +1978,7 @@ impl ZaloGuiApp {
                     self.status_msg = "Đã xoá dữ liệu tin nhắn cục bộ (session giữ nguyên)".into();
                 }
                 GuiEvent::LoggedOut => {
+                    self.close_image_viewer();
                     self.productivity = Default::default();
                     self.voice = Default::default();
                     self.doc_preview = Default::default();
@@ -1936,6 +1997,8 @@ impl ZaloGuiApp {
                     avatar,
                     threads,
                 } => {
+                    // The viewer holds the previous account's photos.
+                    self.close_image_viewer();
                     self.is_logged_in = true;
                     self.user_uin = uin;
                     self.user_name = name.clone();
@@ -2256,10 +2319,13 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::StickerImageReady { key, image } => {
                     self.loading_stickers.remove(&key);
-                    let tex = ctx.load_texture(&key, image, TextureOptions::LINEAR);
-                    self.sticker_textures.insert(key, tex);
+                    if !self.discard_textures.remove(&key) {
+                        let tex = ctx.load_texture(&key, image, TextureOptions::LINEAR);
+                        self.sticker_textures.insert(key, tex);
+                    }
                 }
                 GuiEvent::StickerImageFailed { key } => {
+                    self.discard_textures.remove(&key);
                     if key.starts_with("call_remote_video") {
                         self.sticker_textures.remove(&key);
                         ctx.request_repaint();

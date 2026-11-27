@@ -65,6 +65,7 @@ Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dù
 - **Tìm và gửi GIF:** gõ `@gif` để xem GIF xu hướng, hoặc `@gif <từ khoá>` (ví dụ `@gif hello`) để tìm. Dùng phím mũi tên để chọn, `Enter` để gửi, `Esc` để đóng; bấm chuột vào GIF cũng gửi ngay. Bật/tắt ở **Cài đặt → Tiện ích → Gợi ý @ → Tìm kiếm GIF**.
 - **Ảnh và tệp:**
   - Nhiều ảnh gửi cùng lúc hiển thị thành **album dạng lưới** như Zalo. Trong khung xem ảnh, nút sao chép là nút chia đôi: bấm để sao chép theo mặc định đã chọn (ảnh hoặc liên kết), bấm mũi tên để đổi.
+  - **Xem lần lượt các ảnh:** khung xem ảnh chứa mọi ảnh đã tải của cuộc trò chuyện (ảnh trong album được tách riêng từng tấm). Dùng `↑`/`←` để xem ảnh cũ hơn, `↓`/`→` để xem ảnh mới hơn, hoặc bấm nút ▲/▼ và ảnh nhỏ ở dải bên phải (chia theo ngày: Hôm nay, Hôm qua, ngày/tháng). Lăn chuột trên ảnh để phóng to; mỗi khi chuyển ảnh, mức phóng to trở về vừa khung. Nút ở thanh trên cùng ẩn/hiện dải ảnh nhỏ.
   - Dán ảnh trực tiếp từ clipboard (`Ctrl+V` trên Windows/Linux, `⌘V` trên macOS): ảnh chụp màn hình, ảnh copy từ trình duyệt/Preview, hoặc tệp ảnh copy trong Finder. Ảnh hiện ở khung xem trước, nhập chú thích rồi nhấn `Enter` để gửi.
   - **Kéo-thả tệp** vào cửa sổ chat: khi kéo, khung chat hiện hai vùng — thả vào vùng tin nhắn (**Gửi nhanh**) để gửi ngay, hoặc thả vào ô soạn tin (**Xem trước khi gửi**) để đính kèm, xem lại, nhập chú thích rồi nhấn `Enter`. Vùng đang trỏ chuột được tô sáng. Trên Linux không đọc được vị trí chuột khi kéo nên tệp luôn được đính kèm để xem trước.
 

@@ -7042,8 +7042,59 @@ impl ZaloGuiApp {
         };
 
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.image_viewer = None;
+            self.close_image_viewer();
+            self.composer_focus_pending = true;
             return;
+        }
+        // The composer sits under the overlay and is drawn first; if it keeps keyboard focus its
+        // arrow-key handlers (mentions, GIFs, quick messages) take the viewer's keys. Done once,
+        // so the viewer's own buttons can still take focus afterwards.
+        if !viewer.focus_taken {
+            viewer.focus_taken = true;
+            ctx.memory_mut(|m| m.stop_text_input());
+        }
+
+        // Step through the conversation's photos like Zalo Web: ↑/← older, ↓/→ newer.
+        let photo_count = viewer.photos.len();
+        let has_gallery = photo_count > 1;
+        let mut step_to: Option<(usize, bool)> = None;
+        if has_gallery {
+            let (older, newer) = ctx.input_mut(|i| {
+                let up = i.consume_key(egui::Modifiers::NONE, Key::ArrowUp);
+                let left = i.consume_key(egui::Modifiers::NONE, Key::ArrowLeft);
+                let down = i.consume_key(egui::Modifiers::NONE, Key::ArrowDown);
+                let right = i.consume_key(egui::Modifiers::NONE, Key::ArrowRight);
+                (up || left, down || right)
+            });
+            let delta = isize::from(newer) - isize::from(older);
+            if delta != 0 {
+                let next = photo_gallery::step_index(viewer.index, photo_count, delta);
+                if next != viewer.index {
+                    step_to = Some((next, false));
+                }
+            }
+        }
+        if let Some((index, clicked)) = step_to.take() {
+            self.show_viewer_photo(&mut viewer, index, clicked);
+        }
+        if let Some(at) = viewer.load_originals_at {
+            let now = std::time::Instant::now();
+            if now >= at {
+                self.load_viewer_originals(&mut viewer, false);
+            } else {
+                ctx.request_repaint_after(at - now);
+            }
+        }
+        // Keep the current photo's thumbnail coming even when its strip cell is scrolled away;
+        // it is the placeholder while the original loads.
+        if let Some(photo) = viewer.photos.get(viewer.index) {
+            photo.thumbnail.request(
+                ctx,
+                &self.sticker_textures,
+                &mut self.loading_stickers,
+                &self.failed_message_thumbnails,
+                false,
+            );
         }
 
         let screen_rect = ctx.screen_rect();
@@ -7057,8 +7108,24 @@ impl ZaloGuiApp {
                 (viewer_top + toolbar_h).min(screen_rect.bottom()),
             ),
         );
+        let strip_id = Id::new("image_viewer_strip_hidden");
+        let strip_hidden = ctx.data(|d| d.get_temp::<bool>(strip_id).unwrap_or(false));
+        // Right-hand column: ▲/▼ buttons and the thumbnail strip (Zalo Web layout).
+        let side_w = if has_gallery && screen_rect.width() >= 560.0 {
+            if strip_hidden {
+                photo_gallery::VIEWER_NAV_W
+            } else {
+                photo_gallery::VIEWER_NAV_W + photo_gallery::VIEWER_STRIP_W
+            }
+        } else {
+            0.0
+        };
         let stage_area_rect = Rect::from_min_max(
             Pos2::new(screen_rect.left(), toolbar_rect.bottom()),
+            Pos2::new(screen_rect.right() - side_w, screen_rect.bottom()),
+        );
+        let side_rect = Rect::from_min_max(
+            Pos2::new(stage_area_rect.right(), toolbar_rect.bottom()),
             screen_rect.max,
         );
         let mut should_close = false;
@@ -7079,11 +7146,17 @@ impl ZaloGuiApp {
             }
         }
 
+        // A gallery photo's thumbnail goes through `MessageThumbnail::texture`, which keeps the
+        // per-message click gate when two messages share a thumbnail URL.
+        let thumb_tex = match viewer.photos.get(viewer.index) {
+            Some(photo) => photo.thumbnail.texture(ctx, &self.sticker_textures),
+            None => self.sticker_textures.get(&viewer.tex_key),
+        };
         let active_tex = viewer
             .hd_tex_key
             .as_ref()
             .and_then(|hk| self.sticker_textures.get(hk))
-            .or_else(|| self.sticker_textures.get(&viewer.tex_key))
+            .or(thumb_tex)
             .cloned();
 
         let max_stage_w = (stage_area_rect.width() - 48.0).max(160.0);
@@ -7107,16 +7180,16 @@ impl ZaloGuiApp {
                 i.smooth_scroll_delta.y
             }
         });
-        if scroll_y.abs() > 0.1 {
+        // Only over the stage: the wheel also scrolls the thumbnail strip.
+        let hover_in_stage = ctx
+            .input(|i| i.pointer.hover_pos())
+            .filter(|ptr| stage_area_rect.contains(*ptr));
+        if let Some(ptr) = hover_in_stage.filter(|_| scroll_y.abs() > 0.1) {
             let old_zoom = viewer.zoom;
             let factor = if scroll_y > 0.0 { 1.15 } else { 1.0 / 1.15 };
             let new_zoom = (old_zoom * factor).clamp(0.25, 8.0);
-            if let Some(ptr) = ctx.input(|i| i.pointer.hover_pos()) {
-                if stage_area_rect.contains(ptr) {
-                    let rel = ptr - (stage_area_rect.center() + viewer.pan);
-                    viewer.pan -= rel * (new_zoom / old_zoom - 1.0);
-                }
-            }
+            let rel = ptr - (stage_area_rect.center() + viewer.pan);
+            viewer.pan -= rel * (new_zoom / old_zoom - 1.0);
             viewer.zoom = new_zoom;
         }
 
@@ -7128,6 +7201,20 @@ impl ZaloGuiApp {
         let max_pan_y = ((disp_h - stage_area_rect.height() + 40.0) * 0.5).max(0.0);
         viewer.pan.x = viewer.pan.x.clamp(-max_pan_x, max_pan_x);
         viewer.pan.y = viewer.pan.y.clamp(-max_pan_y, max_pan_y);
+
+        // A gallery photo whose original was not requested (its host needs a click, see
+        // `photo_gallery::may_auto_fetch`) waits for one, even while its thumbnail is shown.
+        let original_needs_click = !viewer.original_requested
+            && viewer.load_originals_at.is_none()
+            && viewer.photos.get(viewer.index).is_some();
+        let needs_load_click = active_tex.is_none() && original_needs_click;
+        // Nothing to show and nothing still downloading: say so instead of "loading" forever.
+        let load_failed = active_tex.is_none()
+            && !self.loading_stickers.contains(&viewer.tex_key)
+            && viewer.hd_tex_key.as_ref().is_some_and(|k| {
+                !self.loading_stickers.contains(k) && !self.sticker_textures.contains_key(k)
+            });
+        let mut load_clicked = false;
 
         // 1. Unified Clipped Stage Canvas (never uses a floating Area at img_pos so it NEVER shifts left!)
         egui::Area::new(Id::new("image_viewer_backdrop"))
@@ -7181,7 +7268,27 @@ impl ZaloGuiApp {
                             .or_else(|| ctx.input(|i| i.pointer.latest_pos()));
                         if ptr.map(|p| !img_rect.contains(p)).unwrap_or(false) {
                             should_close = true;
+                        } else if original_needs_click {
+                            load_clicked = true;
                         }
+                    }
+                    if original_needs_click {
+                        let pill = Rect::from_center_size(
+                            Pos2::new(img_rect.center().x, img_rect.bottom() - 28.0),
+                            Vec2::new(190.0, 28.0),
+                        );
+                        painter.rect_filled(
+                            pill,
+                            Rounding::same(14.0),
+                            Color32::from_black_alpha(180),
+                        );
+                        painter.text(
+                            pill.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Bấm vào ảnh để tải ảnh gốc",
+                            FontId::proportional(12.0),
+                            Color32::WHITE,
+                        );
                     }
                 } else {
                     painter.rect_filled(img_rect, Rounding::same(8.0), pal.bg_elevated);
@@ -7193,15 +7300,58 @@ impl ZaloGuiApp {
                     painter.text(
                         img_rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        "Đang tải hình ảnh…",
+                        if needs_load_click {
+                            "Bấm để hiện ảnh"
+                        } else if load_failed {
+                            "Không tải được ảnh · bấm để thử lại"
+                        } else {
+                            "Đang tải hình ảnh…"
+                        },
                         FontId::proportional(13.0),
                         pal.text_primary,
                     );
                     if bg_resp.clicked() {
-                        should_close = true;
+                        let on_image = bg_resp
+                            .interact_pointer_pos()
+                            .is_some_and(|p| img_rect.contains(p));
+                        if (needs_load_click || load_failed) && on_image {
+                            load_clicked = true;
+                        } else {
+                            should_close = true;
+                        }
                     }
                 }
             });
+        if load_clicked {
+            if let Some(photo) = viewer.photos.get(viewer.index) {
+                photo.thumbnail.request(
+                    ctx,
+                    &self.sticker_textures,
+                    &mut self.loading_stickers,
+                    &self.failed_message_thumbnails,
+                    true,
+                );
+            }
+            if viewer.photos.is_empty() {
+                viewer.hd_tex_key = self.request_hd_texture(&viewer.full_url);
+            } else {
+                self.load_viewer_originals(&mut viewer, true);
+            }
+        }
+
+        // 2. Right column: older/newer buttons and the day-grouped thumbnail strip.
+        if side_w > 0.0 {
+            if let Some(target) =
+                self.render_image_viewer_side(ctx, pal, &mut viewer, side_rect, strip_hidden)
+            {
+                step_to = Some(target);
+            }
+        }
+        if let Some((index, clicked)) = step_to {
+            self.show_viewer_photo(&mut viewer, index, clicked);
+            ctx.request_repaint();
+        }
+
         // 3. Clean Unified Top Toolbar Bar (docked under custom title bar, matching Atom One Dark pal.bg_sidebar)
         let clean_title = {
             let mut t = viewer.title.trim().trim_start_matches(lucide::IMAGE).trim();
@@ -7270,6 +7420,11 @@ impl ZaloGuiApp {
                                         viewer.sender, viewer.time
                                     )
                                 };
+                                let sub = if has_gallery {
+                                    format!("{sub} · {}/{photo_count}", viewer.index + 1)
+                                } else {
+                                    sub
+                                };
                                 ui.label(RichText::new(sub).size(11.0).color(pal.text_muted));
                             });
 
@@ -7311,6 +7466,35 @@ impl ZaloGuiApp {
                                     .clicked()
                                 {
                                     should_close = true;
+                                }
+
+                                if has_gallery && side_w > 0.0 {
+                                    let strip_btn = egui::Button::new(
+                                        RichText::new(lucide::PANEL_RIGHT).size(12.5).color(
+                                            if strip_hidden {
+                                                pal.text_secondary
+                                            } else {
+                                                pal.primary_hover
+                                            },
+                                        ),
+                                    )
+                                    .fill(pal.bg_elevated)
+                                    .stroke(Stroke::new(1.0_f32, pal.border))
+                                    .rounding(Rounding::same(6.0))
+                                    .min_size(Vec2::new(30.0, 28.0));
+                                    if ui
+                                        .add(strip_btn)
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text(if strip_hidden {
+                                            "Hiện danh sách ảnh"
+                                        } else {
+                                            "Ẩn danh sách ảnh"
+                                        })
+                                        .clicked()
+                                    {
+                                        ui.ctx()
+                                            .data_mut(|d| d.insert_temp(strip_id, !strip_hidden));
+                                    }
                                 }
 
                                 if !viewer.full_url.is_empty() {
@@ -7519,7 +7703,9 @@ impl ZaloGuiApp {
             });
 
         if should_close {
-            self.image_viewer = None;
+            self.image_viewer = Some(viewer);
+            self.close_image_viewer();
+            self.composer_focus_pending = true;
         } else {
             self.image_viewer = Some(viewer);
         }
@@ -8678,16 +8864,14 @@ impl ZaloGuiApp {
                             );
                             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                                 let hd = self.request_hd_texture(&prof.cover_url);
-                                self.image_viewer = Some(ImageViewerModal {
-                                    tex_key: ckey,
-                                    hd_tex_key: hd,
-                                    full_url: prof.cover_url.clone(),
-                                    title: format!("Ảnh bìa của {}", prof.display_name),
-                                    sender: prof.display_name.clone(),
-                                    time: String::new(),
-                                    zoom: 1.0,
-                                    pan: Vec2::ZERO,
-                                });
+                                self.image_viewer = Some(ImageViewerModal::single(
+                                    ckey,
+                                    hd,
+                                    prof.cover_url.clone(),
+                                    format!("Ảnh bìa của {}", prof.display_name),
+                                    prof.display_name.clone(),
+                                    String::new(),
+                                ));
                             }
                             ui.add_space(12.0);
                         }
@@ -9133,16 +9317,14 @@ impl ZaloGuiApp {
         }
         if let Some((tkey, full_u, title, sender)) = clicked_image {
             let hd = self.request_hd_texture(&full_u);
-            self.image_viewer = Some(ImageViewerModal {
-                tex_key: tkey,
-                hd_tex_key: hd,
-                full_url: full_u,
+            self.image_viewer = Some(ImageViewerModal::single(
+                tkey,
+                hd,
+                full_u,
                 title,
                 sender,
-                time: String::new(),
-                zoom: 1.0,
-                pan: Vec2::ZERO,
-            });
+                String::new(),
+            ));
         }
     }
 
@@ -9207,16 +9389,14 @@ impl ZaloGuiApp {
                         }
                         if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                             let hd = self.request_hd_texture(&item.url);
-                            self.image_viewer = Some(ImageViewerModal {
-                                tex_key: tkey,
-                                hd_tex_key: hd,
-                                full_url: item.url.clone(),
-                                title: format!("Ảnh Nhật ký ({})", item.photo_id),
-                                sender: self.user_name.clone(),
-                                time: String::new(),
-                                zoom: 1.0,
-                                pan: Vec2::ZERO,
-                            });
+                            self.image_viewer = Some(ImageViewerModal::single(
+                                tkey,
+                                hd,
+                                item.url.clone(),
+                                format!("Ảnh Nhật ký ({})", item.photo_id),
+                                self.user_name.clone(),
+                                String::new(),
+                            ));
                         }
                     }
                 });

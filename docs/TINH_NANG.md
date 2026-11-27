@@ -36,6 +36,7 @@ Chỉ đổi trạng thái khi có bằng chứng (chạy thật hoặc chủ d�
 | Gợi ý sticker khi gõ | ✅ | |
 | Album ảnh dạng lưới | ✅ | Nhiều ảnh gửi cùng lúc gộp thành một khối |
 | Sao chép ảnh / liên kết trong khung xem ảnh | ✅ | Chọn mặc định ở nút chia đôi |
+| Duyệt mọi ảnh của hội thoại trong khung xem ảnh | 🟡 | Phím ↑/← ảnh cũ hơn, ↓/→ ảnh mới hơn; dải ảnh nhỏ bên phải chia theo ngày. Chưa kiểm thử trên giao diện thật |
 | Tìm và gửi GIF | ✅ | `@gif` hoặc `@gif từ khoá` |
 | Hẹn giờ gửi tin nhắn | ✅ | Nút `🕒` cạnh ô soạn tin |
 | Nhắc lại tin nhắn riêng trên máy | 🟡 | Menu tin → Nhắc hẹn; quản lý tại thanh Nhắc hẹn, app cần mở và đăng nhập |

@@ -17,6 +17,8 @@ impl ZaloGuiApp {
             return None;
         }
         let hk = format!("hd_{}", crate::crypto::md5_hex(full_url));
+        // Wanted again before a released download arrived: keep it after all.
+        self.discard_textures.remove(&hk);
         if !self.sticker_textures.contains_key(&hk) && self.loading_stickers.insert(hk.clone()) {
             if let Some(tx) = WORKER_TX.get() {
                 let _ = tx.send(WorkerCmd::FetchStickerImage {
@@ -26,6 +28,125 @@ impl ZaloGuiApp {
             }
         }
         Some(hk)
+    }
+
+    /// Open the image viewer on a photo of the selected conversation. The viewer gets every photo
+    /// of the conversation so the user can step through them; a photo that is not in that list
+    /// (it should not happen) still opens on its own.
+    pub(super) fn open_photo_viewer(
+        &mut self,
+        msg_id: &str,
+        tex_key: String,
+        full_url: String,
+        title: String,
+        sender: String,
+        time: String,
+    ) {
+        let photos = self
+            .threads
+            .get(self.selected_thread_index)
+            .map(|t| photo_gallery::collect_thread_photos(&t.messages, &t.name))
+            .unwrap_or_default();
+        if let Some(index) = photo_gallery::find_photo(&photos, msg_id, &tex_key, &full_url) {
+            let mut viewer = ImageViewerModal::single(tex_key, None, full_url, title, sender, time);
+            viewer.photos = std::sync::Arc::from(photos);
+            // The user clicked this photo, so its original may load even from a host that
+            // otherwise needs a click.
+            self.show_viewer_photo(&mut viewer, index, true);
+            self.image_viewer = Some(viewer);
+            return;
+        }
+        let hd_tex_key = self.request_hd_texture(&full_url);
+        self.image_viewer = Some(ImageViewerModal::single(
+            tex_key, hd_tex_key, full_url, title, sender, time,
+        ));
+    }
+
+    /// Show `viewer.photos[index]` and reset zoom. With `clicked` (the user picked this very
+    /// photo) its original loads at once; otherwise (arrow keys, ▲/▼) the originals load after a
+    /// short pause on the photo, so holding a key does not queue a download per photo passed.
+    pub(super) fn show_viewer_photo(
+        &mut self,
+        viewer: &mut ImageViewerModal,
+        index: usize,
+        clicked: bool,
+    ) {
+        let Some(photo) = viewer.photos.get(index).cloned() else {
+            return;
+        };
+        viewer.index = index;
+        viewer.tex_key = photo.thumbnail.key.clone();
+        viewer.full_url = photo.full_url.clone();
+        viewer.title = photo.title.clone();
+        viewer.sender = photo.sender.clone();
+        viewer.time = photo_gallery::when_label(&photo, photo_gallery::today_local_day());
+        viewer.zoom = 1.0;
+        viewer.pan = Vec2::ZERO;
+        viewer.scroll_strip = true;
+        viewer.hd_tex_key = None;
+        viewer.original_requested = false;
+        if clicked {
+            self.load_viewer_originals(viewer, true);
+        } else {
+            viewer.load_originals_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(180));
+        }
+    }
+
+    /// Request the current photo's original and its neighbours', and drop the originals this
+    /// viewer loaded for photos further away, so at most three full-size textures stay resident.
+    /// `clicked` means the user explicitly asked for the current photo's original (see
+    /// `photo_gallery::may_auto_fetch`).
+    pub(super) fn load_viewer_originals(&mut self, viewer: &mut ImageViewerModal, clicked: bool) {
+        viewer.load_originals_at = None;
+        let photos = viewer.photos.clone();
+        let index = viewer.index;
+        let Some(photo) = photos.get(index) else {
+            return;
+        };
+        if clicked || photo_gallery::may_auto_fetch(photo) {
+            viewer.hd_tex_key = self.request_hd_texture(&photo.full_url);
+            viewer.original_requested = true;
+        }
+        let mut keep: Vec<String> = viewer.hd_tex_key.iter().cloned().collect();
+        for i in photo_gallery::hd_keep_range(index, photos.len()) {
+            let p = &photos[i];
+            if i != index && photo_gallery::may_auto_fetch(p) {
+                keep.extend(self.request_hd_texture(&p.full_url));
+            }
+        }
+        for key in &keep {
+            if !viewer.hd_owned.contains(key) {
+                viewer.hd_owned.push(key.clone());
+            }
+        }
+        let released: Vec<String> = viewer
+            .hd_owned
+            .iter()
+            .filter(|k| !keep.contains(k))
+            .cloned()
+            .collect();
+        viewer.hd_owned.retain(|k| keep.contains(k));
+        self.release_hd_textures(released);
+    }
+
+    /// Close the image viewer and drop the textures it loaded.
+    pub(super) fn close_image_viewer(&mut self) {
+        if let Some(viewer) = self.image_viewer.take() {
+            self.release_hd_textures(viewer.hd_owned);
+            self.release_hd_textures(viewer.thumbs_owned);
+        }
+    }
+
+    /// Drop viewer textures, including ones still downloading (they are discarded when they
+    /// arrive). The images stay in the disk cache, so showing them again is fast.
+    pub(super) fn release_hd_textures(&mut self, keys: impl IntoIterator<Item = String>) {
+        for key in keys {
+            self.sticker_textures.remove(&key);
+            if self.loading_stickers.contains(&key) {
+                self.discard_textures.insert(key);
+            }
+        }
     }
 
     pub(super) fn render_chat_workspace(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
@@ -1797,7 +1918,7 @@ impl ZaloGuiApp {
 
         if show_info_drawer {
             if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count)) = thread_meta {
-                let shared_photos: Vec<(MessageThumbnail, String, String)> = self
+                let shared_photos: Vec<(String, MessageThumbnail, String, String)> = self
                     .threads
                     .get(self.selected_thread_index)
                     .map(|t| {
@@ -1824,7 +1945,12 @@ impl ZaloGuiApp {
                                     .link_title
                                     .clone()
                                     .unwrap_or_else(|| "Hình ảnh đã chia sẻ".into());
-                                Some((MessageThumbnail::new(m, thumb, "thumb_"), full, title))
+                                Some((
+                                    m.id.clone(),
+                                    MessageThumbnail::new(m, thumb, "thumb_"),
+                                    full,
+                                    title,
+                                ))
                             })
                             .take(9)
                             .collect()
@@ -2214,7 +2340,7 @@ impl ZaloGuiApp {
                                 } else {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                        for (thumbnail, full_u, ptitle) in &shared_photos {
+                                        for (msg_id, thumbnail, full_u, ptitle) in &shared_photos {
                                             let (cell_r, cell_resp) = ui.allocate_exact_size(
                                                 Vec2::splat(74.0),
                                                 Sense::click(),
@@ -2282,16 +2408,14 @@ impl ZaloGuiApp {
                                                     "Xem ảnh phóng to"
                                                 });
                                             if cell_resp.clicked() && !needs_click {
-                                                self.image_viewer = Some(ImageViewerModal {
-                                                    tex_key: thumbnail.key.clone(),
-                                                    hd_tex_key: self.request_hd_texture(full_u),
-                                                    full_url: full_u.clone(),
-                                                    title: ptitle.clone(),
-                                                    sender: d_name.clone(),
-                                                    time: String::new(),
-                                                    zoom: 1.0,
-                                                    pan: Vec2::ZERO,
-                                                });
+                                                self.open_photo_viewer(
+                                                    msg_id,
+                                                    thumbnail.key.clone(),
+                                                    full_u.clone(),
+                                                    ptitle.clone(),
+                                                    d_name.clone(),
+                                                    String::new(),
+                                                );
                                             }
                                         }
                                     });
@@ -4314,23 +4438,16 @@ impl ZaloGuiApp {
                                     }
                                 }
                                 BubbleAction::OpenImagePopup {
+                                    msg_id,
                                     tex_key,
                                     full_url,
                                     title,
                                     sender,
                                     time,
                                 } => {
-                                    let hd_tex_key = self.request_hd_texture(&full_url);
-                                    self.image_viewer = Some(ImageViewerModal {
-                                        tex_key,
-                                        hd_tex_key,
-                                        full_url,
-                                        title,
-                                        sender,
-                                        time,
-                                        zoom: 1.0,
-                                        pan: Vec2::ZERO,
-                                    });
+                                    self.open_photo_viewer(
+                                        &msg_id, tex_key, full_url, title, sender, time,
+                                    );
                                 }
                                 BubbleAction::PreviewDoc { url, file_name } => { self.open_doc_preview(url,file_name); }
                                 BubbleAction::DownloadFile { url, file_name } => {
