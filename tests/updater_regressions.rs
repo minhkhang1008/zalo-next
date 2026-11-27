@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use zalo_rust::updater::{
-    download_release, install_release, stage_portable_release, validate_asset_name, DownloadLimits,
-    DownloadRequest, InstallTarget, VerifiedRelease,
+    download_release, install_release, stage_portable_release,
+    try_install_windows_portable_release, validate_asset_name, DownloadLimits, DownloadRequest,
+    InstallTarget, VerifiedRelease,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -442,4 +443,86 @@ fn deferred_portable_unwind_restores_original() {
     assert!(panic.is_err());
     assert_eq!(fs::read(&destination).unwrap(), b"old executable");
     assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 1);
+}
+
+#[test]
+fn windows_portable_install_launches_new_exe_and_keeps_old_exe_for_startup_cleanup() {
+    let sandbox = Sandbox::new();
+    let destination = sandbox.0.join("application.exe");
+    let backup = sandbox.0.join("application.exe.old");
+    fs::write(&destination, b"original").unwrap();
+
+    let installed = try_install_windows_portable_release(
+        "portable.exe",
+        &verified(b"replacement"),
+        || Ok(destination.clone()),
+        |path| {
+            assert_eq!(path, destination);
+            assert_eq!(fs::read(path).unwrap(), b"replacement");
+            assert_eq!(fs::read(&backup).unwrap(), b"original");
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert!(installed);
+    assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+    assert_eq!(fs::read(&backup).unwrap(), b"original");
+    assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 2);
+}
+
+#[test]
+fn windows_portable_install_restores_original_when_spawn_fails() {
+    let sandbox = Sandbox::new();
+    let destination = sandbox.0.join("application.exe");
+    fs::write(&destination, b"original").unwrap();
+
+    let error = try_install_windows_portable_release(
+        "portable.exe",
+        &verified(b"replacement"),
+        || Ok(destination.clone()),
+        |_| Err("injected spawn failure".into()),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("đã hoàn tác"));
+    assert_eq!(fs::read(&destination).unwrap(), b"original");
+    assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 1);
+}
+
+#[test]
+fn windows_portable_swap_failure_returns_error_instead_of_installer_route() {
+    let sandbox = Sandbox::new();
+    let destination = sandbox.0.join("application.exe");
+    let backup = sandbox.0.join("application.exe.old");
+    fs::write(&destination, b"original").unwrap();
+    fs::write(&backup, b"previous executable").unwrap();
+
+    let error = try_install_windows_portable_release(
+        "portable.exe",
+        &verified(b"replacement"),
+        || Ok(destination.clone()),
+        |_| panic!("failed swap must never launch"),
+    )
+    .unwrap_err();
+
+    assert!(error.contains(&format!(
+        "Không thể tự thay bản cài trong {}",
+        sandbox.0.display()
+    )));
+    assert!(error.contains("Hãy tải bộ cài mới từ trang phát hành trên GitHub."));
+    assert_eq!(fs::read(&destination).unwrap(), b"original");
+    assert_eq!(fs::read(&backup).unwrap(), b"previous executable");
+    assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 2);
+}
+
+#[test]
+fn windows_setup_asset_is_left_for_installer_route() {
+    assert!(!try_install_windows_portable_release(
+        "release-setup.exe",
+        &verified(b"installer"),
+        || panic!("setup assets do not need the running executable path"),
+        |_| panic!("setup assets must never use the portable launcher"),
+    )
+    .unwrap());
 }

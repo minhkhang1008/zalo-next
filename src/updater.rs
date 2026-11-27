@@ -1,4 +1,4 @@
-//! Bounded release downloads and transactional installation, independent of GUI and processes.
+//! Bounded release downloads, transactional installation and restart support.
 
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -262,6 +262,64 @@ fn remove_staging(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+/// Strip the hidden restart flag from arguments following the executable name.
+/// The last valid, nonzero PID wins. A missing value leaves the next flag intact.
+pub fn take_wait_for_pid(args: Vec<String>) -> (Option<u32>, Vec<String>) {
+    const FLAG: &str = "--wait-for-pid";
+    const PREFIX: &str = "--wait-for-pid=";
+
+    let mut args = args.into_iter().peekable();
+    let mut forwarded = Vec::new();
+    let mut pid = None;
+    while let Some(arg) = args.next() {
+        let parsed = if arg == FLAG {
+            args.next_if(|value| {
+                !value.starts_with('-') || value.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+            })
+            .and_then(|value| value.parse::<u32>().ok())
+        } else if let Some(value) = arg.strip_prefix(PREFIX) {
+            value.parse::<u32>().ok()
+        } else {
+            forwarded.push(arg);
+            continue;
+        };
+        if let Some(parsed) = parsed.filter(|pid| *pid != 0) {
+            pid = Some(parsed);
+        }
+    }
+    (pid, forwarded)
+}
+
+/// Wait up to 60 seconds for a Windows updater's parent process to exit.
+#[cfg(windows)]
+pub fn wait_for_pid(pid: u32) {
+    use std::ffi::c_void;
+
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const TIMEOUT_MS: u32 = 60_000;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    // SAFETY: OpenProcess accepts integer arguments. A non-null result is an owned
+    // process handle with SYNCHRONIZE access, held until the wait returns.
+    unsafe {
+        let handle = OpenProcess(SYNCHRONIZE, 0, pid);
+        if !handle.is_null() {
+            WaitForSingleObject(handle, TIMEOUT_MS);
+            CloseHandle(handle);
+        }
+    }
+}
+
+/// Other platforms strip the restart flag and use their own relaunch flows.
+#[cfg(not(windows))]
+pub fn wait_for_pid(_pid: u32) {}
+
 /// Portable installation staged without replacing or launching the running executable.
 /// Dropping an uncommitted transaction preserves the original executable.
 pub struct DeferredPortableInstall {
@@ -302,37 +360,72 @@ pub fn stage_portable_release(
     })
 }
 
+enum InstallBackup {
+    StagedCopy(PathBuf),
+    PreviousExecutable(PathBuf),
+}
+
 struct PreparedInstall {
     destination: PathBuf,
     stage: PathBuf,
-    backup: Option<PathBuf>,
-    installed: bool,
+    backup: Option<InstallBackup>,
+    needs_rollback: bool,
     committed: bool,
 }
 
 impl PreparedInstall {
+    fn finish_windows_portable(
+        mut self,
+        launch: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let backup = windows_portable_backup_path(&self.destination);
+        // Reserve the backup name exclusively so an existing recovery copy stays intact.
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+            .map_err(|error| format!("Tạo đường dẫn sao lưu thất bại: {error}"))?;
+        if let Err(error) = fs::rename(&self.destination, &backup) {
+            remove_staging(&backup);
+            return Err(format!("Đổi tên bản cài hiện tại thất bại: {error}"));
+        }
+        self.backup = Some(InstallBackup::PreviousExecutable(backup));
+        self.needs_rollback = true;
+        self.finish(launch)
+    }
+
     fn finish(mut self, launch: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
-        fs::rename(&self.stage, &self.destination)
-            .map_err(|error| format!("Thay thế gói cập nhật thất bại: {error}"))?;
-        self.installed = true;
+        if let Err(error) = fs::rename(&self.stage, &self.destination) {
+            return Err(self.rollback_after_error("Thay thế gói cập nhật thất bại", error));
+        }
+        self.needs_rollback = true;
         if let Err(error) = launch(&self.destination) {
-            self.rollback().map_err(|rollback| {
-                format!("Khởi chạy thất bại: {error}; hoàn tác thất bại: {rollback}")
-            })?;
-            return Err(format!("Khởi chạy thất bại, đã hoàn tác cập nhật: {error}"));
+            return Err(self.rollback_after_error("Khởi chạy thất bại", error));
         }
         self.committed = true;
         Ok(())
     }
 
+    fn rollback_after_error(&mut self, operation: &str, error: impl std::fmt::Display) -> String {
+        if !self.needs_rollback {
+            return format!("{operation}: {error}");
+        }
+        match self.rollback() {
+            Ok(()) => format!("{operation}, đã hoàn tác cập nhật: {error}"),
+            Err(rollback) => format!("{operation}: {error}; hoàn tác thất bại: {rollback}"),
+        }
+    }
+
     fn rollback(&mut self) -> Result<(), String> {
-        if self.installed && !self.committed {
+        if self.needs_rollback && !self.committed {
             match &self.backup {
-                Some(backup) => fs::rename(backup, &self.destination),
+                Some(
+                    InstallBackup::StagedCopy(backup) | InstallBackup::PreviousExecutable(backup),
+                ) => fs::rename(backup, &self.destination),
                 None => fs::remove_file(&self.destination),
             }
             .map_err(|error| format!("Khôi phục gói cập nhật cũ thất bại: {error}"))?;
-            self.installed = false;
+            self.needs_rollback = false;
         }
         Ok(())
     }
@@ -345,10 +438,31 @@ impl Drop for PreparedInstall {
             return;
         }
         remove_staging(&self.stage);
-        if let Some(backup) = &self.backup {
+        if let Some(InstallBackup::StagedCopy(backup)) = &self.backup {
             remove_staging(backup);
         }
     }
+}
+
+fn write_staged_release(
+    bytes: &[u8],
+    destination: &Path,
+    permissions: Option<fs::Permissions>,
+) -> Result<PathBuf, String> {
+    let (stage, mut file) = staging_file(destination)?;
+    let written = (|| {
+        file.write_all(bytes)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()
+    })();
+    drop(file);
+    if let Err(error) = written {
+        remove_staging(&stage);
+        return Err(format!("Ghi file cập nhật thất bại: {error}"));
+    }
+    Ok(stage)
 }
 
 fn prepare_install(
@@ -362,21 +476,11 @@ fn prepare_install(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !portable => None,
         Err(error) => return Err(format!("Đọc đích cập nhật thất bại: {error}")),
     };
-    let (stage, mut file) = staging_file(destination)?;
-    let prepared = (|| {
-        file.write_all(bytes)?;
-        if portable {
-            if let Some(metadata) = &metadata {
-                file.set_permissions(metadata.permissions())?;
-            }
-        }
-        file.sync_all()
-    })();
-    drop(file);
-    if let Err(error) = prepared {
-        remove_staging(&stage);
-        return Err(format!("Ghi file cập nhật thất bại: {error}"));
-    }
+    let permissions = metadata
+        .as_ref()
+        .filter(|_| portable)
+        .map(fs::Metadata::permissions);
+    let stage = write_staged_release(bytes, destination, permissions)?;
     let backup = if metadata.is_some() {
         let (path, file) = match staging_file(destination) {
             Ok(value) => value,
@@ -392,7 +496,7 @@ fn prepare_install(
             remove_staging(&path);
             return Err(format!("Sao lưu bản cập nhật cũ thất bại: {error}"));
         }
-        Some(path)
+        Some(InstallBackup::StagedCopy(path))
     } else {
         None
     };
@@ -400,9 +504,60 @@ fn prepare_install(
         destination: destination.to_path_buf(),
         stage,
         backup,
-        installed: false,
+        needs_rollback: false,
         committed: false,
     })
+}
+
+/// The sibling backup kept until the replacement executable starts on Windows.
+pub fn windows_portable_backup_path(destination: &Path) -> PathBuf {
+    destination.with_extension("exe.old")
+}
+
+fn prepare_windows_portable_install(
+    release: &VerifiedRelease,
+    destination: &Path,
+) -> Result<PreparedInstall, String> {
+    let metadata = fs::symlink_metadata(destination)
+        .map_err(|error| format!("Đọc đích cập nhật thất bại: {error}"))?;
+    if !metadata.is_file() {
+        return Err("Đích cập nhật không phải file thông thường".into());
+    }
+    let stage = write_staged_release(release.as_bytes(), destination, None)?;
+    Ok(PreparedInstall {
+        destination: destination.to_path_buf(),
+        stage,
+        backup: None,
+        needs_rollback: false,
+        committed: false,
+    })
+}
+
+/// Handle a Windows portable update, returning `Ok(false)` for installer assets.
+///
+/// # Errors
+/// A portable install error is returned to the caller so only installers can fall through.
+pub fn try_install_windows_portable_release(
+    lower_asset_name: &str,
+    release: &VerifiedRelease,
+    current_exe: impl FnOnce() -> std::io::Result<PathBuf>,
+    launch: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<bool, String> {
+    if !lower_asset_name.ends_with(".exe") || lower_asset_name.contains("setup") {
+        return Ok(false);
+    }
+    let destination = current_exe()
+        .map_err(|error| format!("Không xác định được đường dẫn bản cài hiện tại: {error}"))?;
+    let dir = destination.parent().unwrap_or(destination.as_path());
+    prepare_windows_portable_install(release, &destination)
+        .and_then(|prepared| prepared.finish_windows_portable(launch))
+        .map_err(|error| {
+            format!(
+                "Không thể tự thay bản cài trong {} (có thể cần quyền quản trị). Hãy tải bộ cài mới từ trang phát hành trên GitHub.\n{error}",
+                dir.display()
+            )
+        })?;
+    Ok(true)
 }
 
 /// Atomically install already-validated bytes and invoke the injected launcher.
@@ -828,6 +983,81 @@ pub fn new_update_notification(latest_version: &str, current_version: &str) -> (
             "Phiên bản mới v{latest_version} đã sẵn sàng (đang dùng v{current_version}). Mở Cài đặt để cập nhật."
         ),
     )
+}
+
+#[cfg(test)]
+mod portable_update_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn wait_for_pid_strips_both_spellings_and_preserves_other_args() {
+        assert_eq!(
+            take_wait_for_pid(args(&[
+                "--gui",
+                "--wait-for-pid",
+                "41",
+                "--data-dir",
+                "custom dir",
+                "--wait-for-pid=42",
+            ])),
+            (Some(42), args(&["--gui", "--data-dir", "custom dir"]))
+        );
+    }
+
+    #[test]
+    fn wait_for_pid_does_not_accumulate_on_relaunch() {
+        let (_, forwarded) = take_wait_for_pid(args(&["--wait-for-pid=41", "--gui"]));
+        let relaunched = [args(&["--wait-for-pid", "42"]), forwarded].concat();
+        let (pid, forwarded) = take_wait_for_pid(relaunched);
+        assert_eq!(pid, Some(42));
+        assert_eq!(take_wait_for_pid(forwarded), (None, args(&["--gui"])));
+    }
+
+    #[test]
+    fn wait_for_pid_strips_malformed_values_and_keeps_following_flags() {
+        assert_eq!(
+            take_wait_for_pid(args(&[
+                "--wait-for-pid",
+                "oops",
+                "--wait-for-pid=4294967296",
+                "--wait-for-pid=0",
+                "--wait-for-pid",
+                "-1",
+                "--wait-for-pid",
+                "--wait-for-pid=",
+                "--wait-for-pid",
+                "--version",
+                "--wait-for-pid",
+            ])),
+            (None, args(&["--version"]))
+        );
+    }
+
+    #[test]
+    fn windows_portable_install_restores_original_when_staged_rename_fails() {
+        let sandbox = crate::data_dir::PrivateTempDir::new("updater-swap").unwrap();
+        let destination = sandbox.path().join("application.exe");
+        fs::write(&destination, b"original").unwrap();
+        let release = VerifiedRelease::verify(
+            b"replacement".to_vec(),
+            &format!("{:x}", Sha256::digest(b"replacement")),
+        )
+        .unwrap();
+        let pending = prepare_windows_portable_install(&release, &destination).unwrap();
+        fs::remove_file(&pending.stage).unwrap();
+
+        let error = pending
+            .finish_windows_portable(|_| panic!("failed swap must never launch"))
+            .unwrap_err();
+
+        assert!(error.contains("đã hoàn tác"));
+        assert_eq!(fs::read(&destination).unwrap(), b"original");
+        assert_eq!(fs::read_dir(sandbox.path()).unwrap().count(), 1);
+    }
 }
 
 #[cfg(test)]

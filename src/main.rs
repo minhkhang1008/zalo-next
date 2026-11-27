@@ -47,7 +47,15 @@ fn activate_logged_in_account(s: &Session) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (wait_pid, args) = updater::take_wait_for_pid(std::env::args().skip(1).collect());
+    if let Some(pid) = wait_pid {
+        updater::wait_for_pid(pid);
+    }
+    #[cfg(windows)]
+    if let Ok(exe_path) = std::env::current_exe() {
+        let _ = std::fs::remove_file(updater::windows_portable_backup_path(&exe_path));
+    }
+
     if args.as_slice() == ["--internal-doc-preview"] {
         return zalo_rust::doc_preview::helper_entry();
     }

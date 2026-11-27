@@ -4547,56 +4547,43 @@ async fn apply_github_release_update(
         }
     }
 
-    let is_portable_bin =
-        (cfg!(target_os = "windows") && name_low.ends_with(".exe") && !name_low.contains("setup"))
-            || (cfg!(target_os = "linux") && name_low.ends_with(".appimage"));
+    #[cfg(windows)]
+    if crate::updater::try_install_windows_portable_release(
+        &name_low,
+        &release,
+        std::env::current_exe,
+        |installed_path| {
+            let (_, args) = crate::updater::take_wait_for_pid(std::env::args().skip(1).collect());
+            std::process::Command::new(installed_path)
+                .arg("--wait-for-pid")
+                .arg(std::process::id().to_string())
+                .args(args)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+    )? {
+        return Ok(true);
+    }
 
-    if is_portable_bin {
+    #[cfg(target_os = "linux")]
+    if name_low.ends_with(".appimage") {
         if let Ok(exe_path) = std::env::current_exe() {
-            #[cfg(target_os = "windows")]
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            if crate::updater::install_release(
+                &release,
+                &crate::updater::InstallTarget::Portable(exe_path),
+                |installed_path| {
+                    std::process::Command::new(installed_path)
+                        .args(&args)
+                        .spawn()
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                },
+            )
+            .is_ok()
             {
-                // On Windows a running .exe cannot be overwritten directly, so rename current exe
-                // to `.exe.old` and atomically place the new portable binary at `exe_path`.
-                let new_path = exe_path.with_extension("exe.new");
-                let old_path = exe_path.with_extension("exe.old");
-                if std::fs::write(&new_path, release.as_bytes()).is_ok() {
-                    let _ = std::fs::remove_file(&old_path);
-                    if std::fs::rename(&exe_path, &old_path).is_ok() {
-                        if std::fs::rename(&new_path, &exe_path).is_ok() {
-                            let args: Vec<String> = std::env::args().skip(1).collect();
-                            if std::process::Command::new(&exe_path)
-                                .args(&args)
-                                .spawn()
-                                .is_ok()
-                            {
-                                return Ok(true);
-                            }
-                            let _ = std::fs::rename(&old_path, &exe_path);
-                        } else {
-                            let _ = std::fs::rename(&old_path, &exe_path);
-                        }
-                    }
-                    let _ = std::fs::remove_file(&new_path);
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                if crate::updater::install_release(
-                    &release,
-                    &crate::updater::InstallTarget::Portable(exe_path),
-                    |installed_path| {
-                        std::process::Command::new(installed_path)
-                            .args(&args)
-                            .spawn()
-                            .map(|_| ())
-                            .map_err(|e| e.to_string())
-                    },
-                )
-                .is_ok()
-                {
-                    return Ok(true);
-                }
+                return Ok(true);
             }
         }
     }
