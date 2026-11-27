@@ -1,4 +1,4 @@
-# Trợ lý AI trong Zalo-next (thiết kế)
+# Trợ lý AI trong Zalo-next
 
 > **Trạng thái: đã triển khai (2026-11-17), chờ kiểm chứng với nhà cung cấp AI thật.** Quyết định kiến trúc ở
 > [ADR 0004](adr/0004-local-ai-assistant.md); tiến độ ở [`tasks/ai-assistant.md`](../tasks/ai-assistant.md).
@@ -87,7 +87,7 @@ Nguyên tắc bất biến (xem ADR 0004 và `GLOSSARY.md` INV-5/INV-6):
 
 ### 3.1 Dữ liệu
 
-Bảng mới (migration thêm bảng, không quá tải `messages` — theo `docs/standards/database-and-migrations.md`):
+Bảng mới (migration thêm bảng, không quá tải `messages` — theo `docs/standards/storage.md`):
 
 ```sql
 CREATE TABLE IF NOT EXISTS local_ai_messages (
@@ -198,7 +198,7 @@ như `<tin_duoc_tra_loi>`.
 Tùy chọn trong task cuối: dùng `Response::chunk()` (không cần feature `stream` của reqwest) đọc SSE; cập nhật một
 tin duy nhất trong bộ nhớ và chỉ ghi DB khi xong; Hủy khi người dùng bấm nút, đổi hội thoại hoặc thoát app.
 
-## 8. Cái upstream làm chưa đạt (không sao chép)
+## 8. Lỗi thiết kế cần tránh (rút ra từ khối LLM của ctdozlite v0.1.2)
 
 - Nút "Kiểm tra kết nối" chỉ gán chuỗi trạng thái, không gửi request nào; "Tóm tắt" trong GUI dùng `StubProvider`
   luôn báo lỗi. Chỉ TUI mới gọi thật.

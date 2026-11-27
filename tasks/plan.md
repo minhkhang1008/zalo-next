@@ -37,5 +37,5 @@ installed for the macOS workflows. No commit, push, release or installed-app rep
 ## Implementation checkpoint
 
 All six source implementation groups are delivered. Acceptance evidence and UI entry
-points are recorded in docs/HOAN_THIEN_PLAN_2026-11-13.md and the agent worklog.
+points are recorded in the agent worklog (the former docs/HOAN_THIEN_PLAN_2026-11-13.md was folded into docs/HUONG_DAN_SU_DUNG.md and docs/TINH_NANG.md).
 Real-phone/call/native-package acceptance remains explicitly open in tasks/todo.md.

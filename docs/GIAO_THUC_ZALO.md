@@ -1,58 +1,97 @@
-# Đặc tả giao thức Zalo Web/PC
+# Giao thức Zalo Web/PC trong Zalo-next
 
-Tài liệu tổng hợp cấu trúc tham số, bảng phân bổ domain và các thuật toán mã hóa sử dụng trong `zalo-next`.
-
----
-
-## 1. Tham số cơ sở
-
-- `zpw_ver`: `694`
-- `zpw_type`: `30` (PC / Web client)
-- Query string chung trên các request: `zpw_ver=694&zpw_type=30`
+Tóm tắt những gì Zalo-next đang dùng. Bằng chứng gốc (capture, trích bundle, ngày quan sát) nằm trong
+[`re-notes/`](../re-notes/). Quy trình khi **sửa** giao thức: [`standards/protocol.md`](standards/protocol.md).
 
 ---
 
-## 2. Bảng phân bổ máy chủ (Service Domains)
+## 1. Tham số chung
 
-| Dịch vụ | Host mặc định | Endpoint chính |
+| Tham số | Giá trị | Nguồn |
 |---|---|---|
-| **Auth** | `https://wpa.zaloapp.com` | `/api/login/reqqr`, `/api/login/loginByPasswv2` |
-| **WPA Session** | `https://wpa.chat.zalo.me` | `/api/login/getServerInfo`, `/api/login/getLoginInfo` |
-| **Profile & Danh bạ** | `https://tt-profile-wpa.zaloapp.com` | `/api/social/friend/getfriends`, `/api/social/profile/getminiprofiles` |
-| **Hội thoại** | `https://tt-convers-wpa.api.zaloapp.com` | `/api/message/get-last-msgs`, `/api/pinconvers/list` |
-| **Nhóm chat** | `https://tt-group-wpa.zaloapp.com` | `/api/group/getlg/v4`, `/api/group/sendmsg`, `/api/group/history` |
-| **Tin nhắn 1-1** | `https://tt-chat3-wpa.api.zaloapp.com` | `/api/message/sms`, `/api/message/sticker`, `/api/message/quote` |
-| **Sticker API** | `https://tt-sticker-wpa.chat.zalo.me` | `/api/message/sticker/suggest/keywords`, `/api/message/sticker/suggest/stickers`, `/api/message/sticker/search`, `/api/message/sticker/sticker_detail` |
-| **Sticker CDN** | `https://api.zaloapp.com` | `/api/emoticon/sticker/webpc?eid=<id>&size=130` |
+| `zpw_ver` / `zpw_type` | `694` / `30` (Zalo Web) | `ZPW_VER`, `ZPW_TYPE` trong `src/session.rs` |
+| Ngoại lệ `voicecall` | `693` / `24` (cặp của Zalo PC) để điện thoại nhận cuộc gọi video | `call.rs::voicecall_zpw`, `re-notes/48`; ghi đè bằng biến `ZCALL_ZPW` |
 
----
+Request sau đăng nhập gắn cookie `zpw_sek` và header `Origin: https://chat.zalo.me`.
+
+## 2. Máy chủ
+
+Host dịch vụ lấy theo `zpw_service_map_v3` của phiên web và được ghi lại trong `src/endpoints.rs`
+(`SERVICE_MAP_V3`). Phiên web/QR dùng các host `*.chat.zalo.me`; bảng mặc định cũ của Zalo PC
+(`*.zaloapp.com`) không còn đúng với loại phiên này.
+
+| Khoá | Host |
+|---|---|
+| `profile`, `friend` | `tt-profile-wpa.chat.zalo.me`, `tt-friend-wpa.chat.zalo.me` |
+| `conversation`, `chat`, `group` | `tt-convers-wpa.chat.zalo.me`, `tt-chat3-wpa.chat.zalo.me`, `tt-group-wpa.chat.zalo.me` |
+| `sticker` (cả GIF qua Giphy) | `tt-sticker-wpa.chat.zalo.me` |
+| `label`, `reaction`, `alias`, `emoji_status` | `label-wpa…`, `reaction…`, `tt-alias-wpa…`, `emoji-status…` (`.chat.zalo.me`) |
+| `file`, `zcloud` | `tt-files-wpa.chat.zalo.me`, `zcld.chat.zalo.me` |
+| `voice_call` | `voicecall-wpa.chat.zalo.me` |
+| Đăng nhập | `wpa.zaloapp.com` (`AUTH`), `wpa.chat.zalo.me` (`WPA_CHAT`) |
+| Board ghim | `groupboard-wpa.chat.zalo.me`, `friendboard-wpa.chat.zalo.me`, `board-wpa.chat.zalo.me` |
+
+Media nhận được tải từ CDN `dlmd.me` / `dlfl.vn` bằng client **không cookie** (`is_trusted_zalo_media_url`).
 
 ## 3. Chữ ký `signkey`
 
-Các endpoint khởi tạo và xác thực yêu cầu tham số `signkey` tính bằng MD5:
+Dùng cho các lệnh đăng nhập và khởi tạo:
 
 ```text
 signkey = md5("zsecure" + tag + concat(params[k] for k in sorted(keys)))
 ```
 
-- `tag`: tên lệnh viết thường, bỏ dấu gạch ngang (ví dụ `reqqr`, `getlogininfo`, `getserverinfo`, `loginbypasswv2`).
-- Các tham số phụ như `ref` hoặc `nretry` được nối vào URL sau khi đã tính `signkey`.
+`tag` là tên lệnh viết thường, bỏ gạch ngang (`reqqr`, `getlogininfo`, `getserverinfo`, …). Tham số phụ
+(`ref`, `nretry`) được nối vào URL sau khi tính `signkey`. Sai chữ ký thì máy chủ trả `18022`.
 
----
+## 4. Mã hoá tham số
 
-## 4. Mã hóa tham số xác thực (`ParamCipher v2`)
+**Trước đăng nhập: `ParamCipher v2`** (`src/param_cipher.rs`)
+1. Khoá tĩnh `PARAM_CIPHER_KEY`; `zcid` = AES-256-CBC(`"{type},{imei},{firstLaunchTime}"`, IV 0), dạng hex in hoa.
+2. `zcid_ext`: 10 ký tự hex ngẫu nhiên.
+3. `encrypt_key` (32 ký tự) dẫn xuất từ các vị trí chẵn/lẻ của `MD5(zcid_ext)` và `zcid`.
+4. JSON payload → AES-256-CBC (`encrypt_key`, IV 0, PKCS7) → Base64 vào `params`. Sai thì máy chủ trả `18060`.
 
-Sử dụng cho các gói tin chưa có khóa phiên `zpw_enk`:
+**Sau đăng nhập: `zpw_enk`**: khoá nhận từ `getLoginInfo`, dùng AES-128-CBC (IV 0, PKCS7) để mã hoá
+`params` và giải mã trường `data` của phản hồi.
 
-1. Khóa tĩnh `PARAM_CIPHER_KEY = "3FC4F0D2AB50057BCE0D90D9187A22B1"`.
-2. Sinh `zcid`: mã hóa chuỗi `"{type},{imei},{firstLaunchTime}"` bằng AES-256-CBC với `PARAM_CIPHER_KEY` và IV toàn `0`, sau đó chuyển sang chuỗi hex in hoa.
-3. Sinh `zcid_ext`: chuỗi hex ngẫu nhiên dài 10 ký tự.
-4. Dẫn xuất khóa `encrypt_key` (32 ký tự ASCII) từ các vị trí chẵn/lẻ của `MD5(zcid_ext)` và `zcid`.
-5. Mã hóa JSON payload bằng AES-256-CBC (`encrypt_key`, zero IV, PKCS7) và mã hóa Base64 vào trường `params`.
+WebSocket dùng thêm AES-GCM cho payload frame (`socket.rs`).
 
----
+## 5. WebSocket `zpw_ws`
 
-## 5. Khóa phiên `zpw_sek` và `zpw_enk`
+| Mã lệnh | Ý nghĩa |
+|---|---|
+| `1` | Xác thực (`CMD_AUTHEN`) |
+| `2`, `4` | Ping / giữ kết nối |
+| `501`, `521` | Đẩy tin 1-1 / nhóm |
+| `510`, `511`, `513`–`518` | Kéo tin bù |
+| `533`, `534` | Báo có tin / tin bị lỡ |
+| `601`–`604` | Điều khiển (bao gồm kéo sự kiện VoIP `604`) |
 
-- **`zpw_sek` (Session Cookie):** Nhận được sau khi xác nhận QR hoặc đăng nhập thành công. Giá trị này được gắn vào cookie jar (`Cookie: zpw_sek=...; _zlang=vi`) cho toàn bộ các domain dịch vụ của Zalo (`*.zaloapp.com`, `*.chat.zalo.me`) kèm header `Origin: https://chat.zalo.me`.
-- **`zpw_enk` (Session Data Key):** Nhận từ `getLoginInfo`, dùng làm khóa AES-128-CBC (zero IV, PKCS7) để mã hóa tham số `params` và giải mã trường `data` trên toàn bộ các API dữ liệu sau đăng nhập.
+Danh sách đầy đủ là các hằng `CMD_*` trong `src/socket.rs`.
+
+## 6. Phiên
+
+- **`zpw_sek`**: cookie phiên nhận sau khi xác nhận QR. Chỉ được gửi tới host vượt qua `is_trusted_zalo_url`.
+- **`zpw_enk`**: khoá dữ liệu phiên (xem mục 4).
+- Phiên hết hạn hoặc bị thay bởi một phiên web khác thì máy chủ trả `600` / `-102`. Phải đăng nhập lại, nhưng
+  lịch sử vẫn giữ nguyên. Mỗi tài khoản Zalo chỉ có một phiên web cùng lúc.
+
+Bảng mã lỗi đầy đủ: [`KHAC_PHUC_SU_CO.md`](KHAC_PHUC_SU_CO.md).
+
+## 7. Mục lục `re-notes/`
+
+| Ghi chú | Chủ đề |
+|---|---|
+| `01_login`, `capture` | Giao thức đăng nhập Zalo PC, cách bắt request |
+| `02_chat_data`, `04_session_fix`, `05_message_store` | Luồng dữ liệu hội thoại, sửa phiên, kho SQLite |
+| `06_call_media`, `07_voip_log`, `08_video_call`, `48_voicecall_zpw_pair` | Cuộc gọi thoại/video |
+| `09_feed_and_zalo_video` | Feed và Zalo Video (giao diện Feed đã gỡ) |
+| `35_exact_message_identity` | Định danh tin (`cliMsgId` và `ts`) cho reaction/trích dẫn |
+| `37_group_posting_restriction`, `38_group_mentions` | Quyền đăng trong nhóm, tag `@` |
+| `39_gif_search_send`, `40_conversation_labels` | GIF, nhãn hội thoại (chỉ đọc) |
+| `42`–`45`, `47_sync_v2_call_logs` | Đồng bộ lịch sử: điểm vào, vòng đời Sync V2, Android, nhật ký cuộc gọi |
+| `46_inline_video_playback` | Phát video đính kèm trong app |
+| `03_progress_audit` | Đánh giá tiến độ cũ (lịch sử) |
+
+Ghi chú mới lấy số kế tiếp (`49_…`). Không dùng lại số cũ.

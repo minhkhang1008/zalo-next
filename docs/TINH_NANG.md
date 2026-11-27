@@ -3,6 +3,7 @@
 ✅ hoạt động · 🟡 hoạt động một phần · ⛔ chưa có · 🚫 tắt có chủ đích
 
 Kiểm thử chủ yếu trên macOS. Cách dùng chi tiết: [Hướng dẫn sử dụng](HUONG_DAN_SU_DUNG.md).
+Chỉ đổi trạng thái khi có bằng chứng (chạy thật hoặc chủ dự án xác nhận); test tự động chưa đủ để ghi ✅.
 
 ## Đăng nhập & dữ liệu
 
@@ -66,6 +67,7 @@ Kiểm thử chủ yếu trên macOS. Cách dùng chi tiết: [Hướng dẫn s�
 | Gọi video | 🟡 | Báo hiệu hoạt động; chưa hiển thị camera điện thoại, hình gửi đi còn mờ/trễ |
 | Cuộc gọi đến | ✅ | Cửa sổ luôn nằm trên cùng, kèm thông báo hệ thống |
 | Gọi nhóm | 🟡 | |
+| Tự cài công cụ gọi video (FFmpeg) | 🟡 | macOS: tải bản đã kiểm SHA-256 vào thư mục dữ liệu; Windows (WinGet) và Linux (apt) chưa kiểm thử |
 
 ## Giao diện & hệ thống
 

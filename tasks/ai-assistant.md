@@ -2,7 +2,7 @@
 
 Design: [`docs/AI_TRO_LY.md`](../docs/AI_TRO_LY.md) · Decision: [ADR-0004](../docs/adr/0004-local-ai-assistant.md).
 Status: **AI-1..AI-6 implemented 2026-11-17** except Keychain storage and streaming (see each task); offline tests pass, live verification with a real provider and Zalo account is pending. Each task below can be filed as a GitHub
-Issue per `docs/standards/issue-tracker.md`; implement in order, one branch per task (`feature/ai-*`).
+Issue per `docs/standards/git-and-issues.md`; implement in order, one branch per task (`feature/ai-*`).
 Terms follow `GLOSSARY.md` (Assistant, Local AI message, Context sharing; INV-5, INV-6).
 
 Definition of done for every task: `cargo check`, relevant `cargo test`, no new clippy findings in touched files,

@@ -1022,3 +1022,54 @@ Entry template:
 - Changes: backticked `@AI` in CHANGELOG; `release_notes.py` now wraps any bare `@name` outside code spans (`neutralize_mentions`) with `tests/release_notes_test.py`; edited the live v0.4.0 release body (`gh release edit`) from the regenerated notes. README rewritten in two parts (users: highlights, install, getting started, privacy, trust; developers: stack, source map, build, CLI, rules, docs index). Refreshed `HUONG_DAN_SU_DUNG` (CLI flags `--profile/--check-update/--version/--proxy/--dump-raw`, new sticker/emoji/GIF panel, albums, calls, appearance/background, `@AI` moved into section 2.4), `TINH_NANG`, `KIEN_TRUC_HE_THONG` (picker/album/appearance/ai_ui/tray modules), `KHAC_PHUC_SU_CO`, `scripts/README`, ADR index (0004 accepted), `tasks/todo.md`.
 - Verification: unittest for release notes passes; regenerated release body has no bare `@`. Docs were checked against `main.rs`/`modals.rs`/CHANGELOG, not by running the app.
 - Status: done; nothing committed or pushed (owner to review). `log.txt` untouched.
+
+## 2026-11-27 — Codex plugin setup check (`/codex:setup`)  (agent: Claude Code, claude-sonnet-5-5)
+- Request: check that the local Codex CLI is ready for the `codex@openai-codex` plugin.
+- Context: companion `setup --json` reports ready (node v26.12.1, npm 11.20.0, codex-cli 0.172.0, ChatGPT login verified, review gate disabled).
+- Changes: none apart from this entry; no repo code touched.
+- Verification: setup script output only; no Codex task or review was run.
+- Status: done.
+
+## 2026-11-27 — Rewrite AGENTS.md and docs/, set up Claude → Codex orchestration  (agent: Claude Code, claude-opus-5-5 (orchestrator) + Codex (read-only fact-check))
+- Request: owner is migrating Zalo-next off ctdozlite. Scan the workspace, fully rewrite `AGENTS.md` and `docs/`,
+  document the installed skills for agents, research cross-agent orchestration, and set up Claude Code
+  (orchestrator) + Codex (worker and cross-reviewer).
+- Owner decisions (asked in session): consolidate the old docs; upstream is used only when the owner asks for a
+  port; agents may commit locally on their own, but pushing needs approval; Claude delegates to Codex
+  automatically by rule, with the stop-time review gate off.
+- Changes:
+  - `AGENTS.md`: rewritten in English as the single source of truth. Covers commands (rustfmt on touched files
+    only, no new clippy warnings), source map, non-negotiables scoped to reality, git policy, definition of done,
+    upstream policy, multi-agent rules, and skills by situation.
+  - `CLAUDE.md` (new): orchestrator playbook (delegation rules, brief template, review matrix, handling of
+    findings). `scripts/codex.sh` (new): finds the Codex plugin companion so it can be called from Bash.
+  - `docs/standards/`: 9 inherited files replaced by 8 repo-specific ones plus a README, each with a
+    "known debt" section.
+  - ADRs: notes added to 0001–0003; new ADR-0005 (independence from upstream) and ADR-0006 (multi-agent
+    workflow).
+  - Product docs: `KIEN_TRUC_HE_THONG`, `GIAO_THUC_ZALO` and `docs/README.md` rewritten. The dated
+    `HOAN_THIEN_PLAN`, `UPSTREAM_REVIEW` and `VIDEO_TOOLS` were removed; their content went into
+    `HUONG_DAN_SU_DUNG` (§2.3–2.5), `CAI_DAT`, `KHAC_PHUC_SU_CO` and `TINH_NANG`.
+  - Link and wording fixes in `README.md`, `GLOSSARY.md` (INV-1 scope), the PR template, and `tasks/`.
+- Verification:
+  - every factual claim was grep-checked while writing;
+  - Codex then fact-checked all the new docs read-only (`scripts/codex.sh task`, ~10 min, about 620 claim
+    instances). It found about 28 wrong claims, all verified and fixed. Examples: Rust floor is **1.97** (wasmtime
+    50), not 1.75; `reqqr`/`getServerInfo` send signed plaintext; imports can update rows; the updater hash is
+    optional on some paths;
+  - the relative-link check found no broken links;
+  - the `scripts/codex.sh` failure path was tested (exit 127).
+  No Rust code was changed, and no build or tests were run.
+- New code issues found (documented in `docs/standards/security.md` §7, NOT fixed):
+  - the updater's SHA-256 is optional for the Windows/Linux portable installs, and asset URLs are not
+    host-checked;
+  - the legacy image/sticker loader uses the session (cookie) client for any `http(s)` URL, with no size cap;
+  - link-card thumbnails in incoming messages are fetched automatically;
+  - `threads_cache.json` is not forced to `0600`;
+  - `workspace.rs` deletes conversations via SQLite on the UI thread.
+- Not done or open:
+  - `.claude/` is gitignored, so no project `.claude/settings.json` was added;
+  - the untracked `skills/system/run-workflow` (a `run_workflow` tool this harness lacks) was left alone,
+    pending the owner;
+  - `log.txt` untouched.
+- Status: done; committed locally, not pushed.

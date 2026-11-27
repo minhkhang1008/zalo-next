@@ -66,7 +66,7 @@ Gỡ cài đặt: xoá `Zalo-next.app`; muốn xoá cả dữ liệu thì xoá t
 
 ## Tự build từ mã nguồn
 
-Cần: Rust 1.75+, Xcode Command Line Tools (`xcode-select --install`) và CMake (`brew install cmake`).
+Cần: Rust 1.97+ (do `wasmtime` 50), Xcode Command Line Tools (`xcode-select --install`) và CMake (`brew install cmake`).
 
 ```bash
 git clone https://github.com/minhkhang1008/zalo-next.git && cd zalo-next
@@ -106,3 +106,20 @@ toàn nếu commit chỉ sửa tài liệu. Khi bạn đẩy một tag `v*`, CI 
    và `SHA256SUMS.txt`.
 
 Có thể chạy lại thủ công: **Actions → CI & Cross-Platform Release → Run workflow**, bật `publish`.
+
+## Công cụ gọi video (FFmpeg)
+
+FFmpeg không nằm trong gói cài đặt. App chỉ tải về khi bạn cần (xem
+[Hướng dẫn sử dụng §2.3](HUONG_DAN_SU_DUNG.md#23-gọi-thoại-và-gọi-video-1-1)). Trên macOS, app tải trực tiếp từ
+các nhà phân phối được [ffmpeg.org](https://ffmpeg.org/download.html) dẫn link (cho phép chuyển hướng tới mirror
+`e.deolaha.ca`), rồi đối chiếu với hash đã ghim
+sẵn trong mã nguồn (`src/video_tools.rs`):
+
+| Kiến trúc | Nguồn | SHA-256 của tệp `ffmpeg` sau giải nén |
+|---|---|---|
+| Apple Silicon | [OSXExperts](https://www.osxexperts.net/), `ffmpeg902arm.zip` | `6deb2860c3dc0c08e0f96bab119196c024103046fa3cc7ef72e3a77797d8553c` |
+| Intel | [Evermeet](https://evermeet.cx/ffmpeg/), `ffmpeg-9.0.2.zip` | `a45b462cf91ed89148ae218c4577e30896485d7a6792c3673bcf5f823fa01b63` |
+
+Giới hạn: tệp ZIP tối đa 128 MiB, sau giải nén tối đa 192 MiB. App chỉ đọc mục `ffmpeg` và không dùng tên đường
+dẫn trong ZIP để ghi tệp; tệp chạy được đặt quyền `0700`. Nếu hash sai hoặc chạy thử thất bại, app không kích
+hoạt bản đó. Trình tải dùng HTTP client riêng, không mang cookie hay token Zalo.

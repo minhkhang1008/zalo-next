@@ -1,5 +1,5 @@
 <!--
-Tier guide (see docs/standards/git-flow-and-pr-matrix.md):
+Tier guide (see docs/standards/git-and-issues.md):
 - Tier 1 (docs/typo/deps): keep What + Why, delete the rest.
 - Tier 2 (feature/bugfix/refactor): fill every section, tick the checks you ran.
 - Tier 3 (protocol/schema/crypto/breaking): add ADR link, evidence and rollback detail.
@@ -17,8 +17,8 @@ Use concise bullets, not paragraphs. Never paste session.json, cookies, zpw_sek/
 
 ## Verification
 - [ ] `cargo test --locked`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo fmt --all --check`
+- [ ] `cargo clippy --all-targets`: no new warnings in touched files
+- [ ] `rustfmt --check` on touched files
 - [ ] Manual: <GUI/TUI, OS, flow, observed error_code>
 
 ## Risk & Rollback

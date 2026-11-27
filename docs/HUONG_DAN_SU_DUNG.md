@@ -1,6 +1,6 @@
 # Hướng dẫn sử dụng Zalo-next
 
-Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diện đồ họa (GUI) và bảng phím tắt của giao diện terminal (TUI).
+Tùy chọn dòng lệnh, cách dùng giao diện đồ hoạ (GUI) và phím tắt của giao diện terminal (TUI). Trạng thái từng tính năng: [TINH_NANG.md](TINH_NANG.md). Gặp lỗi: [KHAC_PHUC_SU_CO.md](KHAC_PHUC_SU_CO.md).
 
 ---
 
@@ -19,16 +19,16 @@ Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diệ
 | `--version`, `-V` | In phiên bản rồi thoát. | `zalo-next --version` |
 | `--proxy <URL>` | Đi qua proxy HTTP(S) khi kết nối mạng. | `zalo-next --proxy http://127.0.0.1:8080` |
 | `--logout` | Xóa phiên đăng nhập hiện tại (`session.json`) rồi thoát. | `zalo-next --logout` |
-| `--phone <SỐ>` | Điền sẵn số điện thoại khi thử đăng nhập bằng mật khẩu. | `zalo-next --tui --phone 0912345678` |
+| `--phone <SỐ>` | Đăng nhập bằng mật khẩu (chỉ TUI/CLI; giao diện đồ hoạ chỉ có QR). | `zalo-next --tui --phone 0912345678` |
 | `--pass <MK>` | Điền sẵn mật khẩu. | `zalo-next --tui --phone 0912345678 --pass ...` |
-| `--dump`, `-d` | Lưu các gói phản hồi JSON ra thư mục `dump/` để phục vụ phân tích. | `zalo-next --dump` |
+| `--dump`, `-d` | Lưu các gói phản hồi JSON ra thư mục `dump/` để phân tích (có thể chứa dữ liệu riêng tư, không chia sẻ). | `zalo-next --dump` |
 | `--dump-raw` | Như `--dump` nhưng giữ dữ liệu thô chưa giải mã. | `zalo-next --dump-raw` |
 
 ---
 
 Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dùng chung `~/Library/Application Support/ctdozlite`, kể cả khi thư mục làm việc là `/`, nên GUI và TUI luôn thấy cùng một phiên đăng nhập và cơ sở dữ liệu. Windows và Linux giữ thư mục làm việc hiện tại. `--data-dir` ghi đè lựa chọn này (`--profile <tên>` tạo thư mục con `profiles/<tên>`); thư mục chỉ định và thư mục mặc định trên macOS có quyền `0700` trên Unix. Nếu thư mục không ghi được, chương trình báo lỗi trước khi mở dữ liệu.
 
-`--version` và `--print-data-dir` không chuẩn bị hay di chuyển dữ liệu.
+`--version` không đụng tới dữ liệu. `--print-data-dir` chỉ tạo thư mục khi cần và thử ghi, không chuyển dữ liệu cũ.
 
 **Tự chuyển dữ liệu cũ (macOS):** ở lần chạy đầu sau khi đổi quy tắc, nếu thư mục dữ liệu mới chưa có phiên/lịch sử nhưng thư mục làm việc có `session.json`, `zalo_history.db` hoặc `accounts/`, chương trình sao chép (quyền `0600`/`0700`) các tệp của Zalo-next (`session.json`, `zalo_history.db` kèm `-wal`/`-shm`, `accounts/`, `threads_cache.json`, `app_settings.json`, `theme.json`, `custom_stickers.json`, `autoreply_rules.json`, `active_account`, khóa Sync V2), kiểm tra kích thước rồi đổi tên bản gốc thành `*.bak` (không xóa). Không bao giờ ghi đè tệp đã có ở thư mục mới, không đụng tới tệp khác, và không chạy khi dùng `--data-dir` / `--profile`. Muốn quay lại, đổi tên `*.bak` về tên cũ và chạy với `--data-dir .`.
 
@@ -70,10 +70,30 @@ Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dù
 
 ### 2.3. Gọi thoại và gọi video 1-1
 - Trong cuộc trò chuyện cá nhân, bấm biểu tượng điện thoại hoặc máy quay ở góc phải thanh tiêu đề hội thoại để bắt đầu cuộc gọi.
-- Khi có cuộc gọi đến, cửa sổ cuộc gọi hiện **luôn nằm trên cùng** kèm thông báo hệ thống "Cuộc gọi đến"; bấm **Nghe** để trả lời. Gọi video cần `ffmpeg` trong `PATH` (`brew install ffmpeg`). Hiện chưa hiển thị camera của điện thoại và hình Zalo-next gửi đi còn mờ (xem `tasks/video-call-quality.md`).
-- Thiết bị thu âm (Mic) và máy ảnh (Camera) có thể chọn trực tiếp trong cửa sổ cuộc gọi hoặc tại mục **Cài đặt -> Cài đặt chung**.
+- Khi có cuộc gọi đến, cửa sổ cuộc gọi hiện **luôn nằm trên cùng** kèm thông báo hệ thống "Cuộc gọi đến"; bấm **Nghe** để trả lời. Hiện app chưa hiển thị được camera của điện thoại, và hình Zalo-next gửi đi còn mờ (xem `tasks/video-call-quality.md`).
+- Thiết bị thu âm (Mic) và máy ảnh (Camera) có thể chọn ngay trong cửa sổ cuộc gọi hoặc tại **Cài đặt → Cài đặt chung**.
+- **Công cụ gọi video (FFmpeg):** FFmpeg dùng để thu camera, mã hoá/giải mã hình và phát video trong app. Nếu bấm **Gọi Video** hoặc **Bật Camera** khi máy chưa có FFmpeg, app tự mở Cài đặt chung và bắt đầu chuẩn bị (có tiến độ, nút dừng và thử lại); cũng có thể cài trước ở **Cài đặt → Cài đặt chung → Công cụ gọi video**. Cài xong là dùng được ngay, không cần khởi động lại.
+  - macOS: tải FFmpeg 9.0.2 bản tĩnh vào thư mục dữ liệu của app (không cần Homebrew hay quyền quản trị), kiểm tra SHA-256 và chạy thử rồi mới dùng; không đụng tới FFmpeg của hệ thống. App vẫn nhận FFmpeg cài bằng Homebrew, kể cả khi mở app từ Finder.
+  - Windows: cài qua WinGet (`Gyan.FFmpeg`). Linux (Debian/Ubuntu): `pkexec apt-get install ffmpeg`. Hai nền tảng này chưa được kiểm thử.
 
-### 2.4. Trợ lý AI (`@AI`)
+### 2.4. Tiện ích hằng ngày
+- **Bản nháp:** mỗi hội thoại giữ bản nháp riêng, gồm cả trích dẫn và tag. Danh sách hội thoại hiện chữ *Nháp*. Bản nháp chỉ lưu trên máy và vẫn còn khi tắt app, đăng xuất hay đổi tài khoản.
+- **Đã lưu:** menu tin nhắn → **Đánh dấu sao**. Mở **Đã lưu** ở thanh công cụ dưới cùng để thêm ghi chú, bỏ lưu hoặc nhảy tới đúng tin cũ.
+- **Nhắc hẹn riêng:** menu tin → **Nhắc hẹn** → 15 phút / 1 giờ / ngày mai. Đến hạn app hiện thông báo; tính năng này không gửi gì vào hội thoại. App cần đang mở và đăng nhập; nhắc đã đến hạn trong lúc tắt app sẽ hiện khi mở lại.
+- **Hẹn giờ gửi:** nút `🕒` cạnh ô soạn tin (khác với Nhắc hẹn).
+- **Tin nhắn nhanh:** tạo ở **Cài đặt → Tin nhắn**; trong ô soạn gõ `/`, chọn bằng `↑`/`↓` rồi `Enter` để chèn nội dung và ảnh.
+- **Tìm kiếm nâng cao** (chỉ trong lịch sử đã lưu trên máy, tối đa 200 kết quả mới nhất): ví dụ `"họp tuần" from:Minh has:file after:2026-11-01`. Hỗ trợ `from:`, `in:`, `has:image|file|voice|link`, `before:`, `after:`, `is:saved`/`is:starred`, `is:pinned`, cụm từ trong ngoặc kép và `#tag`. Bấm vào kết quả để nhảy tới tin, kể cả tin chưa nằm trong phần đang hiển thị.
+- **Xem trước tài liệu:** bấm **Xem trước** trên tệp PDF/DOCX/XLSX/PPTX/TXT/CSV/MD/LOG/RTF. App chỉ trích văn bản (khoảng 20.000 ký tự, 50 hàng mỗi sheet), không dựng lại trang. PDF dạng ảnh scan cần OCR bên ngoài. Tệp chỉ được tải khi bạn bấm, tối đa 10 MiB, và không lưu ra đĩa.
+- **Ghi âm:** chọn hội thoại → **Ghi âm** ở thanh dưới cùng, tối đa 5 phút. **Dừng và gửi** để gửi, **Hủy** để bỏ. Hội thoại nhận được cố định từ lúc bắt đầu ghi; bản ghi bị huỷ nếu bạn đổi tài khoản hoặc có cuộc gọi. App không tự gửi lại khi lỗi, để tránh gửi trùng.
+- **Markdown:** khối mã có nút sao chép, bảng, danh sách. Tắt định dạng hoặc đổi kiểu `*một sao*` ở **Cài đặt → Tin nhắn**.
+
+### 2.5. Đồng bộ tin nhắn từ điện thoại
+1. Lần đầu, chọn **Android** hoặc **iPhone** ở **Cài đặt → Đồng bộ tin nhắn** (lựa chọn được lưu theo thư mục dữ liệu và có thể đổi lại).
+2. Bấm đồng bộ rồi xác nhận yêu cầu trên điện thoại. Android dùng luồng sao lưu gốc; iPhone dùng Sync V2. Runtime Sync V2 được tải từ máy chủ của Zalo khi cần và được kiểm SHA-256, nên không cần cài Zalo PC.
+3. Chỉ đồng bộ được một phần lịch sử 1-1 (xem [TINH_NANG.md](TINH_NANG.md)). Nhật ký cuộc gọi hiện thành thẻ cuộc gọi.
+4. Muốn chuyển lịch sử từ máy hoặc thư mục khác: **Cài đặt → Đồng bộ tin nhắn → Nhập lịch sử**, chọn tệp `.db`/`.json`. Việc nhập không xoá gì; tin trùng có thể được cập nhật theo bản nhập.
+
+### 2.6. Trợ lý AI (`@AI`)
 
 1. Vào **Cài đặt → Trợ lý AI**, bật trợ lý, nhập **Base URL** tương thích OpenAI (ví dụ `https://api.example.com/v1`;
    `http://localhost:11434/v1` cho Ollama), **API key** và **Model**, rồi bấm **Kiểm tra kết nối**.
@@ -90,7 +110,7 @@ Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dù
    rồi bật công tắc. AI sẽ tóm tắt trước ở nền và giữ bản tóm tắt **chỉ trong bộ nhớ** (không lưu ra đĩa) để trả lời
    `@AI` nhanh hơn. Xem [AI_TRO_LY.md](AI_TRO_LY.md) mục 11.
 
-### 2.5. Giao diện, chạy nền và cập nhật
+### 2.7. Giao diện, chạy nền và cập nhật
 - **Cài đặt → Giao diện:** chọn Sáng / Tối / Hệ thống, bảng màu gợi ý, màu chủ đạo, màu điểm nhấn và bong bóng tin nhắn tùy chỉnh (có xem trước), phông chữ, thu phóng, bật/tắt và tốc độ hiệu ứng; **Khôi phục mặc định** để quay lại ban đầu.
 - **Chạy nền:** bấm nút đóng cửa sổ chỉ ẩn app, vẫn nhận tin nhắn, thông báo và cuộc gọi. Mở lại từ icon ở menu bar; thoát hẳn bằng menu đó hoặc `Ctrl+Q`.
 - **Cập nhật:** app tự kiểm tra mỗi 30 phút; hoặc vào **Cài đặt → Cập nhật** để kiểm tra thủ công.

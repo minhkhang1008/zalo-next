@@ -1,6 +1,12 @@
 # ADR 0002: Giao thức tự cập nhật và cấu trúc `latest.json` (Self-Updater Contract)
 
-> **ctdozlite-next (2026-11-12):** Áp dụng lại, nguồn cập nhật là `minhkhang1008/zalo-next`. Trên macOS, khi app chạy từ gói `.app` và tệp `.dmg` đã khớp SHA-256, trình cập nhật mount DMG, kiểm tra `codesign`, thay gói `.app` bằng cách đổi tên (có bản sao lưu để khôi phục) rồi mở lại app sau khi tiến trình cũ thoát; nếu không được thì mở DMG để cài tay.
+> **Zalo-next note (2026-11-27):** Inherited from ctdozlite and still **accepted**, with these changes:
+> the only update source is `minhkhang1008/zalo-next` (`GITHUB_REPO` in `src/gui/worker.rs`), asset names
+> are `zalo-next-*`, and the JSON example below keeps the historical upstream values. Checks run at startup
+> and every 30 minutes.
+
+> Earlier note (2026-11-12): on macOS, once the `.dmg` matches SHA-256, the updater mounts it, checks `codesign`,
+> swaps the `.app` by rename (keeping a backup to restore) and relaunches; otherwise it opens the DMG for a manual install.
 
 - **Trạng thái:** Đã chấp nhận (Accepted)
 - **Issues liên quan:** [#12](https://github.com/ctdoteam1110/ctdozlite/issues/12), [#29](https://github.com/ctdoteam1110/ctdozlite/issues/29)

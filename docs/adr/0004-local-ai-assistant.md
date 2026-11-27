@@ -13,7 +13,7 @@ GUI never issues the request ("Kiểm tra kết nối" only sets a string, summa
 key in plaintext `app_settings.json`, and silently falls back to other endpoints. See `docs/AI_TRO_LY.md` §8.
 
 Constraints from this repository: INV-1/INV-2 (Zalo credentials only to Zalo hosts), INV-3 (no I/O on the UI thread),
-the `is_trusted_zalo_url` allowlist, `docs/standards/database-and-migrations.md` (add tables instead of overloading
+the `is_trusted_zalo_url` allowlist, `docs/standards/storage.md` (add tables instead of overloading
 columns) and `AGENTS.md` ("no automatic GET to message URLs", sensitive files `0600`).
 
 ## Decision

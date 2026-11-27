@@ -113,7 +113,7 @@ mọi bước đều kiểm chứng được:
 
 | Lớp | Thành phần |
 |---|---|
-| Ngôn ngữ | Rust 1.75+, edition 2021 |
+| Ngôn ngữ | Rust 1.97+, edition 2021 |
 | Giao diện | `egui` / `eframe` (GUI), `ratatui` (TUI) |
 | Mạng | Tokio worker: WebSocket `zpw_ws`, HTTP polling, `reqwest` |
 | Lưu trữ | SQLite (`zalo_history.db`), `threads_cache.json` |
@@ -137,7 +137,7 @@ trả về `WorkerEvent`/`GuiEvent`. Sơ đồ đầy đủ: [Kiến trúc hệ 
 | `src/call.rs`, `src/audio.rs`, `src/media.rs` | Cuộc gọi, âm thanh, ảnh/tệp/sticker/voice |
 | `src/ai.rs` | Trợ lý `@AI` (client OpenAI-compatible tách biệt khỏi mạng Zalo) |
 | `src/updater.rs` | Tự cập nhật, chỉ từ Releases của repo này |
-| `src/endpoints.rs` | Nguồn duy nhất của mọi host Zalo |
+| `src/endpoints.rs` | Bảng host dịch vụ Zalo; host mới phải khai báo ở đây |
 
 ## Build và chạy
 
@@ -170,7 +170,8 @@ Danh sách đầy đủ: [Hướng dẫn sử dụng](docs/HUONG_DAN_SU_DUNG.md#
 
 - Không commit bí mật: `session.json`, `*.db`, cookie, `zpw_sek`, `zpw_enk`, IMEI, bản ghi lưu lượng.
 - Không chạy I/O, SQLite nặng hay mạng trên luồng vẽ UI; luôn đi qua worker.
-- Mọi host Zalo khai báo trong `src/endpoints.rs`; mọi request đi qua đường chuẩn: params → `ParamCipher v2` → `signkey` → cookie phiên.
+- Host Zalo mới khai báo trong `src/endpoints.rs`. Request tới Zalo đi qua đường chuẩn: params → mã hoá (`ParamCipher v2` trước đăng nhập, `zpw_enk` sau đăng nhập) → `signkey` khi endpoint yêu cầu → cookie phiên.
+- Chỉ format tệp đã sửa (`rustfmt`), không chạy `cargo fmt` cho cả crate; không thêm cảnh báo clippy mới.
 - Kết nối mang token phiên phải qua `is_trusted_zalo_url`; auto-updater chỉ trỏ về repo này.
 - Đổi hành vi giao thức (params, chữ ký, frame ID, cipher) cần bằng chứng trong [`re-notes/`](re-notes/) cùng test hoặc ghi chú kiểm chứng thủ công.
 - Chú thích mã bằng tiếng Anh, chuỗi hiển thị cho người dùng bằng tiếng Việt.
@@ -183,11 +184,13 @@ Danh sách đầy đủ: [Hướng dẫn sử dụng](docs/HUONG_DAN_SU_DUNG.md#
 | [Kiến trúc hệ thống](docs/KIEN_TRUC_HE_THONG.md) | Luồng worker, module GUI, lưu trữ |
 | [Giao thức Zalo](docs/GIAO_THUC_ZALO.md), [`re-notes/`](re-notes/) | Ghi chú phân tích giao thức và bằng chứng |
 | [Trợ lý AI](docs/AI_TRO_LY.md), [ADR](docs/adr/README.md) | Thiết kế trợ lý `@AI` và các quyết định kiến trúc |
-| [Quy chuẩn](docs/standards/) | Bình luận, lỗi/API, SQLite, đồng thời, test, bảo mật, git flow |
+| [Quy chuẩn](docs/standards/README.md) | Code, đồng thời, SQLite, bảo mật, giao thức, test, git, tài liệu |
+| [CLAUDE.md](CLAUDE.md), [ADR-0006](docs/adr/0006-multi-agent-workflow.md) | Claude Code điều phối, Codex triển khai và review chéo |
+| [Mục lục tài liệu](docs/README.md) | Toàn bộ tài liệu trong `docs/` |
 | [Thuật ngữ](GLOSSARY.md) | Ngôn ngữ chung cho issue, ADR, test và mã |
 | [SESSION_SECURITY.md](SESSION_SECURITY.md) | Bảo vệ `session.json` |
 
-Đóng góp: tạo nhánh theo [git flow](docs/standards/git-flow-and-pr-matrix.md), giữ commit nhỏ, thêm mục vào
+Đóng góp: theo [quy chuẩn git](docs/standards/git-and-issues.md), giữ commit nhỏ, thêm mục vào
 [CHANGELOG](CHANGELOG.md) cho mọi thay đổi người dùng thấy được.
 
 ## Ghi công & giấy phép

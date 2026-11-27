@@ -1,5 +1,13 @@
 # ADR 0001: Kiến trúc đồng bộ lịch sử tin nhắn (History Sync & Backup Import)
 
+> **Zalo-next note (2026-11-27):** Inherited from ctdozlite (issue links point to the upstream tracker).
+> Status in this repo: **partly superseded by reality.** `store::import_history_from_path` (layer 3) exists
+> and is used. `src/history_backup.rs` and the `history_sync_cursors` table (layers 1–2) do **not** exist here.
+> Phone history sync is implemented in `src/history_sync.rs` / `src/history_sync/android.rs` (Android backup,
+> Sync V2), see `re-notes/42`–`44`, `re-notes/47` and `docs/KIEN_TRUC_HE_THONG.md`. Server-side group/Cloud history paging
+> exists (`SyncHistory` → `history_sync::sync_thread`) but was rejected live with `-69` (`re-notes/42`, worklog
+> 2026-11-13); `docs/TINH_NANG.md` lists it as not working.
+
 - **Trạng thái:** Đã chấp nhận (Accepted)
 - **Issues liên quan:** [#10](https://github.com/ctdoteam1110/ctdozlite/issues/10), [#19](https://github.com/ctdoteam1110/ctdozlite/issues/19), [#9](https://github.com/ctdoteam1110/ctdozlite/issues/9)
 
