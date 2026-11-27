@@ -12,6 +12,20 @@ fn persist_app_settings(path: &std::path::Path, json: &str) -> std::io::Result<(
     std::fs::write(path, json)
 }
 
+async fn run_storage_task<T: Send + 'static>(
+    guard: Result<tokio::sync::OwnedMutexGuard<()>, tokio::sync::TryLockError>,
+    operation: impl FnOnce(&std::path::Path) -> T + Send + 'static,
+) -> Result<T, String> {
+    let _guard = guard.map_err(|_| "Đang quét hoặc dọn bộ nhớ.".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let root = std::env::current_dir()
+            .map_err(|_| "Không thể mở thư mục dữ liệu.".to_string())?;
+        Ok(operation(&root))
+    })
+    .await
+    .map_err(|_| "Tác vụ bộ nhớ bị gián đoạn.".to_string())?
+}
+
 /// Absolute cache directory for notification avatars; the native helper rejects relative paths.
 fn notification_avatar_dir() -> Option<std::path::PathBuf> {
     Some(
@@ -267,6 +281,11 @@ pub enum WorkerCmd {
     /// Remove an unreferenced image from the managed quick-message directory.
     DeleteQuickMessageImage {
         path: String,
+    },
+    ScanStorage,
+    ClearStorage {
+        target: ClearTarget,
+        expected_account: String,
     },
     TriggerScreenshot,
     SendTyping {
@@ -1057,6 +1076,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                 let mut voice_control:Option<(u64,std::sync::mpsc::Sender<bool>,std::sync::Arc<std::sync::atomic::AtomicBool>)>=None;
                 let video_requests = crate::media_resources::RequestGeneration::default();
                 let voice_playback_requests = crate::media_resources::RequestGeneration::default();
+                let storage_operation = std::sync::Arc::new(tokio::sync::Mutex::new(()));
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         WorkerCmd::StartVideo {
@@ -3680,6 +3700,39 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 let _ = gui_tx_clone.send(GuiEvent::QuickMessageImageDeleted {
                                     error: result.err(),
                                 });
+                            });
+                        }
+                        command @ (WorkerCmd::ScanStorage | WorkerCmd::ClearStorage { .. }) => {
+                            let guard = storage_operation.clone().try_lock_owned();
+                            let account = session.lock().await.login.as_ref()
+                                .map(|login| login.uin.clone())
+                                .filter(|uin| !uin.is_empty());
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let event = if let WorkerCmd::ClearStorage { target, expected_account } = command {
+                                    let result = if target == (ClearTarget::Media { current_account_only: true })
+                                        && account.as_deref() != Some(expected_account.as_str())
+                                    {
+                                        drop(guard);
+                                        Err("Tài khoản hiện tại đã thay đổi. Hãy quét lại bộ nhớ.".into())
+                                    } else {
+                                        run_storage_task(guard, move |root| {
+                                            crate::storage_usage::clear(
+                                                root,
+                                                target,
+                                                account.as_deref(),
+                                                std::time::SystemTime::now(),
+                                            )
+                                        }).await
+                                    };
+                                    GuiEvent::StorageCleared(result)
+                                } else {
+                                    let result = run_storage_task(guard, move |root| {
+                                        crate::storage_usage::scan(root, account.as_deref())
+                                    }).await;
+                                    GuiEvent::StorageScanned(result)
+                                };
+                                let _ = tx.send(event);
                             });
                         }
                         WorkerCmd::TriggerScreenshot => {

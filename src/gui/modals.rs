@@ -1,4 +1,22 @@
 use super::*;
+use crate::storage_usage::Category;
+
+fn storage_usage_totals(usage: &Usage, category: Category, current_account: bool) -> (u64, u64) {
+    usage
+        .entries
+        .iter()
+        .filter(|entry| entry.category == category && entry.current_account == current_account)
+        .fold((0u64, 0u64), |(bytes, files), entry| {
+            (
+                bytes.saturating_add(entry.bytes),
+                files.saturating_add(entry.files),
+            )
+        })
+}
+
+fn storage_usage_summary(bytes: u64, files: u64) -> String {
+    format!("{} · {files} tệp", format_storage_size(bytes))
+}
 
 #[derive(Debug, Clone, Copy)]
 struct VideoViewerLayout {
@@ -1402,7 +1420,178 @@ impl ZaloGuiApp {
             self.phone_modal_open = false;
         }
     }
+    fn render_storage_settings(&mut self, ui: &mut egui::Ui, pal: &ThemePalette) {
+        if !self.storage_settings.scan_requested && !self.storage_settings.busy {
+            self.scan_storage();
+        }
+
+        let storage = &self.storage_settings;
+        let actions_enabled = !storage.busy && storage.confirmation.is_none();
+        let mut refresh = false;
+        let mut clear_target = None;
+        let mut cancel_confirm = false;
+        let mut confirm_clear = None;
+
+        egui::Frame::none()
+            .fill(pal.bg_elevated)
+            .stroke(Stroke::new(1.0_f32, pal.border))
+            .rounding(Rounding::same(8.0))
+            .inner_margin(Margin::symmetric(14.0, 12.0))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let total = storage
+                        .usage
+                        .as_ref()
+                        .map_or_else(|| "—".into(), |usage| format_storage_size(usage.total));
+                    ui.label(
+                        RichText::new(format!("Tổng dung lượng · {total}"))
+                            .strong()
+                            .color(pal.text_primary),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        refresh = ui
+                            .add_enabled(actions_enabled, egui::Button::new("Quét lại"))
+                            .clicked();
+                    });
+                });
+
+                if storage.busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Đang xử lý bộ nhớ…");
+                    });
+                }
+                if let Some(error) = &storage.scan_error {
+                    ui.label(RichText::new(error).color(pal.danger));
+                }
+                if let Some((message, has_errors)) = &storage.clear_result {
+                    let color = if *has_errors { pal.danger } else { pal.text_primary };
+                    ui.label(RichText::new(message).color(color));
+                }
+
+                if let Some(usage) = &storage.usage {
+                    let can_clear = actions_enabled && storage.scan_error.is_none();
+                    let rows = [
+                        (
+                            Category::System,
+                            "Dữ liệu hệ thống (phiên, lịch sử tin nhắn, cài đặt)",
+                            None,
+                        ),
+                        (
+                            Category::Cache,
+                            "Bộ nhớ đệm (sticker, ảnh thu nhỏ)",
+                            Some(ClearTarget::Cache),
+                        ),
+                        (Category::Media, "Video và ghi âm đã tải", None),
+                        (Category::Logs, "Nhật ký (log)", Some(ClearTarget::Logs)),
+                        (
+                            Category::Foreign,
+                            "Dữ liệu do ứng dụng ctdozlite để lại (cache/, media/)",
+                            Some(ClearTarget::Foreign),
+                        ),
+                    ];
+                    for (category, title, target) in rows {
+                        let (bytes, files) = storage_usage_totals(usage, category, false);
+                        if category == Category::Foreign && bytes == 0 && files == 0 {
+                            continue;
+                        }
+                        ui.separator();
+                        ui.label(RichText::new(title).strong().color(pal.text_primary));
+                        if category == Category::Media {
+                            let (account_bytes, account_files) =
+                                storage_usage_totals(usage, category, true);
+                            let current = storage_usage_summary(account_bytes, account_files);
+                            let other = storage_usage_summary(bytes, files);
+                            ui.label(RichText::new(format!("Tài khoản này · {current}")).color(pal.text_secondary));
+                            ui.label(RichText::new(format!("Tài khoản khác · {other}")).color(pal.text_secondary));
+                            ui.horizontal_wrapped(|ui| {
+                                for (label, enabled, current_account_only) in [
+                                    ("Dọn của tài khoản này", account_files > 0, true),
+                                    ("Dọn tất cả", account_files > 0 || files > 0, false),
+                                ] {
+                                    let button = ui.add_enabled(can_clear && enabled, egui::Button::new(label));
+                                    if button.clicked() {
+                                        clear_target = Some(ClearTarget::Media { current_account_only });
+                                        button.scroll_to_me(Some(Align::Center));
+                                    }
+                                }
+                            });
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new(storage_usage_summary(bytes, files)).color(pal.text_secondary));
+                                if let Some(target) = target {
+                                    let label = if target == ClearTarget::Foreign { "Xóa" } else { "Dọn" };
+                                    let button = ui.add_enabled(can_clear && files > 0, egui::Button::new(label));
+                                    if button.clicked() {
+                                        clear_target = Some(target);
+                                        if target == ClearTarget::Foreign {
+                                            button.scroll_to_me(Some(Align::Center));
+                                        }
+                                    }
+                                } else {
+                                    ui.label(RichText::new("Không thể xóa ở đây").color(pal.text_secondary));
+                                }
+                            });
+                        }
+
+                        if let Some((pending, prompt)) = storage.confirmation {
+                            let in_media_row = category == Category::Media
+                                && matches!(pending, ClearTarget::Media { .. });
+                            if target == Some(pending) || in_media_row {
+                                ui.label(RichText::new(prompt).color(pal.danger));
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(!storage.busy, egui::Button::new("Xóa")).clicked() {
+                                        confirm_clear = Some(pending);
+                                    }
+                                    cancel_confirm = ui.button("Hủy").clicked();
+                                });
+                            }
+                        }
+                    }
+                }
+            });
+
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Ảnh và tệp bạn đã lưu vào thư mục Tải về không bị ảnh hưởng.")
+                .color(pal.text_secondary)
+                .size(11.8),
+        );
+
+        if refresh {
+            self.scan_storage();
+        }
+        if cancel_confirm {
+            self.storage_settings.confirmation = None;
+        }
+        if let Some(target) = confirm_clear {
+            self.clear_storage(target);
+        }
+        if let Some(target) = clear_target {
+            let prompt = match target {
+                ClearTarget::Media { current_account_only: true } => {
+                    "Xóa video và ghi âm đã tải của tài khoản này? Không thể hoàn tác."
+                }
+                ClearTarget::Media { current_account_only: false } => {
+                    "Xóa video và ghi âm đã tải của tất cả tài khoản? Không thể hoàn tác."
+                }
+                ClearTarget::Foreign => {
+                    "Xóa dữ liệu do ứng dụng ctdozlite để lại? Không thể hoàn tác."
+                }
+                ClearTarget::Cache | ClearTarget::Logs => {
+                    self.clear_storage(target);
+                    return;
+                }
+            };
+            self.storage_settings.confirmation = Some((target, prompt));
+        }
+    }
+
     pub(super) fn render_settings_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.settings_modal_open || self.settings_tab != SettingsTab::Storage {
+            self.storage_settings.confirmation = None;
+        }
         if !self.settings_modal_open {
             self.settings_blur_tex = None;
             self.settings_blur_req_at = None;
@@ -1416,6 +1605,9 @@ impl ZaloGuiApp {
             if self.quick_message_manager_open {
                 self.quick_message_manager_open = false;
                 self.quick_message_delete_confirm = None;
+                return;
+            }
+            if self.storage_settings.confirmation.take().is_some() {
                 return;
             }
             self.settings_modal_open = false;
@@ -1551,7 +1743,11 @@ impl ZaloGuiApp {
                         .show(ui, |ui| {
                             ui.set_width(200.0);
                             ui.set_height(win_h - 32.0);
-                            ui.vertical(|ui| {
+                            let navigation = egui::ScrollArea::vertical()
+                                .id_salt("settings_navigation")
+                                .max_height(win_h - 32.0)
+                                .auto_shrink([false, false]);
+                            navigation.show(ui, |ui| {
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new("Cài đặt")
@@ -1570,6 +1766,7 @@ impl ZaloGuiApp {
                                     (SettingsTab::Notifications, lucide::BELL, "Thông báo"),
                                     (SettingsTab::Messages, lucide::MESSAGE_SQUARE, "Tin nhắn"),
                                     (SettingsTab::Utilities, lucide::SLIDERS, "Tiện ích"),
+                                    (SettingsTab::Storage, lucide::FOLDER_OPEN, "Bộ nhớ"),
                                     (SettingsTab::Assistant, lucide::SPARKLES, "Trợ lý AI"),
                                     (SettingsTab::Update, lucide::SPARKLES, "Cập nhật"),
                                 ];
@@ -1621,6 +1818,9 @@ impl ZaloGuiApp {
                                         .on_hover_cursor(CursorIcon::PointingHand)
                                         .clicked()
                                     {
+                                        if self.settings_tab != tab {
+                                            self.storage_settings.confirmation = None;
+                                        }
                                         self.settings_tab = tab;
                                     }
                                     ui.add_space(2.0);
@@ -1687,6 +1887,7 @@ impl ZaloGuiApp {
                                         SettingsTab::Notifications => "Cài đặt thông báo",
                                         SettingsTab::Messages => "Cài đặt tin nhắn",
                                         SettingsTab::Utilities => "Tiện ích & Gợi ý",
+                                        SettingsTab::Storage => "Bộ nhớ",
                                         SettingsTab::Assistant => "Trợ lý AI",
                                         SettingsTab::Update => "Cập nhật phần mềm",
                                     };
@@ -3052,6 +3253,9 @@ impl ZaloGuiApp {
                                                     }
                                                 });
                                         }
+                                        SettingsTab::Storage => {
+                                            self.render_storage_settings(ui, pal);
+                                        }
                                         SettingsTab::Assistant => {
                                             self.render_assistant_settings(ui, pal, inner_w);
                                         }
@@ -3696,6 +3900,7 @@ impl ZaloGuiApp {
             self.cancel_quick_message_editor();
             self.quick_message_manager_open = false;
             self.quick_message_delete_confirm = None;
+            self.storage_settings.confirmation = None;
             self.settings_modal_open = false;
             self.settings_blur_tex = None;
             self.settings_blur_req_at = None;

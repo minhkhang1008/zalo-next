@@ -20,6 +20,7 @@ use crate::chat::{ChatMessage, Thread};
 use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
 use crate::session::Session;
+use crate::storage_usage::{ClearReport, ClearTarget, Usage};
 
 mod ai_ui;
 mod album;
@@ -97,6 +98,8 @@ pub enum GuiEvent {
     VideoToolsChecked {
         available: bool,
     },
+    StorageScanned(Result<Usage, String>),
+    StorageCleared(Result<ClearReport, String>),
     /// Terminal response for a Settings authorization action.
     NotificationAuthorization {
         request_id: u64,
@@ -610,9 +613,34 @@ enum SettingsTab {
     Notifications,
     Messages,
     Utilities,
+    Storage,
     Assistant,
     Update,
 }
+
+#[derive(Default)]
+struct StorageSettings {
+    usage: Option<Usage>,
+    scan_requested: bool,
+    busy: bool,
+    scan_error: Option<String>,
+    clear_result: Option<(String, bool)>,
+    confirmation: Option<(ClearTarget, &'static str)>,
+}
+
+fn format_storage_size(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const TIB: u64 = 1024 * GIB;
+    let size = if bytes >= TIB {
+        format!("{:.1} TB", bytes as f64 / TIB as f64)
+    } else if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else {
+        crate::chat::format_file_size(bytes)
+    };
+    size.replace('.', ",")
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct AppSettings {
@@ -1079,6 +1107,7 @@ pub struct ZaloGuiApp {
     _tray: Option<tray::Tray>,
     settings_modal_open: bool,
     settings_tab: SettingsTab,
+    storage_settings: StorageSettings,
     quick_message_manager_open: bool,
     quick_message_editor: Option<QuickMessageEditor>,
     quick_message_delete_confirm: Option<usize>,
@@ -1144,6 +1173,45 @@ fn thread_texts(threads: &[Thread]) -> impl Iterator<Item = &str> {
 }
 
 impl ZaloGuiApp {
+    fn scan_storage(&mut self) {
+        if self.storage_settings.busy {
+            return;
+        }
+        self.storage_settings.scan_requested = true;
+        self.storage_settings.scan_error = None;
+        self.storage_settings.busy = WORKER_TX
+            .get()
+            .is_some_and(|tx| tx.send(WorkerCmd::ScanStorage).is_ok());
+        if !self.storage_settings.busy {
+            self.storage_settings.scan_error = Some("Không thể bắt đầu quét bộ nhớ.".into());
+        }
+    }
+
+    fn clear_storage(&mut self, target: ClearTarget) {
+        if self.storage_settings.busy {
+            return;
+        }
+        self.storage_settings.confirmation = None;
+        let command = WorkerCmd::ClearStorage {
+            target,
+            expected_account: self.user_uin.clone(),
+        };
+        self.storage_settings.busy = WORKER_TX.get().is_some_and(|tx| tx.send(command).is_ok());
+        self.storage_settings.clear_result = if self.storage_settings.busy {
+            None
+        } else {
+            Some(("Không thể bắt đầu dọn bộ nhớ.".into(), true))
+        };
+    }
+
+    fn invalidate_storage_usage(&mut self) {
+        // Wait for an outstanding command's terminal event before requesting another scan.
+        self.storage_settings = StorageSettings {
+            busy: self.storage_settings.busy,
+            ..Default::default()
+        };
+    }
+
     fn open_video_tools_setup(&mut self) {
         self.settings_modal_open = true;
         self.settings_tab = SettingsTab::General;
@@ -1447,6 +1515,7 @@ impl ZaloGuiApp {
             _tray: tray::Tray::new(&cc.egui_ctx),
             settings_modal_open: false,
             settings_tab: SettingsTab::General,
+            storage_settings: StorageSettings::default(),
             quick_message_manager_open: false,
             quick_message_editor: None,
             quick_message_delete_confirm: None,
@@ -1695,6 +1764,9 @@ impl ZaloGuiApp {
                         format!("Đã quét bởi {name} — Vui lòng bấm 'Đăng nhập' trên điện thoại…");
                 }
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
+                    if !self.is_logged_in || self.user_uin != uin {
+                        self.invalidate_storage_usage();
+                    }
                     if let Some(tx) = WORKER_TX.get() {
                         self.conv_labels_loading = true;
                         let _ = tx.send(WorkerCmd::FetchConvLabels);
@@ -1958,6 +2030,7 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Trực tuyến · Cập nhật {}", crate::ui::clock());
                 }
                 GuiEvent::SessionExpired(reason) => {
+                    self.invalidate_storage_usage();
                     self.productivity = Default::default();
                     self.voice = Default::default();
                     self.doc_preview = Default::default();
@@ -1973,11 +2046,13 @@ impl ZaloGuiApp {
                     self.status_msg = format!("⚠️ {reason} — đang thử lại…");
                 }
                 GuiEvent::LocalDataWiped => {
+                    self.invalidate_storage_usage();
                     self.threads.clear();
                     self.selected_thread_index = 0;
                     self.status_msg = "Đã xoá dữ liệu tin nhắn cục bộ (session giữ nguyên)".into();
                 }
                 GuiEvent::LoggedOut => {
+                    self.invalidate_storage_usage();
                     self.close_image_viewer();
                     self.productivity = Default::default();
                     self.voice = Default::default();
@@ -1997,6 +2072,7 @@ impl ZaloGuiApp {
                     avatar,
                     threads,
                 } => {
+                    self.invalidate_storage_usage();
                     // The viewer holds the previous account's photos.
                     self.close_image_viewer();
                     self.is_logged_in = true;
@@ -2129,6 +2205,34 @@ impl ZaloGuiApp {
                     if let Some(error) = error {
                         crate::logger::log_error("gui::quick_message_image_delete", &error);
                     }
+                }
+                GuiEvent::StorageScanned(result) => {
+                    self.storage_settings.busy = false;
+                    if self.storage_settings.scan_requested {
+                        match result {
+                            Ok(usage) => self.storage_settings.usage = Some(usage),
+                            Err(error) => self.storage_settings.scan_error = Some(error),
+                        }
+                    }
+                }
+                GuiEvent::StorageCleared(result) => {
+                    self.storage_settings.busy = false;
+                    self.storage_settings.clear_result = Some(match result {
+                        Ok(report) => {
+                            let size = format_storage_size(report.freed);
+                            let mut message = format!(
+                                "Đã giải phóng {size} (bỏ qua {} tệp đang dùng)",
+                                report.skipped,
+                            );
+                            let errors = report.errors.len();
+                            if errors > 0 {
+                                message.push_str(&format!(" · {errors} lỗi"));
+                            }
+                            (message, errors > 0)
+                        }
+                        Err(error) => (format!("Không thể dọn bộ nhớ. {error}"), true),
+                    });
+                    self.scan_storage();
                 }
                 GuiEvent::QuoteSent {
                     client_message_id,
@@ -4134,7 +4238,19 @@ impl ZaloGuiApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_semver, phone_sync_completion_message, video_position_seconds};
+    use super::{
+        format_storage_size, is_newer_semver, phone_sync_completion_message, video_position_seconds,
+    };
+
+    #[test]
+    fn storage_sizes_use_vietnamese_decimal_separators() {
+        assert_eq!(format_storage_size(0), "0 B");
+        assert_eq!(format_storage_size(1023), "1023 B");
+        assert_eq!(format_storage_size(1536), "1,5 KB");
+        assert_eq!(format_storage_size(642_147_942), "612,4 MB");
+        assert_eq!(format_storage_size(1 << 30), "1,0 GB");
+        assert_eq!(format_storage_size(1 << 40), "1,0 TB");
+    }
 
     #[test]
     fn phone_platform_requires_a_choice_and_preserves_both_platforms() {
