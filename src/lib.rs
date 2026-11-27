@@ -28,6 +28,7 @@ pub mod qr;
 pub mod quick_messages;
 pub mod reactions;
 pub mod session;
+pub mod single_instance;
 pub mod socket;
 pub mod store;
 /// Location of the operating system's font files.

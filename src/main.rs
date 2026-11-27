@@ -13,7 +13,8 @@ use session::Session;
 pub use zalo_rust::{
     account_manager, api_mcp, audio, call, chat, clock, crypto, data_dir, endpoints, feed, gui,
     history_sync, logger, login, media, media_resources, message_model, param_cipher, qr,
-    reactions, scheduler, session, socket, store, tui, ui, unread, updater, voip_log,
+    reactions, scheduler, session, single_instance, socket, store, tui, ui, unread, updater,
+    voip_log,
 };
 
 pub const POLL_SECS: u64 = 4;
@@ -157,6 +158,26 @@ fn main() -> Result<()> {
                 .find_map(|a| a.strip_prefix("--proxy=").map(str::to_string))
         });
 
+    let gui_mode =
+        force_gui || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone")));
+    // One GUI per data directory; checked before `--logout` so a second launch can never delete
+    // the running GUI's session.
+    let _instance_lock = if gui_mode {
+        match single_instance::acquire(&data_path) {
+            single_instance::Instance::Primary(lock) => Some(lock),
+            single_instance::Instance::AlreadyRunning => {
+                if single_instance::notify_running(&data_path) {
+                    println!("ℹ Zalo-next đang chạy với thư mục dữ liệu này; đã mở lại cửa sổ.");
+                } else {
+                    println!("ℹ Zalo-next đang chạy với thư mục dữ liệu này.");
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
     if force_logout {
         let _ = std::fs::remove_file("session.json");
         let _ = std::fs::remove_file("threads_cache.json");
@@ -214,7 +235,7 @@ fn main() -> Result<()> {
     // If `--gui` is specified (or default when not `--tui` / `--qr` / `--phone`):
     // Open the native GUI window IMMEDIATELY without blocking on network requests!
     // Background worker in `gui.rs` handles `get_server_info`, `get_friends`, and `poll_new_messages`.
-    if force_gui || (!force_tui && !force_qr && !args.iter().any(|a| a.starts_with("--phone"))) {
+    if gui_mode {
         println!("🚀 Đang khởi chạy giao diện đồ họa Zalo-next (egui)…");
         #[cfg(target_os = "windows")]
         if dev_mode {
@@ -261,6 +282,8 @@ fn main() -> Result<()> {
             zalo_rust::APP_DISPLAY_NAME,
             native_options,
             Box::new(move |cc| {
+                let ctx = cc.egui_ctx.clone();
+                single_instance::serve_show_requests(&data_path, move || ctx.request_repaint());
                 Ok(Box::new(gui::ZaloGuiApp::new(
                     cc,
                     app_session,

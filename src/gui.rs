@@ -3162,7 +3162,8 @@ impl eframe::App for ZaloGuiApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             background::hide_app(ctx);
         }
-        if tray::take_show_request() {
+        // `|` (not `||`): consume both flags in the same frame.
+        if tray::take_show_request() | crate::single_instance::take_show_request() {
             background::show_app(ctx);
         }
         if tray::take_quit_request()
