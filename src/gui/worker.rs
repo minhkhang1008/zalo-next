@@ -1284,9 +1284,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let tx = gui_tx.clone();
                             let session = session.clone();
                             tokio::spawn(async move {
-                                // Only for downloading Zalo-hosted attachments; never sent to the AI host.
-                                let zalo_http = session.lock().await.http.clone();
-                                run_ai_ask(req, tx, "zalo_history.db".to_string(), Some(zalo_http)).await
+                                // Only for downloading attachments from Zalo media CDNs; never sent to
+                                // the AI host. Same cookie jar as the session, but redirects are off so a
+                                // CDN URL cannot bounce the request (and its cookies) to a Zalo API host.
+                                let jar = session.lock().await.jar.clone();
+                                let zalo_http = ai_media_client(jar);
+                                run_ai_ask(req, tx, "zalo_history.db".to_string(), zalo_http).await
                             });
                         }
                         WorkerCmd::AiLoadThread { thread_id } => {
@@ -4914,6 +4917,23 @@ async fn run_ai_ask(
     let _ = tx.send(GuiEvent::AiReply(reply));
 }
 
+/// Client for the Assistant's downloads from Zalo media CDNs: the session's cookies, no redirects.
+fn ai_media_client(jar: std::sync::Arc<reqwest::cookie::Jar>) -> Option<reqwest::Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::REFERER,
+        reqwest::header::HeaderValue::from_static("https://chat.zalo.me/"),
+    );
+    reqwest::Client::builder()
+        .cookie_provider(jar)
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(headers)
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .user_agent("zalo-next-media/0.2")
+        .build()
+        .ok()
+}
+
 /// Newest stored rows of the conversation that `search_messages`/`list_links` scan.
 const AI_TOOL_SCAN_ROWS: usize = 5_000;
 
@@ -5144,6 +5164,10 @@ async fn ai_attachment_bytes(
                     .send()
                     .await
                     .map_err(|_| crate::media_resources::MediaError::Offline)?;
+                // Redirects are off; refuse anything that is not the CDN URL we checked.
+                if !crate::ai::may_fetch_media(resp.url().as_str()) {
+                    return Err(crate::media_resources::MediaError::Http(0));
+                }
                 crate::media_resources::read_bounded_response(resp, limit).await
             };
             match tokio::time::timeout(std::time::Duration::from_secs(45), fetch).await {

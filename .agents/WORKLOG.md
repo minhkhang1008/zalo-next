@@ -1242,6 +1242,9 @@ Entry template:
   `/code-review high` on the branch found 6 important + 4 nits — all fixed (search limit/Unicode, photos counted as
   links, session cookies on sender-chosen Zalo API URLs, Regenerate losing the reply target, final tool round
   failing, fallback order, cancel losing composer attachments, stale comment, this entry). No second review round.
+- After review: AI media downloads use a dedicated client with the session's cookie jar and **redirects off** (the
+  session client follows redirects, so a CDN URL could have bounced to a Zalo API host), plus a final-URL check.
+  Real hosts seen in `re-notes/`/fixtures: photos on `*.zdn.vn`/`*.zadn.vn`, files on `*.dlfl.vn`/`*.dlmd.me`.
 - NOT verified: any real provider (tool calling and vision only tested against fake local servers), GUI behaviour
   (composer intercept with attachments, consent dialog restore), real Zalo CDN downloads (whether zdn.vn/zadn.vn
   photo/file URLs need the session or work cookie-free), large real groups.
