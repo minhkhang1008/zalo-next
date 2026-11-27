@@ -76,7 +76,7 @@ Chi tiết và bằng chứng: `re-notes/42`–`44`, `47`.
 
 | Module | Vai trò |
 |---|---|
-| `media.rs`, `media_resources.rs` | Ảnh, tệp, sticker, voice. Đường tải mới có giới hạn và cache tách theo tài khoản; bộ tải ảnh/sticker cũ trong `worker.rs` chưa có (xem `standards/security.md` §7) |
+| `media.rs`, `media_resources.rs` | Ảnh, tệp, sticker, voice. Mọi lượt tải đều có giới hạn dung lượng; client có cookie chỉ dùng cho host Zalo |
 | `doc_preview.rs` | Trích văn bản PDF/Office/text khi người dùng bấm Xem trước (chỉ trong RAM) |
 | `call.rs`, `audio.rs`, `voip_log.rs` | Báo hiệu VoIP, RTP, âm thanh `cpal` + `opus`, nhật ký cuộc gọi |
 | `voice.rs` | Thu âm tin nhắn thoại, đổi định dạng mẫu, AAC |
@@ -172,5 +172,5 @@ nhập và quyền hệ thống (ADR-0005).
 | Địa chỉ trợ lý AI do người dùng cấu hình | `@AI` | Không, chỉ API key của trợ lý |
 
 App không chạy máy chủ cục bộ nào (REST/MCP đã tắt); cuộc gọi chỉ mở cổng UDP tạm cho RTP/RTCP. App không tự
-tải các liên kết trong tin nhắn đến. Ngoại lệ đang chờ sửa: ảnh thu nhỏ của thẻ liên kết được tải tự động
-(`standards/security.md` §7).
+tải các liên kết trong tin nhắn đến. Ảnh và ảnh thu nhỏ từ máy chủ ngoài Zalo chỉ được tải khi người dùng bấm
+**Hiện ảnh**.

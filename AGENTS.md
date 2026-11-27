@@ -98,11 +98,11 @@ With CMake 4.x, export `CMAKE_POLICY_VERSION_MINIMUM=3.5` before building (`opus
      must still be written in `re-notes/` (what changed, why, and the reference it follows), covered by an
      offline fixture test, and logged as **unverified against a real phone** until the owner confirms it.
      The exception does not cover login, signing, `ParamCipher v2`, send/receive frames or calls.
-6. **Privacy.** Never auto-fetch URLs from incoming messages (no automatic link previews; there is one known
-   exception, see `security.md` §7). The REST/MCP server stays disabled. Do not add telemetry, translation services or scripting engines.
+6. **Privacy.** Never auto-fetch URLs from incoming messages (no automatic link previews; images and thumbnails
+   from non-Zalo hosts load only on click). The REST/MCP server stays disabled. Do not add telemetry, translation services or scripting engines.
 7. **Self-updater** checks and downloads **only** from `minhkhang1008/zalo-next` (`GITHUB_REPO` in
    `src/gui/worker.rs`), must verify SHA-256 before installing, never sends Zalo cookies or tokens to GitHub,
-   and never gets another update source. (The current code has gaps here; see `docs/standards/security.md` §7.)
+   and never gets another update source.
 8. **File permissions and memory caps.** Sensitive files (`session.json`, `zalo_history.db`, `ai_secret.json`,
    temporary decrypted DBs, Sync V2 identity) are `0o600` and their directories `0o700` on macOS/Unix. History
    sync keeps its caps (256 MiB download, 512 MiB decompressed). Document preview keeps its own caps.
