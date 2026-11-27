@@ -1073,3 +1073,21 @@ Entry template:
     pending the owner;
   - `log.txt` untouched.
 - Status: done; committed locally, not pushed.
+
+## 2026-11-27 — Track shared Claude config, remove unknown skill folder  (agent: Claude Code, claude-opus-5-5)
+- Request: owner asked to un-ignore project Claude config, and gave the agent discretion over the unknown
+  `skills/system/run-workflow`.
+- Changes:
+  - `.gitignore`: `.claude/` → `.claude/*`, with `!.claude/settings.json` and `!.claude/agents/`.
+    `settings.local.json` and the `skills/` symlinks stay ignored.
+  - New `.claude/settings.json`:
+    - allows `scripts/codex.sh`, `cargo check/test/clippy/build`, `rustfmt`, and read-only git;
+    - denies Read of session/account/AI-key/Sync V2 identity/`*.db` files, both in the repo root and in
+      `~/Library/Application Support/ctdozlite`.
+  - `CLAUDE.md` §3 mentions the file.
+  - Deleted the untracked `skills/` folder. It held one `run-workflow` SKILL.md (2026-11-24, unknown origin)
+    describing a `run_workflow` tool this harness lacks; nothing referenced it.
+- Verification: the JSON parses; `git check-ignore` confirms `settings.json` is tracked while
+  `settings.local.json` and `skills` stay ignored. The deny rules were not exercised live, and a session restart
+  may be needed for Claude Code to pick up the new project settings.
+- Status: done; committed locally, not pushed.

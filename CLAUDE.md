@@ -55,6 +55,9 @@ scripts/codex.sh adversarial-review --wait "<focus>"      # challenge review wit
 scripts/codex.sh status | result <job-id> | cancel <job-id>
 ```
 
+- `.claude/settings.json` (tracked) pre-allows `scripts/codex.sh`, `cargo check/test/clippy/build`, `rustfmt` and
+  read-only git, and denies reading session/key/database files. Put personal overrides in
+  `.claude/settings.local.json` (ignored). Shared subagent definitions go in `.claude/agents/` (tracked).
 - Write briefs to the session scratchpad, not the repo.
 - Run long jobs with the Bash tool's `run_in_background: true`. You are notified when the job exits, so do
   not poll. While a write job runs, **do not edit files inside its scope**.

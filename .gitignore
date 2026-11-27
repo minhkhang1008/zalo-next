@@ -76,7 +76,11 @@ book/
 
 # Local agent tooling & skill kit (machine-specific, symlinked paths)
 # `.agents/WORKLOG.md` is tracked on purpose (see AGENTS.md); the skill kits are not.
-.claude/
+# Shared Claude Code project config is tracked: `.claude/settings.json` and `.claude/agents/`.
+# `.claude/settings.local.json` (personal) and `.claude/skills/` (symlinks) stay local.
+.claude/*
+!.claude/settings.json
+!.claude/agents/
 .agents/skills/
 .omp/
 .opencode/
