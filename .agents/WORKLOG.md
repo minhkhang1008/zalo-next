@@ -1207,3 +1207,43 @@ Entry template:
 - NOT verified: anything at runtime on Windows — a real update from v0.4.0, migration on a real profile, toasts
   appearing (setup and portable), Windows 10 vs 11.
 - Status: committed on `fix/windows-parity`, pushed (branch only). Not merged to main, no release.
+
+## 2026-11-27 — `@AI`: links, metadata, retrieval tools, images and files  (agent: Claude Code, claude-opus-5-5 (orchestrator, wrote steps 2-3) + Codex (worker, step 1) + Claude `/code-review` (reviewer))
+- Request: `@AI` could not find a URL shared in the conversation; owner asked for richer context (sender, time, id,
+  replies), deeper history / tools for large groups, and images + files passed to the model without filtering by
+  model capability.
+- Root cause: by design (ADR-0004 decision 4) `ai::strip_urls` replaced every URL with `[liên kết]`, and
+  `transcript_for` / `run_ai_preload` read only `ChatMessage.text` / `StoredMessage.text`, dropping `link_url`,
+  titles, file names, reply fields and ids (stored only in `raw_json`). Context was only the in-memory messages
+  (often 20-200) under 12 000 chars. Two related bugs: `@AI …` with a pasted image/dropped file was sent **to Zalo**
+  with the prompt as caption (`ai_intercepts_send` bailed on pending attachments), and replying to a Zalo message
+  with `@AI` dropped that message (`filter(is_ai_id)`).
+- Changes (branch `feature/ai-context`, ADR-0007 supersedes ADR-0004 decision 4):
+  - Step 1 (Codex): rich `TranscriptLine` (id, ts, reply_to, attachment), verbatim URLs, shared converters for
+    `ChatMessage`/`StoredMessage`, Zalo reply target as `<tin_duoc_tra_loi nguon="zalo">`, merge with ≤600 stored
+    rows, budget 24 000 chars, consent keys versioned (`ai_group_confirmed_v2`, `ai_preload_consent_v2`), consent
+    check moved into `ai_dispatch` (covers Retry/Regenerate).
+  - Steps 2-3 (Claude; Codex hit its usage limit mid-brief): multi-part `Turn` (images, tool_calls, tool results),
+    `chat_request`/`extract_reply`, tools `search_messages`, `list_links`, `get_recent_messages`,
+    `get_messages_around`, `read_attachment` scoped to `req.thread_id` (never a parameter), ≤4 tool rounds, ≤8
+    executions, 8 000-char results, final round flattened to text; retry without tools (400/415/422, first call)
+    then without images (400/413/415/422). Attachments by reference (`AttachmentRef`): composer files (sent even with
+    sharing off), reply-target photo/file and ≤3 recent photos when the prompt is about images (sharing on).
+    Worker resolves them: downloads only from Zalo media CDNs (`zdn.vn`/`zadn.vn` with session, `dlfl.vn`/`dlmd.me`
+    cookie-free; never `*.zalo.me` API hosts), bounded by existing caps, images → 1024 px JPEG data URLs (decode
+    limits), documents via `doc_preview` (PDF isolated). Store: `messages_before`, `message_in_thread`,
+    `messages_around` (thread-scoped). Search/link matching in Rust (SQLite LOWER is ASCII-only).
+  - Docs: ADR-0007, ADR index, ADR-0004 status, AI_TRO_LY.md (§12 + corrections), HUONG_DAN_SU_DUNG, TINH_NANG,
+    KIEN_TRUC network table, CHANGELOG.
+- Verification: `cargo test --locked` green (482 lib + integration); new offline tests for URL preservation,
+  stored-row conversion, merge, tool parsing/caps/loop/fallbacks, thread scoping (store + worker against a temp DB),
+  image downscale, media host policy, local attachment resolution, composer intercept. Clippy: no new warnings in
+  touched files. Review: Codex adversarial review was not possible (usage limit until 2026-11-28); Claude
+  `/code-review high` on the branch found 6 important + 4 nits — all fixed (search limit/Unicode, photos counted as
+  links, session cookies on sender-chosen Zalo API URLs, Regenerate losing the reply target, final tool round
+  failing, fallback order, cancel losing composer attachments, stale comment, this entry). No second review round.
+- NOT verified: any real provider (tool calling and vision only tested against fake local servers), GUI behaviour
+  (composer intercept with attachments, consent dialog restore), real Zalo CDN downloads (whether zdn.vn/zadn.vn
+  photo/file URLs need the session or work cookie-free), large real groups.
+- Status: committed on `feature/ai-context`, not pushed or merged. Follow-up: mandatory Codex adversarial review
+  (AI client is high-risk) once Codex quota resets; live test with a real provider.
