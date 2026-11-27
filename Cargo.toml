@@ -42,6 +42,8 @@ zstd = "0.14.3"
 wasmtime = { version = "50.0.1", default-features = false, features = ["runtime", "cranelift", "std", "anyhow"] }
 getrandom = { version = "0.3", features = ["std"] }
 rustybuzz = "0.20"
+# Coverage rasteriser egui already pulls in (via ab_glyph); fills COLR emoji outlines.
+ab_glyph_rasterizer = "0.1.10"
 memmap2 = "0.9"
 zip = { version = "=9.5.1", default-features = false, features = ["deflate-flate2"] }
 

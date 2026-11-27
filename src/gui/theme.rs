@@ -1254,7 +1254,10 @@ pub(super) fn available_font_choices() -> Vec<(&'static str, &'static str)> {
     FONT_CHOICES
         .iter()
         .filter(|(key, _, files)| {
-            *key == "default" || files.iter().any(|f| std::path::Path::new(f).is_file())
+            *key == "default"
+                || files
+                    .iter()
+                    .any(|f| crate::system_fonts::resolve(f).is_file())
         })
         .map(|(key, label, _)| (*key, *label))
         .collect()
@@ -1316,7 +1319,7 @@ fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool) {
         .map(|(_, _, files)| *files)
         .unwrap_or(&[]);
     for path in selected_files {
-        if let Ok(font_data) = std::fs::read(path) {
+        if let Ok(font_data) = std::fs::read(crate::system_fonts::resolve(path)) {
             fonts.font_data.insert(
                 "selected_font".to_owned(),
                 egui::FontData::from_owned(font_data),
@@ -1343,7 +1346,7 @@ fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool) {
     ];
 
     for path in font_candidates {
-        if let Ok(font_data) = std::fs::read(path) {
+        if let Ok(font_data) = std::fs::read(crate::system_fonts::resolve(path)) {
             fonts.font_data.insert(
                 "vietnamese_font".to_owned(),
                 egui::FontData::from_owned(font_data),
@@ -1366,7 +1369,7 @@ fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool) {
         "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
     ];
     for path in cjk_candidates.into_iter().filter(|_| with_cjk) {
-        if let Ok(font_data) = std::fs::read(path) {
+        if let Ok(font_data) = std::fs::read(crate::system_fonts::resolve(path)) {
             fonts
                 .font_data
                 .insert("cjk_font".to_owned(), egui::FontData::from_owned(font_data));

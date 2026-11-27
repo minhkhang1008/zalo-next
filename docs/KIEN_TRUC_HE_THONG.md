@@ -81,7 +81,7 @@ Chi tiết và bằng chứng: `re-notes/42`–`44`, `47`.
 | `call.rs`, `audio.rs`, `voip_log.rs` | Báo hiệu VoIP, RTP, âm thanh `cpal` + `opus`, nhật ký cuộc gọi |
 | `voice.rs` | Thu âm tin nhắn thoại, đổi định dạng mẫu, AAC |
 | `video_tools.rs`, `video_player.rs` | Dò/cài FFmpeg; phát video trong app (FFmpeg giải mã trên thread riêng) |
-| `emoji_raster.rs` | Lấy bitmap emoji màu từ font hệ thống (chỉ chạy ở worker) |
+| `emoji_raster.rs`, `emoji_raster/colr.rs` | Lấy bitmap emoji màu từ font hệ thống: ảnh nhúng `sbix`/`CBDT` (macOS, Linux) hoặc vẽ lớp vector `COLR` v0/v1 (Segoe UI Emoji trên Windows). Chỉ chạy ở worker |
 | `native_notifications.rs` | Thông báo macOS qua helper `DailyNotifier`, dự phòng `osascript` |
 | `updater.rs` | Tải, kiểm SHA-256 và cài bản mới (ADR-0002) |
 | `ai.rs` | Client trợ lý `@AI` tách biệt hoàn toàn khỏi mạng Zalo (ADR-0004) |
