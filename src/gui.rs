@@ -29,6 +29,8 @@ mod background;
 mod clipboard_write;
 mod doc_preview_ui;
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_auth;
+#[cfg(target_os = "macos")]
 mod macos_clipboard;
 #[cfg(target_os = "macos")]
 mod macos_drag;
