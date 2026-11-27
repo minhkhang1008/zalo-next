@@ -573,6 +573,7 @@ impl MessageStore {
                 let mut link_thumb = None;
                 let mut link_src = None;
                 let mut media_size = None;
+                let mut wire_fields = std::collections::BTreeMap::new();
                 let mut poll_id = None;
                 if !sm.raw_json.is_empty() {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sm.raw_json) {
@@ -657,6 +658,7 @@ impl MessageStore {
                             .get("poll_id")
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_owned);
+                        wire_fields = restore_render_wire_fields(&val);
                     }
                 }
                 let cm = ChatMessage {
@@ -687,6 +689,10 @@ impl MessageStore {
                     link_src,
                     media_size,
                     poll_id,
+                    wire_ref: crate::message_model::WireMessageRef {
+                        fields: wire_fields,
+                        ..Default::default()
+                    },
 
                     ..Default::default()
                 };
@@ -707,6 +713,13 @@ impl MessageStore {
                         }
                         if existing.poll_id.is_none() {
                             existing.poll_id = cm.poll_id;
+                        }
+                        for (key, value) in &cm.wire_ref.fields {
+                            existing
+                                .wire_ref
+                                .fields
+                                .entry(key.clone())
+                                .or_insert_with(|| value.clone());
                         }
                     }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
@@ -776,9 +789,73 @@ fn enforce_sqlite_file_permissions(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Parse a value that may be a JSON object or a JSON-encoded string.
+fn json_object(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::String(text) => serde_json::from_str(text).ok(),
+        serde_json::Value::Object(_) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// The wire fields the message renderer needs beyond the parsed columns: the album layout of a
+/// multi-photo send (`content.params` with `is_group_layout`, `extraData.groupMediaMsg`) and
+/// mention spans. Only the last messages of a thread keep their full wire copy (in
+/// threads_cache.json); without these, older albums fall apart into single photos after a restart.
+fn render_wire_meta(
+    fields: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut meta = serde_json::Map::new();
+    let params = fields
+        .get("content")
+        .and_then(json_object)
+        .and_then(|content| content.get("params").and_then(json_object));
+    if let Some(params) = params.filter(|p| {
+        p.get("is_group_layout")
+            .is_some_and(|v| v.as_u64() == Some(1) || v.as_str() == Some("1"))
+    }) {
+        let mut album = serde_json::Map::new();
+        album.insert("params".into(), params);
+        let layout = fields
+            .get("extraData")
+            .and_then(json_object)
+            .and_then(|extra| extra.get("groupMediaMsg")?.get("groupLayoutId").cloned());
+        if let Some(layout) = layout {
+            album.insert("groupLayoutId".into(), layout);
+        }
+        meta.insert("wire_album".into(), serde_json::Value::Object(album));
+    }
+    if let Some(mentions) = fields.get("mentions").filter(|m| !m.is_null()) {
+        meta.insert("wire_mentions".into(), mentions.clone());
+    }
+    meta
+}
+
+/// Inverse of [`render_wire_meta`]: rebuild the minimal wire fields from stored metadata.
+fn restore_render_wire_fields(
+    meta: &serde_json::Value,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut fields = std::collections::BTreeMap::new();
+    if let Some(album) = meta.get("wire_album") {
+        if let Some(params) = album.get("params") {
+            fields.insert("content".into(), serde_json::json!({ "params": params }));
+        }
+        if let Some(layout) = album.get("groupLayoutId") {
+            fields.insert(
+                "extraData".into(),
+                serde_json::json!({ "groupMediaMsg": { "groupLayoutId": layout } }),
+            );
+        }
+    }
+    if let Some(mentions) = meta.get("wire_mentions") {
+        fields.insert("mentions".into(), mentions.clone());
+    }
+    fields
+}
+
 impl From<&ChatMessage> for StoredMessage {
     fn from(m: &ChatMessage) -> Self {
-        let mut meta = serde_json::Map::new();
+        let mut meta = render_wire_meta(&m.wire_ref.fields);
         let msg_type = if let Some(sid) = m.sticker_id {
             let cid = m.sticker_cate_id.unwrap_or(0);
             let st = m.sticker_type.unwrap_or(7);
@@ -1804,6 +1881,49 @@ fn import_official_zalo_pc_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn album_layout_and_mentions_survive_the_database_round_trip() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let mut photo = ChatMessage {
+            id: "album-1".into(),
+            text: "[Hình ảnh]".into(),
+            ts: 1000,
+            ..Default::default()
+        };
+        photo.wire_ref.fields.insert(
+            "content".into(),
+            serde_json::json!({
+                "href": "https://photo-stal.zdn.vn/x.jpg",
+                "params": "{\"is_group_layout\":1,\"group_layout_id\":77,\"id_in_group\":0,\"total_item_in_group\":2,\"width\":800,\"height\":600}"
+            }),
+        );
+        photo.wire_ref.fields.insert(
+            "mentions".into(),
+            serde_json::json!([{"uid": "u1", "pos": 0, "len": 3}]),
+        );
+        let single = ChatMessage {
+            id: "single-1".into(),
+            text: "[Hình ảnh]".into(),
+            ts: 9000,
+            ..Default::default()
+        };
+        let thread = Thread {
+            id: "thread-1".into(),
+            messages: vec![photo, single],
+            ..Default::default()
+        };
+        persist_threads(&mut store, &[thread]).unwrap();
+
+        let mut hydrated = Vec::new();
+        store.hydrate_threads(&mut hydrated, 10).unwrap();
+        let fields = &hydrated[0].messages[0].wire_ref.fields;
+        let params = fields["content"]["params"].clone();
+        assert_eq!(params["group_layout_id"], 77);
+        assert_eq!(fields["mentions"][0]["len"], 3);
+        // Nothing invented for a plain photo.
+        assert!(hydrated[0].messages[1].wire_ref.fields.is_empty());
+    }
 
     #[test]
     fn media_size_round_trips_through_stored_message_metadata() {
