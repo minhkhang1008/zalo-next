@@ -5847,8 +5847,36 @@ pub fn resolve_attachment_file_name(title: Option<&str>, text: &str, url: &str) 
     let trimmed = sanitized.trim().trim_matches('.');
     if trimmed.is_empty() {
         "tap_tin_zalo".to_string()
+    } else if is_windows_reserved_name(trimmed) {
+        // Windows maps `CON`, `NUL.txt`, `COM1.log`, ... to devices; writing one fails or
+        // talks to the device. Rename everywhere so the file also survives a copy to Windows.
+        format!("_{trimmed}")
     } else {
         trimmed.to_string()
+    }
+}
+
+/// Whether Windows treats `name` as a device (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+/// `LPT1`-`LPT9`, `COM¹`...), with or without an extension.
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => {
+            // COM1-COM9 / LPT1-LPT9, and the superscript digits ¹ ² ³ Windows also reserves.
+            let Some(digit) = upper
+                .strip_prefix("COM")
+                .or_else(|| upper.strip_prefix("LPT"))
+            else {
+                return false;
+            };
+            let mut chars = digit.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some('1'..='9' | '¹' | '²' | '³'), None)
+            )
+        }
     }
 }
 
@@ -10052,6 +10080,24 @@ mod send_identity_tests {
             msg.link_url.as_deref().unwrap_or_default(),
         );
         assert_eq!(resolved, "Bao_cao_do_an.doc");
+
+        // Windows device names get a prefix so saving never targets a device.
+        for (title, want) in [
+            ("CON", "_CON"),
+            ("nul.txt", "_nul.txt"),
+            ("Com1.log", "_Com1.log"),
+            ("LPT9.tar.gz", "_LPT9.tar.gz"),
+            ("com².txt", "_com².txt"),
+            ("COM0.txt", "COM0.txt"),
+            ("COM10.txt", "COM10.txt"),
+            ("CONSOLE.txt", "CONSOLE.txt"),
+            ("aux_notes.txt", "aux_notes.txt"),
+        ] {
+            assert_eq!(
+                resolve_attachment_file_name(Some(title), "", "https://f1.zdn.vn/x"),
+                want
+            );
+        }
 
         // Also verify when `title` omits `.doc` but `params.fileExt` has `"doc"`
         let raw_file_no_ext = json!({

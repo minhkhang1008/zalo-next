@@ -2897,7 +2897,10 @@ impl ZaloGuiApp {
                                     );
                                     if srch_resp
                                         .on_hover_cursor(CursorIcon::PointingHand)
-                                        .on_hover_text("Tìm kiếm tin nhắn trong hội thoại này (Ctrl+F)")
+                                        .on_hover_text(format!(
+                                            "Tìm kiếm tin nhắn trong hội thoại này ({})",
+                                            shortcut_label("F")
+                                        ))
                                         .clicked()
                                         || ui.input(|i| {
                                             (i.modifiers.ctrl || i.modifiers.command)
@@ -4555,8 +4558,9 @@ impl ZaloGuiApp {
                                         ui.vertical(|ui| {
                                             ui.label(
                                                 RichText::new(format!(
-                                                    "{} Ảnh chụp từ bộ nhớ tạm (Ctrl+V)",
-                                                    lucide::IMAGE
+                                                    "{} Ảnh chụp từ bộ nhớ tạm ({})",
+                                                    lucide::IMAGE,
+                                                    shortcut_label("V")
                                                 ))
                                                 .size(12.2)
                                                 .color(pal.primary)
@@ -5378,8 +5382,9 @@ impl ZaloGuiApp {
                                     response.context_menu(|ui| {
                                         if ui
                                             .button(format!(
-                                                "{} Dán hình ảnh từ Clipboard (Ctrl+V)",
-                                                lucide::IMAGE
+                                                "{} Dán hình ảnh từ Clipboard ({})",
+                                                lucide::IMAGE,
+                                                shortcut_label("V")
                                             ))
                                             .clicked()
                                         {
@@ -5610,10 +5615,9 @@ impl ZaloGuiApp {
                             chat_scroll_out.inner_rect,
                             composer_frame.response.rect,
                         );
-                        let zone = drag_cursor_pos(ctx)
-                            .map(|p| drop_zone_at(p, quick_rect))
-                            .or(self.drop_zone_last)
-                            .unwrap_or(DropZone::Preview);
+                        let live = drag_cursor_pos(ctx).map(|p| drop_zone_at(p, quick_rect));
+                        let last_hover = self.drop_zone_last;
+                        let zone = live.or(last_hover).unwrap_or(DropZone::Preview);
                         if drag_hover {
                             self.drop_zone_last = Some(zone);
                             paint_drop_zones(ctx, quick_rect, preview_rect, zone, pal);
@@ -5622,7 +5626,13 @@ impl ZaloGuiApp {
                         }
                         if !dropped.is_empty() {
                             self.drop_zone_last = None;
-                            self.handle_dropped_files(ctx, &thread_id, is_group, dropped, zone);
+                            // The drop is handled a frame after the release, so the cursor may
+                            // have moved since. Send at once only when the last hover frame and
+                            // the cursor now both say "Gửi nhanh"; otherwise attach for review.
+                            let drop_zone = quick_send_confirmed(live, last_hover);
+                            self.handle_dropped_files(
+                                ctx, &thread_id, is_group, dropped, drop_zone,
+                            );
                         }
                     } else {
                         self.drop_zone_last = None;
@@ -6231,6 +6241,27 @@ pub(super) fn drop_zone_rects(messages: Rect, composer: Rect) -> (Rect, Rect) {
     (quick, preview)
 }
 
+/// Zone for a released drop: quick send needs the live cursor and the last hover frame to agree.
+pub(super) fn quick_send_confirmed(
+    live: Option<DropZone>,
+    last_hover: Option<DropZone>,
+) -> DropZone {
+    if live == Some(DropZone::QuickSend) && last_hover == Some(DropZone::QuickSend) {
+        DropZone::QuickSend
+    } else {
+        DropZone::Preview
+    }
+}
+
+/// Label for a primary-modifier shortcut as the platform writes it (`Cmd+V` / `Ctrl+V`).
+fn shortcut_label(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("Cmd+{key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
+
 /// Releasing over the message area sends at once; anywhere else attaches for review, so an
 /// imprecise drop never sends something unexpectedly.
 pub(super) fn drop_zone_at(pointer: Pos2, quick: Rect) -> DropZone {
@@ -6241,15 +6272,44 @@ pub(super) fn drop_zone_at(pointer: Pos2, quick: Rect) -> DropZone {
     }
 }
 
-/// Cursor position during an OS drag (see `macos_drag` for why egui's pointer is not enough).
+/// Cursor position during an OS drag. The windowing layer sends no mouse moves while an OS drag
+/// is in progress, so egui's pointer is frozen where it was before the drag (see `macos_drag`)
+/// and would send files at once if it was last over the messages. Ask the OS instead; where we
+/// can't, return `None` so the drop falls back to "Xem trước khi gửi".
 fn drag_cursor_pos(ctx: &egui::Context) -> Option<Pos2> {
     #[cfg(target_os = "macos")]
     {
         super::macos_drag::cursor_in_window(ctx)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        ctx.input(|i| i.pointer.latest_pos())
+        #[repr(C)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetCursorPos(point: *mut Point) -> i32;
+        }
+        let mut p = Point { x: 0, y: 0 };
+        // SAFETY: `GetCursorPos` only writes the POINT we pass; failure returns 0.
+        if unsafe { GetCursorPos(&mut p) } == 0 {
+            return None;
+        }
+        // winit makes the process per-monitor DPI aware, so this is in physical pixels, the
+        // same unit egui divides by `pixels_per_point` (zoom included) for `inner_rect`.
+        let (inner, ppp) = ctx.input(|i| (i.viewport().inner_rect, i.pixels_per_point()));
+        let inner = inner?;
+        if ppp <= 0.0 {
+            return None;
+        }
+        Some(Pos2::new(p.x as f32 / ppp, p.y as f32 / ppp) - inner.min.to_vec2())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = ctx;
+        None
     }
 }
 
@@ -7402,6 +7462,27 @@ mod quote_navigation_tests {
             drop_zone_at(Pos2::new(100.0, 300.0), quick),
             DropZone::Preview
         );
+    }
+
+    #[test]
+    fn quick_send_needs_hover_and_release_to_agree() {
+        use DropZone::{Preview, QuickSend};
+        assert_eq!(
+            quick_send_confirmed(Some(QuickSend), Some(QuickSend)),
+            QuickSend
+        );
+        // Cursor moved into the messages only after releasing over the composer.
+        assert_eq!(
+            quick_send_confirmed(Some(QuickSend), Some(Preview)),
+            Preview
+        );
+        assert_eq!(
+            quick_send_confirmed(Some(Preview), Some(QuickSend)),
+            Preview
+        );
+        // No live cursor (Linux) or no hover frame: never send at once.
+        assert_eq!(quick_send_confirmed(None, Some(QuickSend)), Preview);
+        assert_eq!(quick_send_confirmed(Some(QuickSend), None), Preview);
     }
 
     #[test]

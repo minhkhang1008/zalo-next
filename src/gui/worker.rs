@@ -4721,12 +4721,15 @@ async fn download_attachment_with_original_name(
 pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::Context) {
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", "Start-Process ms-screenclip:"])
-            .status();
-        let _ = gui_tx.send(crate::gui::GuiEvent::StatusUpdate(
-            "Đã mở công cụ chụp ảnh màn hình — sau khi chụp hãy nhấn Ctrl+V để dán".into(),
-        ));
+        // Shell launch instead of `powershell`, which flashed a console window. Snipping Tool
+        // leaves the snip on the clipboard; Windows cannot tell us which copy came from it, so the
+        // user pastes it into the conversation they mean (no automatic attach).
+        let text = if crate::gui::messages::windows_shell_open("ms-screenclip:") {
+            "Đã mở công cụ chụp ảnh màn hình — sau khi chụp hãy nhấn Ctrl+V để dán"
+        } else {
+            "Không mở được công cụ chụp màn hình của Windows (Snipping Tool)"
+        };
+        let _ = gui_tx.send(crate::gui::GuiEvent::StatusUpdate(text.into()));
         ctx.request_repaint();
     }
 

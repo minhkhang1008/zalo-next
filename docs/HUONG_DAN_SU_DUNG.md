@@ -66,7 +66,7 @@ Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dù
 - **Ảnh và tệp:**
   - Nhiều ảnh gửi cùng lúc hiển thị thành **album dạng lưới** như Zalo. Trong khung xem ảnh, nút sao chép là nút chia đôi: bấm để sao chép theo mặc định đã chọn (ảnh hoặc liên kết), bấm mũi tên để đổi.
   - Dán ảnh trực tiếp từ clipboard (`Ctrl+V` trên Windows/Linux, `⌘V` trên macOS): ảnh chụp màn hình, ảnh copy từ trình duyệt/Preview, hoặc tệp ảnh copy trong Finder. Ảnh hiện ở khung xem trước, nhập chú thích rồi nhấn `Enter` để gửi.
-  - **Kéo-thả tệp** vào cửa sổ chat: khi kéo, khung chat hiện hai vùng — thả vào vùng tin nhắn (**Gửi nhanh**) để gửi ngay, hoặc thả vào ô soạn tin (**Xem trước khi gửi**) để đính kèm, xem lại, nhập chú thích rồi nhấn `Enter`. Vùng đang trỏ chuột được tô sáng.
+  - **Kéo-thả tệp** vào cửa sổ chat: khi kéo, khung chat hiện hai vùng — thả vào vùng tin nhắn (**Gửi nhanh**) để gửi ngay, hoặc thả vào ô soạn tin (**Xem trước khi gửi**) để đính kèm, xem lại, nhập chú thích rồi nhấn `Enter`. Vùng đang trỏ chuột được tô sáng. Trên Linux không đọc được vị trí chuột khi kéo nên tệp luôn được đính kèm để xem trước.
 
 ### 2.3. Gọi thoại và gọi video 1-1
 - Trong cuộc trò chuyện cá nhân, bấm biểu tượng điện thoại hoặc máy quay ở góc phải thanh tiêu đề hội thoại để bắt đầu cuộc gọi.
