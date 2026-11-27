@@ -393,6 +393,19 @@ pub async fn notify(title: &str, body: &str) -> Result<(), NotificationError> {
     notify_with_attachment(title, body, None).await
 }
 
+/// The notification content allowed while App Lock is on: a fixed text and no attachment.
+fn locked_content<'a>(
+    title: &'a str,
+    body: &'a str,
+    attachment: Option<&'a Path>,
+) -> (&'a str, &'a str, Option<&'a Path>) {
+    if crate::app_lock::is_locked() {
+        (crate::APP_DISPLAY_NAME, "Bạn có thông báo mới", None)
+    } else {
+        (title, body, attachment)
+    }
+}
+
 /// Post a native notification with an optional locally cached sender avatar attachment.
 ///
 /// The packaged macOS helper and Windows toast support attachments. The AppleScript fallback
@@ -408,6 +421,9 @@ pub async fn notify_with_attachment(
     if !cfg!(any(target_os = "macos", windows)) {
         return Err(NotificationError::HelperUnavailable);
     }
+    // While App Lock is on, no sender, preview or avatar may reach the OS notification centre.
+    // Every notification (messages, reminders, calls, updates) goes through here.
+    let (title, body, attachment) = locked_content(title, body, attachment);
     let title = sanitize(title, MAX_TITLE_CHARS);
     let body = sanitize(body, MAX_BODY_CHARS);
     let title = if title.is_empty() {
@@ -683,6 +699,21 @@ impl AuthorizationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locked_app_hides_notification_content_and_avatar() {
+        let avatar = Path::new("/tmp/avatar.png");
+        crate::app_lock::set_locked(false);
+        assert_eq!(
+            locked_content("Lan", "Chào bạn", Some(avatar)),
+            ("Lan", "Chào bạn", Some(avatar))
+        );
+        crate::app_lock::set_locked(true);
+        let (title, body, attachment) = locked_content("Lan", "Chào bạn", Some(avatar));
+        crate::app_lock::set_locked(false);
+        assert_eq!(title, crate::APP_DISPLAY_NAME);
+        assert!(!body.contains("Chào") && attachment.is_none());
+    }
 
     #[test]
     fn windows_toast_templates_only_contain_fixed_markup() {
