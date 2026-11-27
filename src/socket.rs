@@ -67,7 +67,67 @@ pub const CMD_SYNC_MOBILE_WAKE_UP: u16 = 592;
 static WS_OUTBOUND_TX: std::sync::Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>> =
     std::sync::Mutex::new(None);
 
+/// Most frames kept for one connection while it waits for the server's `AUTHEN` reply.
+const PRE_AUTH_QUEUE_MAX: usize = 32;
+
+/// Frames handed to [`send_ws_frame`] before the connection is authenticated.
+///
+/// The queue belongs to one connection: it is flushed after `AUTHEN` succeeds and dropped with
+/// the connection, so a frame never goes out on a later socket (another account or a reconnect).
+#[derive(Default)]
+struct PreAuthQueue {
+    frames: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl PreAuthQueue {
+    /// Queue `frame`; returns `true` when the oldest frame had to be dropped to make room.
+    fn push(&mut self, frame: Vec<u8>) -> bool {
+        let dropped = self.frames.len() >= PRE_AUTH_QUEUE_MAX;
+        if dropped {
+            self.frames.pop_front();
+        }
+        self.frames.push_back(frame);
+        dropped
+    }
+
+    /// Take every queued frame, oldest first.
+    fn take_all(&mut self) -> Vec<Vec<u8>> {
+        self.frames.drain(..).collect()
+    }
+}
+
+/// Publishes a connection's outbound sender and withdraws it when the connection ends, so
+/// [`send_ws_frame`] reports `false` instead of feeding a closed socket. A newer connection's
+/// sender is left in place.
+struct OutboundRegistration {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl OutboundRegistration {
+    fn publish(tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
+        if let Ok(mut g) = WS_OUTBOUND_TX.lock() {
+            *g = Some(tx.clone());
+        }
+        Self { tx }
+    }
+}
+
+impl Drop for OutboundRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut g) = WS_OUTBOUND_TX.lock() {
+            if g.as_ref()
+                .is_some_and(|current| current.same_channel(&self.tx))
+            {
+                *g = None;
+            }
+        }
+    }
+}
+
 /// Send a raw encoded frame over the active `zpw_ws` WebSocket if connected.
+///
+/// A frame sent while the connection is still authenticating is queued and goes out right after
+/// `AUTHEN` succeeds (see [`PreAuthQueue`]); it is lost if that connection drops first.
 pub fn send_ws_frame(cmd: u16, sub_cmd: u8, version: u8, data: Option<&Value>) -> bool {
     let frame = encode_frame(cmd, sub_cmd, version, data);
     if let Ok(guard) = WS_OUTBOUND_TX.lock() {
@@ -486,11 +546,18 @@ async fn run_once(
     ping.tick().await; // consume the immediate first tick
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    if let Ok(mut g) = WS_OUTBOUND_TX.lock() {
-        *g = Some(out_tx);
+    // The consumer (an account that was switched away or logged out) may have gone during the
+    // handshake: never publish this socket's sender for frames meant for its successor.
+    if tx.is_closed() {
+        return Ok("event receiver dropped".into());
     }
+    let _registration = OutboundRegistration::publish(out_tx);
+    let mut pre_auth = PreAuthQueue::default();
     loop {
         tokio::select! {
+            // Retire this socket as soon as its consumer is gone, so it neither keeps the
+            // published sender nor flushes queued frames under the previous session.
+            _ = tx.closed() => return Ok("event receiver dropped".into()),
             _ = ping.tick() => {
                 if authed {
                     let body = json!({ "eventId": now_ms() });
@@ -503,6 +570,10 @@ async fn run_once(
                 if authed {
                     ws.send(Message::Binary(frame.into())).await?;
                     trace("-> outbound ws frame");
+                } else if pre_auth.push(frame) {
+                    trace("pre-auth queue full; dropped the oldest outbound frame");
+                } else {
+                    trace("outbound ws frame queued until auth");
                 }
             }
             incoming = ws.next() => {
@@ -562,6 +633,10 @@ async fn run_once(
                         req_id += 1;
                         ws.send(Message::Binary(pull_frame(qcmd, qsub, &id).into())).await?;
                         trace(format!("-> pull {qcmd}_{qsub} {id}"));
+                    }
+                    for frame in pre_auth.take_all() {
+                        ws.send(Message::Binary(frame)).await?;
+                        trace("-> queued outbound ws frame");
                     }
                     continue;
                 }
@@ -627,6 +702,42 @@ async fn run_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_auth_queue_keeps_order_and_empties_on_flush() {
+        let mut queue = PreAuthQueue::default();
+        assert!(!queue.push(vec![1]));
+        assert!(!queue.push(vec![2]));
+        assert_eq!(queue.take_all(), vec![vec![1], vec![2]]);
+        assert!(queue.take_all().is_empty());
+    }
+
+    #[test]
+    fn pre_auth_queue_drops_oldest_when_full() {
+        let mut queue = PreAuthQueue::default();
+        for i in 0..PRE_AUTH_QUEUE_MAX {
+            assert!(!queue.push(vec![i as u8]));
+        }
+        assert!(queue.push(vec![255]));
+        let frames = queue.take_all();
+        assert_eq!(frames.len(), PRE_AUTH_QUEUE_MAX);
+        assert_eq!(frames.first(), Some(&vec![1]));
+        assert_eq!(frames.last(), Some(&vec![255]));
+    }
+
+    #[test]
+    fn outbound_registration_withdraws_only_its_own_sender() {
+        // The only test that publishes a sender, so no other test races on the global.
+        let (old_tx, _old_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let old = OutboundRegistration::publish(old_tx);
+        let (new_tx, mut new_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let new = OutboundRegistration::publish(new_tx);
+        drop(old);
+        assert!(send_ws_frame(CMD_PING, SUB_KEEP_CONNECTION, 1, None));
+        assert!(new_rx.try_recv().is_ok());
+        drop(new);
+        assert!(!send_ws_frame(CMD_PING, SUB_KEEP_CONNECTION, 1, None));
+    }
 
     #[test]
     fn websocket_url_rejects_untrusted_saved_endpoint() {
