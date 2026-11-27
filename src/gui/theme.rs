@@ -16,6 +16,13 @@ mod layout_tests {
             );
         }
     }
+
+    #[test]
+    fn bundled_open_sans_is_always_offered() {
+        let choices = super::available_font_choices();
+        assert!(choices.iter().any(|(key, _)| *key == "default"));
+        assert!(choices.iter().any(|(key, _)| *key == "opensans"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1223,8 @@ static ACTIVE_FONT_CHOICE: std::sync::Mutex<String> = std::sync::Mutex::new(Stri
 /// `default` is the bundled Be Vietnam Pro and needs no file.
 const FONT_CHOICES: &[(&str, &str, &[&str])] = &[
     ("default", "Mặc định (Be Vietnam Pro)", &[]),
+    // Bundled (no file list): always available, see `BUNDLED_OPEN_SANS`.
+    ("opensans", "Open Sans", &[]),
     (
         "helvetica",
         "Helvetica",
@@ -1255,7 +1264,7 @@ pub(super) fn available_font_choices() -> Vec<(&'static str, &'static str)> {
     FONT_CHOICES
         .iter()
         .filter(|(key, _, files)| {
-            *key == "default"
+            files.is_empty()
                 || files
                     .iter()
                     .any(|f| crate::system_fonts::resolve(f).is_file())
@@ -1319,6 +1328,14 @@ fn build_fonts(ctx: &egui::Context, font_choice: &str, with_cjk: bool) {
         .find(|(key, _, _)| *key == font_choice.trim())
         .map(|(_, _, files)| *files)
         .unwrap_or(&[]);
+    // Open Sans Regular from googlefonts/opensans @ 6cbc400d (SIL OFL 1.1, OpenSans-OFL.txt).
+    const BUNDLED_OPEN_SANS: &[u8] = include_bytes!("../assets/fonts/OpenSans-Regular.ttf");
+    if font_choice.trim() == "opensans" {
+        fonts.font_data.insert(
+            "selected_font".to_owned(),
+            egui::FontData::from_static(BUNDLED_OPEN_SANS),
+        );
+    }
     for path in selected_files {
         if let Ok(font_data) = std::fs::read(crate::system_fonts::resolve(path)) {
             fonts.font_data.insert(
