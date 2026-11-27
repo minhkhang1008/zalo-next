@@ -9,6 +9,7 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 ## [Unreleased]
 
 ### Changed (Thay đổi)
+- **Linux lưu dữ liệu ở `~/.local/share/ctdozlite`** (hoặc `$XDG_DATA_HOME/ctdozlite`) thay vì thư mục khởi chạy; lần mở đầu tiên tự sao chép dữ liệu cũ sang, giữ bản gốc `*.bak`. Chưa kiểm thử trên máy Linux thật.
 - **Windows dùng một thư mục dữ liệu cố định `%LOCALAPPDATA%\ctdozlite`** (trước đây là thư mục khởi chạy, nên mở từ Start menu, từ file `.exe` hay từ terminal có thể thấy phiên đăng nhập khác nhau). Lần mở đầu tiên tự chuyển dữ liệu cũ sang, giữ bản gốc `*.bak`. Chưa kiểm thử trên máy thật.
 
 ### Added (Tính năng mới)
@@ -18,6 +19,9 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Thông báo trên Windows:** tin nhắn mới, nhắc hẹn, bản cập nhật và cuộc gọi đến hiện thông báo của Windows, kèm ảnh đại diện người gửi. Chưa kiểm thử trên máy thật (đặc biệt với bản portable).
 
 ### Fixed (Sửa lỗi)
+- **Đồng bộ tin từ điện thoại ngay sau khi mở app** không còn bị "mất lệnh": yêu cầu gửi lúc kết nối chưa đăng nhập xong được giữ lại và gửi ngay khi kết nối sẵn sàng (trước đây bị bỏ, khiến tiến trình đứng yên tới khi hết thời gian chờ). Chưa kiểm chứng với điện thoại thật.
+- **Tô sáng `@tên`** trong tin không có dữ liệu nhắc tên không còn lan sang các chữ thường phía sau (ví dụ "@Hoang Nam dạ anh" chỉ tô "@Hoang Nam").
+- Chế độ giao diện đồ họa bỏ một bộ luồng nền không dùng tới, nên tốn ít luồng hệ thống hơn.
 - **`@AI` không tìm được liên kết** đã gửi trong cuộc trò chuyện: trước đây mọi liên kết bị thay bằng `[liên kết]` và thẻ liên kết, tệp, ảnh bị bỏ khỏi ngữ cảnh.
 - Gõ `@AI …` khi đang có ảnh dán hoặc tệp kéo vào khung soạn tin không còn **gửi ảnh/tệp lên Zalo** kèm câu hỏi làm chú thích; trả lời một tin Zalo bằng `@AI` không còn làm mất tin đó.
 - **Emoji màu trên Windows:** emoji trong tin nhắn và bảng Emoji giờ hiện màu từ phông Segoe UI Emoji (trước đây chỉ macOS có, Windows vẫn hiện emoji trắng đen). Chưa kiểm thử trên máy Windows thật; cờ quốc gia trên Windows vẫn là chữ như mặc định của Segoe UI Emoji. Linux cũng hiện màu với bản Noto Color Emoji dạng vector (COLRv1).

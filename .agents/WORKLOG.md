@@ -1301,3 +1301,51 @@ Entry template:
 - NOT verified: anything visual or interactive (layout, keys, strip scrolling, zoom reset, placeholder, toggle) — needs
   the owner's GUI run; Windows/Linux.
 - Status: done pending the owner's live check.
+
+## 2026-11-28 — Upstream ctdozlite v0.1.3–v0.1.4 review: what is worth porting  (agent: Claude Code, claude-opus-5-5)
+- Request: read the ctdozlite changelog from v0.1.3 up, compare with Zalo-next, list new features and worthy ports.
+  Read-only; nothing ported (AGENTS.md §7: the owner decides).
+- Sources: GitHub release notes v0.1.3 and v0.1.4 (2026-11-27); upstream main has one commit after v0.1.4 (docs only).
+  PR bodies read for #154, #161, #191.
+- Findings with evidence (ours):
+  - `src/socket.rs:502-506`: outbound frames sent before `authed` are taken off the channel and dropped, while
+    `send_ws_frame` already returned true. Sync V2 590/592 sent right after launch is lost silently (same bug as
+    upstream's "stuck at 10%" fix).
+  - `src/main.rs:48` `#[tokio::main]` multi-thread runtime stays idle in GUI mode next to the worker's own runtime
+    (`worker.rs:641`); upstream removed theirs (-39% threads).
+  - Photo placeholder is a fixed 280x150 (`messages.rs:2796`); width/height from params are not kept, so bubbles
+    jump when thumbnails load (upstream `media_size`, PR #192, schema change).
+  - `render_hover_reaction_bar` is a stub returning None (`messages.rs:4794`): no quick-heart button.
+  - Reaction banners: `historical: false` (`reactions.rs:586`) and offline pull uses `lastId: 1`
+    (`socket.rs:401`): likely the same replay-on-launch bug as upstream #154 (not reproduced).
+  - Mention fallback heuristic absorbs up to 5 words (`messages.rs:1975-1990`), as in upstream #161.
+  - Not present: App Lock PIN, storage manager/relocation, group poll cards/voting (msgType 26 only named),
+    single-instance guard on macOS/Linux, Linux XDG dir and tray, Open Sans.
+  - Already have / skip: crash.log (in data dir; cwd is set before the hook), UTF-16 mention spans, reaction/quote
+    ids (0.4.0), photo browser (own implementation), colour emoji (COLR renderer; Twemoji not needed), Ctrl+V image.
+- NOT checked: #199 mute, #196 Mini App image, outgoing recall, multi-account snapshot isolation, #156 double-click
+  deadlock, #191 audio by extension (we read `fileExt` at `chat.rs:5942`, not compared in depth), Settings-open stall.
+- Status: done (report to owner); ports await the owner's choice.
+
+## 2026-11-28 — Upstream port, package 1: pre-auth WS queue, no idle GUI runtime, mention guess, Linux XDG  (agent: Claude Code, claude-opus-5-5 (orchestrator, wrote it) + Codex (adversarial reviewer, 1 round))
+- Request: owner approved porting the v0.1.3–v0.1.4 items except the quick-heart button; plan in
+  `~/.claude/plans/i-accept-all-except-cuddly-scone-*.md`. Re-implemented, nothing copied from upstream.
+- Changes:
+  - `socket.rs`: `PreAuthQueue` (32 frames, per connection) holds frames sent before `AUTHEN`, flushed after the
+    queue pulls; `OutboundRegistration` withdraws the global sender when the connection ends (only its own);
+    the connection retires on `tx.closed()` and does not publish when its consumer is already gone.
+  - `main.rs`: no `#[tokio::main]`; a current-thread runtime runs `--check-update` and `video_tools::refresh`,
+    the TUI builds a multi-thread runtime (`run_tui_mode`). GUI-thread code checked for runtime use: none.
+  - `gui/messages.rs`: `guessed_mention_name_len` (following words need an uppercase start, max 4 words; the plan
+    said 2, raised to 4 so Vietnamese full names still match).
+  - `data_dir.rs`: `Platform::Linux`, `linux_default_dir` (`$XDG_DATA_HOME/ctdozlite`, else
+    `~/.local/share/ctdozlite`), CWD migration as on macOS; a `--profile` run migrates `./profiles/<name>`.
+- Review (Codex adversarial, 1 round): fixed (1) a retired socket could publish its sender after an account switch
+  and flush the new account's 590 (now retires on `tx.closed()`); (3) `--profile` skipped migration (now migrates
+  its own folder). Not fixed (2): `send_ws_frame` still means "accepted", not "written", so a 590 discarded by a
+  connection that drops before auth still waits for the phone timeout (pre-existing; was always dropped before).
+- Verification: cargo check; `cargo test --locked` 502 passed; new tests for the queue, the registration, the
+  mention guess, Linux resolve and profile migration; `--print-data-dir` smoke run (startup runtime).
+- NOT verified: live sync right after launch on a real phone; a GUI run without the main-thread runtime (call,
+  sync, proxy) — needs the owner's run; the Linux `initialize` branch is not compiled on this Mac (CI only).
+- Status: package 1 done; package 2 (single instance, media size) next.

@@ -26,7 +26,7 @@ Tùy chọn dòng lệnh, cách dùng giao diện đồ hoạ (GUI) và phím t�
 
 ---
 
-Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dùng chung `~/Library/Application Support/ctdozlite`, kể cả khi thư mục làm việc là `/`, nên GUI và TUI luôn thấy cùng một phiên đăng nhập và cơ sở dữ liệu. Trên Windows, mọi cách chạy dùng chung `%LOCALAPPDATA%\ctdozlite` (nếu thiếu biến `LOCALAPPDATA` thì dùng thư mục làm việc). Linux giữ thư mục làm việc hiện tại. `--data-dir` ghi đè lựa chọn này (`--profile <tên>` tạo thư mục con `profiles/<tên>`); thư mục chỉ định và thư mục mặc định trên macOS có quyền `0700` trên Unix. Nếu thư mục không ghi được, chương trình báo lỗi trước khi mở dữ liệu.
+Trên macOS, mọi cách chạy (bản `.app`, `cargo run`, TUI, CLI) đều dùng chung `~/Library/Application Support/ctdozlite`, kể cả khi thư mục làm việc là `/`, nên GUI và TUI luôn thấy cùng một phiên đăng nhập và cơ sở dữ liệu. Trên Windows, mọi cách chạy dùng chung `%LOCALAPPDATA%\ctdozlite` (nếu thiếu biến `LOCALAPPDATA` thì dùng thư mục làm việc). Trên Linux, dữ liệu nằm ở `$XDG_DATA_HOME/ctdozlite` (mặc định `~/.local/share/ctdozlite`); lần mở đầu tiên tự sao chép dữ liệu cũ từ thư mục làm việc sang (giữ bản gốc `*.bak`), kể cả thư mục `profiles/<tên>` khi chạy với `--profile` (chưa kiểm thử trên máy Linux thật). `--data-dir` ghi đè lựa chọn này (`--profile <tên>` tạo thư mục con `profiles/<tên>`); thư mục chỉ định và thư mục mặc định trên macOS có quyền `0700` trên Unix. Nếu thư mục không ghi được, chương trình báo lỗi trước khi mở dữ liệu.
 
 `--version` không đụng tới dữ liệu. `--print-data-dir` chỉ tạo thư mục khi cần và thử ghi, không chuyển dữ liệu cũ.
 
