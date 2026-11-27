@@ -80,5 +80,7 @@ Chỉ đổi trạng thái khi có bằng chứng (chạy thật hoặc chủ d�
 | Giao diện terminal (TUI) | ✅ | `--tui` |
 | Thông báo tin nhắn mới | ✅ | macOS: Notification Center. Windows: thông báo (toast) của Windows, chưa kiểm thử trên máy thật; Linux chưa có |
 | Emoji màu, hiển thị tiếng Việt/CJK | ✅ | Dùng font hệ thống: Apple Color Emoji (macOS), Segoe UI Emoji (Windows, chưa kiểm thử trên máy thật), Noto Color Emoji (Linux) |
+| Quản lý bộ nhớ | ✅ | **Cài đặt → Bộ nhớ**: xem dung lượng, dọn bộ nhớ đệm, nhật ký, video/ghi âm đã tải; không xóa phiên, lịch sử, cài đặt. Chưa kiểm thử trên giao diện thật |
+| Một cửa sổ cho mỗi thư mục dữ liệu | ✅ | Mở lần hai đưa cửa sổ cũ lên trước (macOS/Linux); Windows chỉ chặn bản thứ hai |
 | Tự động cập nhật | ✅ | Kiểm tra Releases của repo này khi mở app và mỗi 30 phút; tải, xác minh SHA-256, thay app tại chỗ rồi mở lại (macOS; Windows bản portable/cài theo người dùng — mở lại sau khi bản cũ đã thoát, chưa kiểm thử trên máy thật). **Cài đặt → Kiểm tra cập nhật** để kiểm tra thủ công |
 | REST API cục bộ & MCP server | 🚫 | Tắt để không mở cổng mạng |

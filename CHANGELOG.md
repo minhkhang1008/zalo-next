@@ -13,12 +13,16 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Windows dùng một thư mục dữ liệu cố định `%LOCALAPPDATA%\ctdozlite`** (trước đây là thư mục khởi chạy, nên mở từ Start menu, từ file `.exe` hay từ terminal có thể thấy phiên đăng nhập khác nhau). Lần mở đầu tiên tự chuyển dữ liệu cũ sang, giữ bản gốc `*.bak`. Chưa kiểm thử trên máy thật.
 
 ### Added (Tính năng mới)
+- **Cài đặt → Bộ nhớ:** xem dung lượng theo nhóm (dữ liệu hệ thống, bộ nhớ đệm sticker/ảnh thu nhỏ, video và ghi âm đã tải theo tài khoản, nhật ký, thư mục do ctdozlite để lại) và dọn từng nhóm. Phiên đăng nhập, lịch sử tin nhắn, cài đặt và khóa không bao giờ bị xóa ở đây; tệp vừa dùng trong 10 phút gần đây được giữ lại. Chưa kiểm thử trên giao diện thật.
+- **Chỉ một cửa sổ Zalo-next cho mỗi thư mục dữ liệu:** mở app lần nữa sẽ đưa cửa sổ đang chạy lên trước (macOS/Linux) thay vì chạy bản thứ hai đăng nhập trùng phiên. Chưa kiểm thử trên giao diện thật; Windows chỉ chặn, không đưa cửa sổ lên.
+- **Phông Open Sans** trong Cài đặt → Giao diện (đóng gói sẵn, không cần cài).
 - **Duyệt ảnh trong khung xem ảnh như Zalo Web:** khi mở một ảnh trong cuộc trò chuyện, dùng `↑`/`←` và `↓`/`→` (hoặc nút ▲/▼) để chuyển sang ảnh cũ hơn / mới hơn; dải ảnh nhỏ bên phải liệt kê mọi ảnh đã tải, chia theo ngày, có thể ẩn. Ảnh gốc của ảnh kế bên được tải trước để chuyển nhanh, ảnh nhỏ hiện tạm trong lúc chờ ảnh gốc. Chưa kiểm thử trên giao diện thật.
 - **Trợ lý `@AI` đọc sâu hơn** (khi bật chia sẻ cho cuộc trò chuyện): thấy liên kết, ai trả lời ai, giờ và id từng tin, đọc thêm lịch sử đã lưu trên máy (không chỉ các tin đang hiện), và tự **tra cứu** trong chính cuộc trò chuyện đó (tìm tin, liệt kê liên kết, xem tin cũ hơn, mở ảnh/tệp). Trả lời một tin Zalo bằng `@AI` để hỏi về tin đó. Chưa kiểm chứng với nhà cung cấp AI thật.
 - **Gửi ảnh và tệp cho `@AI`:** dán ảnh hoặc kéo tệp vào khung soạn tin rồi gõ `@AI …`; AI cũng xem được ảnh/tệp của tin được trả lời và ảnh gần đây khi câu hỏi nói về ảnh. PDF, Word, Excel, PowerPoint, văn bản và mã nguồn được đọc chữ. Chỉ tải từ máy chủ Zalo hoặc từ máy bạn. Model không nhận ảnh hoặc không hỗ trợ tra cứu thì tự hỏi lại không kèm phần đó.
 - **Thông báo trên Windows:** tin nhắn mới, nhắc hẹn, bản cập nhật và cuộc gọi đến hiện thông báo của Windows, kèm ảnh đại diện người gửi. Chưa kiểm thử trên máy thật (đặc biệt với bản portable).
 
 ### Fixed (Sửa lỗi)
+- **Danh sách tin không còn "nhảy"** khi ảnh và video tải xong: khung chờ giữ đúng tỉ lệ ảnh/video ngay từ đầu (theo kích thước Zalo gửi kèm tin). Tin đã lưu từ trước vẫn dùng khung cũ. Chưa kiểm thử trên giao diện thật.
 - **Đồng bộ tin từ điện thoại ngay sau khi mở app** không còn bị "mất lệnh": yêu cầu gửi lúc kết nối chưa đăng nhập xong được giữ lại và gửi ngay khi kết nối sẵn sàng (trước đây bị bỏ, khiến tiến trình đứng yên tới khi hết thời gian chờ). Chưa kiểm chứng với điện thoại thật.
 - **Tô sáng `@tên`** trong tin không có dữ liệu nhắc tên không còn lan sang các chữ thường phía sau (ví dụ "@Hoang Nam dạ anh" chỉ tô "@Hoang Nam").
 - Chế độ giao diện đồ họa bỏ một bộ luồng nền không dùng tới, nên tốn ít luồng hệ thống hơn.
