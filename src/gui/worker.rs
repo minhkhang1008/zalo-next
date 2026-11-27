@@ -142,6 +142,18 @@ async fn cache_notification_avatar(
 }
 
 pub enum WorkerCmd {
+    AppLockTryPasscode {
+        config: app_lock::Config,
+        candidate: String,
+        now_unix: i64,
+    },
+    AppLockSetPasscode {
+        config: app_lock::Config,
+        passcode: String,
+    },
+    AppLockSave {
+        config: app_lock::Config,
+    },
     StartVideo {
         account: String,
         thread: String,
@@ -1157,6 +1169,50 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                 let poll_queue = std::sync::Arc::new(tokio::sync::Mutex::new(()));
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        // Hashing takes a noticeable time (PBKDF2): run off the command loop.
+                        WorkerCmd::AppLockTryPasscode { mut config, candidate, now_unix } => {
+                            let gui_tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                let attempt = config.try_passcode(&candidate, now_unix);
+                                let save_error = app_lock::save(std::path::Path::new("."), &config)
+                                    .err()
+                                    .map(|_| "Không lưu được cấu hình khóa ứng dụng.".into());
+                                GuiEvent::AppLockAttempt { config, attempt, save_error }
+                            })
+                            .await;
+                            let _ = gui_tx.send(result.unwrap_or(GuiEvent::AppLockAttemptFailed));
+                            });
+                        }
+                        WorkerCmd::AppLockSetPasscode { mut config, passcode } => {
+                            let gui_tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || -> Result<_, &'static str> {
+                                config.set_passcode(&passcode)
+                                    .map_err(|_| "Không đặt được mã khóa.")?;
+                                config.enabled = true;
+                                app_lock::save(std::path::Path::new("."), &config)
+                                    .map_err(|_| "Không lưu được cấu hình khóa ứng dụng.")?;
+                                Ok(config)
+                            })
+                            .await;
+                            let (config, error) = match result {
+                                Ok(Ok(config)) => (Some(config), None),
+                                Ok(Err(error)) => (None, Some(error.into())),
+                                Err(_) => (None, Some("Không đặt được mã khóa.".into())),
+                            };
+                            let _ = gui_tx.send(GuiEvent::AppLockSaved { config, error });
+                            });
+                        }
+                        WorkerCmd::AppLockSave { config } => {
+                            let result = tokio::task::spawn_blocking(move || {
+                                app_lock::save(std::path::Path::new("."), &config)
+                            })
+                            .await;
+                            let error = (!matches!(result, Ok(Ok(()))))
+                                .then(|| "Không lưu được cấu hình khóa ứng dụng.".into());
+                            let _ = gui_tx.send(GuiEvent::AppLockSaved { config: None, error });
+                        }
                         WorkerCmd::StartVideo {
                             account,
                             thread,

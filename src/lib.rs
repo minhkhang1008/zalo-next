@@ -5,6 +5,7 @@
 pub const APP_DISPLAY_NAME: &str = "Zalo-next";
 
 pub mod account_manager;
+pub mod app_lock;
 pub mod ai;
 pub mod audio;
 pub mod call;

@@ -2362,6 +2362,8 @@ impl ZaloGuiApp {
                                             });
                                         }
                                         SettingsTab::Privacy => {
+                                            self.render_app_lock_settings(ui, pal);
+                                            ui.add_space(14.0);
                                             ui.label(RichText::new("Cá nhân").color(pal.text_primary).size(13.5).strong());
                                             ui.add_space(6.0);
                                             egui::Frame::none()
@@ -4880,6 +4882,7 @@ impl ZaloGuiApp {
         }
 
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
+            self.handle_app_lock_input(vp_ctx);
             if vp_ctx.input(|i| i.viewport().close_requested()) {
                 hangup_clicked = true;
             }

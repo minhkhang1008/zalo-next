@@ -46,6 +46,7 @@ rustybuzz = "0.20"
 ab_glyph_rasterizer = "0.1.10"
 memmap2 = "0.9"
 zip = { version = "=9.5.1", default-features = false, features = ["deflate-flate2"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 
 # macOS clipboard image paste: same versions winit 0.30 already pulls in (no new crates).
 [target.'cfg(target_os = "macos")'.dependencies]
