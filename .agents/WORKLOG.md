@@ -1349,3 +1349,31 @@ Entry template:
 - NOT verified: live sync right after launch on a real phone; a GUI run without the main-thread runtime (call,
   sync, proxy) — needs the owner's run; the Linux `initialize` branch is not compiled on this Mac (CI only).
 - Status: package 1 done; package 2 (single instance, media size) next.
+
+## 2026-11-28 — Upstream port, packages 2–3: single instance, media size, storage page, Open Sans  (agent: Claude Code, claude-opus-5-5 (orchestrator, wrote single instance / font / fixes) + Codex (worker: media size, storage core, storage page; reviewer: 1 review + 1 adversarial round))
+- Changes:
+  - `single_instance.rs` (new): `File::try_lock` on `ctdozlite.lock` (std, no libc; same name as upstream so the
+    two apps exclude each other), owner-only `ctdozlite.sock` served on its own thread (`show` → tray-style flag
+    + repaint), relative socket fallback for long paths, fail-open. Taken before `--logout`; an updater relaunch
+    (`--wait-for-pid`) waits up to 60 s. Linux AppImage relaunch now passes `--wait-for-pid` (worker.rs).
+  - Media size (Codex): `ChatMessage::media_size` from `params.width/height` / `video_width/video_height`
+    (re-notes/49, Zalo Web `_estimateSize`), kept in `raw_json` (no schema change); `photo_display_size` shared by
+    placeholder, image and bubble; video card min 120x90.
+  - Storage (Codex core + page, Claude rewrite): `storage_usage.rs` scan/clear by category; Codex's raw
+    openat/unlinkat FFI with hand-coded flag constants replaced by std-only checks (no `unsafe`); Settings → Bộ nhớ
+    page with worker commands (blocking pool, one at a time, terminal events).
+  - Open Sans Regular bundled (googlefonts/opensans@6cbc400d, sha256
+    c53aceea2dcf5b4098099c0c4d0a061d17e178a049317b42a422b1a9f7f8eb59, OFL text alongside).
+- Review: Codex review (7 findings) fixed: socket bind off the GUI thread, long socket path, Windows dead_code,
+  video hit area, Linux relaunch race; the storage_usage "untracked file" finding was already committed.
+  Adversarial review of storage (7): fixed download folder inside the data dir, pasted composer images,
+  `.privatepart`/uncommitted media, Windows hard-link truncation, socket path resolution on the GUI thread.
+  Rejected: (a) handle-relative (openat) deletion against a parent swapped mid-clear — needs write access to the
+  owner-only (0700) data dir, so it is outside the threat model and not worth the unsafe FFI; (b) AppImage
+  `current_exe()` points inside the read-only mount — pre-existing updater issue, logged as a follow-up.
+  Open for the owner: Open Sans and Be Vietnam Pro licences are not shipped in release artifacts (OFL wants the
+  licence with the font) — package the `*-OFL.txt` files or show them in-app.
+- Verification: `cargo test --locked` 528 passed; clippy clean on touched lines; rustfmt on clean files.
+- NOT verified: anything visual (storage page, photo/video layout, font), second launch bringing the window up,
+  updater relaunch on Linux/Windows, Windows log removal, live media sizes from real chats.
+- Status: done; next: group polls (`feature/group-polls` worktree) and App Lock (`feature/app-lock` worktree).
