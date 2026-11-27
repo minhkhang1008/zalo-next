@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use zalo_rust::updater::{
     download_release, install_release, stage_portable_release, validate_asset_name, DownloadLimits,
-    DownloadRequest, InstallTarget,
+    DownloadRequest, InstallTarget, VerifiedRelease,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -74,7 +74,7 @@ async fn fetch(
     checksum: Option<&str>,
     expected_size: Option<u64>,
     limits: DownloadLimits,
-) -> Result<Vec<u8>, String> {
+) -> Result<VerifiedRelease, String> {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     download_release(
         &client,
@@ -88,6 +88,14 @@ async fn fetch(
         |_, _| {},
     )
     .await
+}
+
+fn checksum(body: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(body))
+}
+
+fn verified(body: &[u8]) -> VerifiedRelease {
+    VerifiedRelease::verify(body.to_vec(), &checksum(body)).unwrap()
 }
 
 fn limits() -> DownloadLimits {
@@ -106,7 +114,8 @@ async fn download_accepts_exact_bytes_and_uppercase_sha256() {
     assert_eq!(
         fetch(&url, Some(&checksum), Some(body.len() as u64), limits())
             .await
-            .unwrap(),
+            .unwrap()
+            .as_bytes(),
         body
     );
 }
@@ -119,24 +128,36 @@ async fn invalid_transfers_preserve_existing_destination_and_unrelated_file() {
     fs::write(&destination, b"old executable").unwrap();
     fs::write(&unrelated, b"user data").unwrap();
     let body = b"release";
+    let correct_checksum = checksum(body);
+    let wrong_checksum = "0".repeat(64);
     let cases = [
+        (response(body, body.len(), "200 OK"), &wrong_checksum, None),
         (
-            response(body, body.len(), "200 OK"),
-            Some("0".repeat(64)),
+            response(body, body.len() + 10, "200 OK"),
+            &correct_checksum,
             None,
         ),
-        (response(body, body.len() + 10, "200 OK"), None, None),
-        (response(body, body.len(), "500 Server Error"), None, None),
-        (response(body, 1000, "200 OK"), None, None),
-        (response(body, body.len(), "200 OK"), None, Some(9)),
+        (
+            response(body, body.len(), "500 Server Error"),
+            &correct_checksum,
+            None,
+        ),
+        (response(body, 1000, "200 OK"), &correct_checksum, None),
+        (
+            response(body, body.len(), "200 OK"),
+            &correct_checksum,
+            Some(9),
+        ),
     ];
     for (response, checksum, size) in cases {
         let url = serve(response, Duration::ZERO);
-        let downloaded = fetch(&url, checksum.as_deref(), size, limits()).await;
-        if let Ok(bytes) = &downloaded {
-            install_release(bytes, &InstallTarget::Portable(destination.clone()), |_| {
-                Ok(())
-            })
+        let downloaded = fetch(&url, Some(checksum), size, limits()).await;
+        if let Ok(release) = &downloaded {
+            install_release(
+                release,
+                &InstallTarget::Portable(destination.clone()),
+                |_| Ok(()),
+            )
             .unwrap();
         }
         assert!(downloaded.is_err());
@@ -148,9 +169,12 @@ async fn invalid_transfers_preserve_existing_destination_and_unrelated_file() {
 #[tokio::test]
 async fn streaming_limit_rejects_body_without_content_length() {
     let mut raw = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
-    raw.extend_from_slice(&[b'x'; 65]);
+    let body = [b'x'; 65];
+    raw.extend_from_slice(&body);
     let url = serve(raw, Duration::ZERO);
-    assert!(fetch(&url, None, None, limits()).await.is_err());
+    assert!(fetch(&url, Some(&checksum(&body)), None, limits())
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -158,16 +182,16 @@ async fn transfer_stops_at_configured_deadline() {
     let url = serve(response(b"x", 1, "200 OK"), Duration::from_millis(200));
     let mut bounded = limits();
     bounded.timeout = Duration::from_millis(30);
-    assert!(fetch(&url, None, None, bounded).await.is_err());
+    assert!(fetch(&url, Some(&checksum(b"x")), None, bounded)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
 async fn invalid_provided_checksum_is_rejected_before_connecting() {
     for checksum in ["short".to_string(), "z".repeat(64)] {
-        assert!(fetch("http://127.0.0.1:1", Some(&checksum), None, limits())
-            .await
-            .unwrap_err()
-            .contains("SHA-256"));
+        let result = fetch("http://127.0.0.1:1", Some(&checksum), None, limits()).await;
+        assert!(matches!(result, Err(error) if error.contains("SHA-256")));
     }
 }
 
@@ -202,7 +226,7 @@ fn portable_replacement_launches_new_bytes_and_preserves_user_file() {
         fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
     }
     install_release(
-        b"new executable",
+        &verified(b"new executable"),
         &InstallTarget::Portable(destination.clone()),
         |path| {
             assert_eq!(fs::read(path).unwrap(), b"new executable");
@@ -229,7 +253,7 @@ fn portable_launch_failure_restores_original_bytes() {
     let destination = sandbox.destination();
     fs::write(&destination, b"original bytes").unwrap();
     let result = install_release(
-        b"replacement",
+        &verified(b"replacement"),
         &InstallTarget::Portable(destination.clone()),
         |_| Err("injected launch failure".into()),
     );
@@ -243,7 +267,7 @@ fn installer_saves_to_explicit_sandbox_and_launches_callback() {
     let sandbox = Sandbox::new();
     let destination = sandbox.0.join("release.dmg");
     install_release(
-        b"installer",
+        &verified(b"installer"),
         &InstallTarget::Installer(destination.clone()),
         |path| {
             assert_eq!(path, destination);
@@ -260,7 +284,7 @@ fn new_installer_launch_failure_removes_unlaunched_artifact() {
     let sandbox = Sandbox::new();
     let destination = sandbox.0.join("release.dmg");
     assert!(install_release(
-        b"installer",
+        &verified(b"installer"),
         &InstallTarget::Installer(destination.clone()),
         |_| { Err("injected launch failure".into()) }
     )
@@ -273,12 +297,14 @@ fn new_installer_launch_failure_removes_unlaunched_artifact() {
 fn missing_parent_and_directory_targets_fail_without_launch() {
     let sandbox = Sandbox::new();
     for destination in [sandbox.0.join("missing/release.dmg"), sandbox.0.clone()] {
-        assert!(
-            install_release(b"installer", &InstallTarget::Installer(destination), |_| {
+        assert!(install_release(
+            &verified(b"installer"),
+            &InstallTarget::Installer(destination),
+            |_| {
                 panic!("invalid targets must not launch");
-            })
-            .is_err()
-        );
+            }
+        )
+        .is_err());
     }
     assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 0);
 }
@@ -291,34 +317,43 @@ fn symlink_destination_never_changes_user_selected_file() {
     let destination = sandbox.destination();
     fs::write(&user_file, b"user content").unwrap();
     std::os::unix::fs::symlink(&user_file, &destination).unwrap();
-    assert!(install_release(b"new", &InstallTarget::Installer(destination), |_| Ok(())).is_err());
+    assert!(install_release(
+        &verified(b"new"),
+        &InstallTarget::Installer(destination),
+        |_| Ok(())
+    )
+    .is_err());
     assert_eq!(fs::read(&user_file).unwrap(), b"user content");
 }
 
 #[tokio::test]
 async fn minimum_size_rejects_empty_artifacts() {
     let url = serve(response(b"", 0, "200 OK"), Duration::ZERO);
-    assert!(fetch(&url, None, None, limits()).await.is_err());
+    assert!(fetch(&url, Some(&checksum(b"")), None, limits())
+        .await
+        .is_err());
 }
 
 #[tokio::test]
 async fn executable_signature_is_checked_before_installation() {
-    let url = serve(response(b"not a PE", 8, "200 OK"), Duration::ZERO);
+    let body = b"not an executable";
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    assert!(download_release(
-        &client,
-        &DownloadRequest {
-            url: &url,
-            asset_name: "release.exe",
-            expected_sha256: None,
-            expected_size: None,
-            limits: limits(),
-        },
-        |_, _| {}
-    )
-    .await
-    .unwrap_err()
-    .contains("PE"));
+    for (asset_name, signature) in [("release.exe", "PE"), ("release.AppImage", "ELF")] {
+        let url = serve(response(body, body.len(), "200 OK"), Duration::ZERO);
+        let result = download_release(
+            &client,
+            &DownloadRequest {
+                url: &url,
+                asset_name,
+                expected_sha256: Some(&checksum(body)),
+                expected_size: None,
+                limits: limits(),
+            },
+            |_, _| {},
+        )
+        .await;
+        assert!(matches!(result, Err(error) if error.contains(signature)));
+    }
 }
 
 #[test]
@@ -327,7 +362,7 @@ fn existing_installer_launch_failure_restores_previous_download() {
     let destination = sandbox.0.join("release.dmg");
     fs::write(&destination, b"previous installer").unwrap();
     assert!(install_release(
-        b"new installer",
+        &verified(b"new installer"),
         &InstallTarget::Installer(destination.clone()),
         |_| { Err("injected launch failure".into()) }
     )
@@ -341,7 +376,7 @@ fn deferred_portable_stage_preserves_original_until_explicit_launch() {
     let sandbox = Sandbox::new();
     let destination = sandbox.destination();
     fs::write(&destination, b"old executable").unwrap();
-    let pending = stage_portable_release(b"new executable", &destination).unwrap();
+    let pending = stage_portable_release(&verified(b"new executable"), &destination).unwrap();
     assert_eq!(fs::read(&destination).unwrap(), b"old executable");
     let mut launched = false;
     pending
@@ -361,7 +396,7 @@ fn deferred_portable_drop_discards_staging_without_touching_original() {
     let sandbox = Sandbox::new();
     let destination = sandbox.destination();
     fs::write(&destination, b"old executable").unwrap();
-    let pending = stage_portable_release(b"new executable", &destination).unwrap();
+    let pending = stage_portable_release(&verified(b"new executable"), &destination).unwrap();
     drop(pending);
     assert_eq!(fs::read(&destination).unwrap(), b"old executable");
     assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 1);
@@ -372,7 +407,7 @@ fn deferred_portable_abort_discards_staging_without_launch() {
     let sandbox = Sandbox::new();
     let destination = sandbox.destination();
     fs::write(&destination, b"old executable").unwrap();
-    stage_portable_release(b"new executable", &destination)
+    stage_portable_release(&verified(b"new executable"), &destination)
         .unwrap()
         .abort()
         .unwrap();
@@ -385,7 +420,7 @@ fn deferred_portable_launch_failure_restores_original() {
     let sandbox = Sandbox::new();
     let destination = sandbox.destination();
     fs::write(&destination, b"old executable").unwrap();
-    let pending = stage_portable_release(b"new executable", &destination).unwrap();
+    let pending = stage_portable_release(&verified(b"new executable"), &destination).unwrap();
     assert!(pending
         .launch_and_finish(|_| Err("injected launch failure".into()))
         .is_err());
@@ -398,7 +433,7 @@ fn deferred_portable_unwind_restores_original() {
     let sandbox = Sandbox::new();
     let destination = sandbox.destination();
     fs::write(&destination, b"old executable").unwrap();
-    let pending = stage_portable_release(b"new executable", &destination).unwrap();
+    let pending = stage_portable_release(&verified(b"new executable"), &destination).unwrap();
     let panic = std::panic::catch_unwind(|| {
         pending
             .launch_and_finish(|_| panic!("injected launcher panic"))

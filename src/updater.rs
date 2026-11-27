@@ -34,7 +34,7 @@ pub struct DownloadRequest<'a> {
     pub url: &'a str,
     /// A single filename, never a path.
     pub asset_name: &'a str,
-    /// Optional published SHA-256 hex digest.
+    /// Published SHA-256 hex digest, required before downloading.
     pub expected_sha256: Option<&'a str>,
     /// Optional size published by the release API.
     pub expected_size: Option<u64>,
@@ -66,8 +66,84 @@ pub fn validate_asset_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Check both the advertised URL and the URL after normalization by the HTTP client.
+pub(crate) fn is_github_release_asset_url(url: &str, repo_slug: &str) -> bool {
+    let prefix = format!("https://github.com/{repo_slug}/releases/download/");
+    url.starts_with(&prefix)
+        && reqwest::Url::parse(url).is_ok_and(|parsed| parsed.as_str().starts_with(&prefix))
+}
+
+fn is_github_redirect_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host == "github.com" || host.ends_with(".githubusercontent.com"))
+}
+
+pub(crate) fn github_update_client() -> reqwest::ClientBuilder {
+    const MAX_REDIRECTS: usize = 3;
+
+    reqwest::Client::builder()
+        .https_only(true)
+        .cookie_store(false)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > MAX_REDIRECTS {
+                attempt.error("Quá nhiều lần chuyển hướng khi tải bản cập nhật")
+            } else if !is_github_redirect_url(attempt.url()) {
+                attempt.error("Đích chuyển hướng cập nhật nằm ngoài GitHub")
+            } else {
+                attempt.follow()
+            }
+        }))
+}
+
+fn is_sha256_hex(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn require_sha256(expected: Option<&str>) -> Result<&str, String> {
+    let hash = expected
+        .ok_or("Gói cập nhật thiếu mã SHA-256. Hãy tải thủ công từ trang phát hành trên GitHub.")?;
+    if !is_sha256_hex(hash) {
+        return Err(
+            "Mã SHA-256 của gói cập nhật không hợp lệ. Hãy tải thủ công từ trang phát hành trên GitHub."
+                .into(),
+        );
+    }
+    Ok(hash)
+}
+
+/// Release bytes whose SHA-256 matched a published digest.
+#[derive(Clone)]
+pub struct VerifiedRelease(Vec<u8>);
+
+impl VerifiedRelease {
+    /// Verify bytes already in memory against the supplied SHA-256 hex digest.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid or mismatched digest.
+    pub fn verify(bytes: Vec<u8>, expected_sha256: &str) -> Result<Self, String> {
+        let expected = require_sha256(Some(expected_sha256))?;
+        let hasher = Sha256::new_with_prefix(&bytes);
+        Self::from_hashed_bytes(bytes, hasher, expected)
+    }
+
+    fn from_hashed_bytes(bytes: Vec<u8>, hasher: Sha256, expected: &str) -> Result<Self, String> {
+        let actual = format!("{:x}", hasher.finalize());
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err("Mã kiểm tra toàn vẹn SHA-256 không khớp".into());
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Access the verified bytes for platform-specific installation.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// Download and validate an asset before any installation destination is touched.
-/// The caller supplies a dedicated, cookie-free client and a progress callback.
+/// The caller validates the source URL and supplies a dedicated, cookie-free client.
 ///
 /// # Errors
 /// Rejects malformed metadata, HTTP failures, incomplete bodies, resource limits,
@@ -76,16 +152,12 @@ pub async fn download_release(
     client: &reqwest::Client,
     request: &DownloadRequest<'_>,
     mut progress: impl FnMut(u64, u64),
-) -> Result<Vec<u8>, String> {
+) -> Result<VerifiedRelease, String> {
+    let expected = require_sha256(request.expected_sha256)?;
     validate_asset_name(request.asset_name)?;
     let limits = request.limits;
     if limits.min_bytes > limits.max_bytes || limits.max_bytes > usize::MAX as u64 {
         return Err("Giới hạn dung lượng cập nhật không hợp lệ".into());
-    }
-    if let Some(hash) = request.expected_sha256 {
-        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("Mã SHA-256 của gói cập nhật không hợp lệ".into());
-        }
     }
     if request
         .expected_size
@@ -139,21 +211,16 @@ pub async fn download_release(
         {
             return Err("Gói cập nhật tải về chưa hoàn tất".into());
         }
-        if let Some(expected) = request.expected_sha256 {
-            let actual = format!("{:x}", hasher.finalize());
-            if !actual.eq_ignore_ascii_case(expected) {
-                return Err("Mã kiểm tra toàn vẹn SHA-256 không khớp".into());
-            }
-        }
+        let release = VerifiedRelease::from_hashed_bytes(bytes, hasher, expected)?;
         let name = request.asset_name.to_ascii_lowercase();
-        if name.ends_with(".exe") && !bytes.starts_with(b"MZ") {
+        if name.ends_with(".exe") && !release.as_bytes().starts_with(b"MZ") {
             return Err("File cập nhật không có chữ ký PE hợp lệ".into());
         }
-        if name.ends_with(".appimage") && !bytes.starts_with(b"\x7fELF") {
+        if name.ends_with(".appimage") && !release.as_bytes().starts_with(b"\x7fELF") {
             return Err("File cập nhật không có chữ ký ELF hợp lệ".into());
         }
         progress(actual, total.max(actual));
-        Ok(bytes)
+        Ok(release)
     };
     tokio::time::timeout(limits.timeout, transfer)
         .await
@@ -222,11 +289,11 @@ impl DeferredPortableInstall {
 /// # Errors
 /// Returns filesystem errors while preparing private sibling files.
 pub fn stage_portable_release(
-    bytes: &[u8],
+    release: &VerifiedRelease,
     destination: &Path,
 ) -> Result<DeferredPortableInstall, String> {
     Ok(DeferredPortableInstall {
-        prepared: prepare_install(bytes, destination, true)?,
+        prepared: prepare_install(release.as_bytes(), destination, true)?,
     })
 }
 
@@ -340,7 +407,7 @@ fn prepare_install(
 /// # Errors
 /// Returns filesystem or launcher errors; never falls back to another destination.
 pub fn install_release(
-    bytes: &[u8],
+    release: &VerifiedRelease,
     target: &InstallTarget,
     launch: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -348,7 +415,7 @@ pub fn install_release(
         InstallTarget::Portable(path) => (path, true),
         InstallTarget::Installer(path) => (path, false),
     };
-    prepare_install(bytes, destination, portable)?.finish(launch)
+    prepare_install(release.as_bytes(), destination, portable)?.finish(launch)
 }
 
 /// Metadata parsed from GitHub Releases REST API (`/repos/{owner}/{repo}/releases/latest`)
@@ -455,10 +522,7 @@ pub fn parse_sha256sums_for_asset(sha256sums_text: &str, asset_name: &str) -> Op
         let Some(hash) = parts.next() else { continue };
         let Some(fname) = parts.next() else { continue };
         let clean_fname = fname.trim_start_matches('*').trim_start_matches("./");
-        if clean_fname == asset_name
-            && hash.len() == 64
-            && hash.bytes().all(|b| b.is_ascii_hexdigit())
-        {
+        if clean_fname == asset_name && is_sha256_hex(hash) {
             return Some(hash.to_ascii_lowercase());
         }
     }
@@ -529,11 +593,11 @@ pub fn parse_github_release_value(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let sz = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-            if name.eq_ignore_ascii_case("SHA256SUMS.txt") && !dl.is_empty() {
-                sha256sums_url = Some(dl.to_string());
+            if !is_github_release_asset_url(dl, repo_slug) {
                 continue;
             }
-            if name.is_empty() || dl.is_empty() {
+            if name.eq_ignore_ascii_case("SHA256SUMS.txt") {
+                sha256sums_url = Some(dl.to_string());
                 continue;
             }
             let score = select_platform_asset_score(name, target_os, target_arch);
@@ -551,7 +615,7 @@ pub fn parse_github_release_value(
                             .and_then(|v| v.as_str())
                             .and_then(|d| d.strip_prefix("sha256:"))
                     })
-                    .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .filter(|h| is_sha256_hex(h))
                     .map(|h| h.to_ascii_lowercase());
             }
         }
@@ -568,15 +632,18 @@ pub fn parse_github_release_value(
             },
             _ => format!("zalo-next-{latest_ver}-x86_64.AppImage"),
         };
-        best_url = Some(format!(
+        let fallback_url = format!(
             "https://github.com/{repo_slug}/releases/download/v{latest_ver}/{fallback_name}"
-        ));
-        best_name = Some(fallback_name);
-        best_sha256 = rel
-            .get("sha256")
-            .and_then(|v| v.as_str())
-            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map(|h| h.to_ascii_lowercase());
+        );
+        if is_github_release_asset_url(&fallback_url, repo_slug) {
+            best_url = Some(fallback_url);
+            best_name = Some(fallback_name);
+            best_sha256 = rel
+                .get("sha256")
+                .and_then(|v| v.as_str())
+                .filter(|h| is_sha256_hex(h))
+                .map(|h| h.to_ascii_lowercase());
+        }
     }
 
     GitHubReleaseMetadata {
@@ -640,12 +707,12 @@ fn run_tool(program: &str, args: &[&std::ffi::OsStr]) -> Result<(), String> {
 
 /// Replace the running `.app` bundle with the one inside a verified release `.dmg`.
 ///
-/// The caller must have checked the DMG's SHA-256. Steps: mount read-only, verify the new app's
-/// code signature, copy it next to the current bundle with `ditto`, then swap by renaming
+/// Mount the verified DMG read-only, verify the new app's code signature, copy it
+/// next to the current bundle with `ditto`, then swap by renaming
 /// (current → backup, new → current). Any failure before the swap leaves the installed app
 /// untouched; a failed second rename restores the backup.
 #[cfg(target_os = "macos")]
-pub fn install_macos_app_from_dmg(dmg_bytes: &[u8], bundle: &Path) -> Result<(), String> {
+pub fn install_macos_app_from_dmg(release: &VerifiedRelease, bundle: &Path) -> Result<(), String> {
     use std::ffi::OsStr;
     let parent = bundle
         .parent()
@@ -659,7 +726,8 @@ pub fn install_macos_app_from_dmg(dmg_bytes: &[u8], bundle: &Path) -> Result<(),
     crate::data_dir::ensure_private_dir(&work).map_err(|e| e.to_string())?;
     let result = (|| -> Result<(), String> {
         let dmg = work.join("update.dmg");
-        std::fs::write(&dmg, dmg_bytes).map_err(|e| format!("Không ghi được tệp DMG: {e}"))?;
+        std::fs::write(&dmg, release.as_bytes())
+            .map_err(|e| format!("Không ghi được tệp DMG: {e}"))?;
         let mount = work.join("mnt");
         std::fs::create_dir_all(&mount).map_err(|e| e.to_string())?;
         run_tool(
@@ -761,6 +829,122 @@ pub fn new_update_notification(latest_version: &str, current_version: &str) -> (
 mod github_api_tests {
     use super::*;
 
+    const REPO: &str = "minhkhang1008/zalo-next";
+
+    #[tokio::test]
+    async fn missing_sha256_refuses_download_before_any_platform_install() {
+        let client = reqwest::Client::new();
+        for asset_name in [
+            "release-macos-arm64.dmg",
+            "release-portable-windows-x86_64.exe",
+            "release-setup-windows-x86_64.exe",
+            "release-x86_64.AppImage",
+            "release-amd64.deb",
+        ] {
+            let request = DownloadRequest {
+                url: "invalid URL",
+                asset_name,
+                expected_sha256: None,
+                expected_size: None,
+                limits: DownloadLimits::default(),
+            };
+            let result = download_release(&client, &request, |_, _| {
+                panic!("an update without a checksum must never report download progress");
+            })
+            .await;
+            assert!(
+                matches!(result, Err(ref error) if error.contains("SHA-256")
+                    && error.contains("tải thủ công từ trang phát hành")),
+                "expected a checksum error with manual download instructions for {asset_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_bytes_require_a_matching_sha256() {
+        let digest = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+        let release = VerifiedRelease::verify(b"abc".to_vec(), digest).unwrap();
+        assert_eq!(release.as_bytes(), b"abc");
+
+        let result = VerifiedRelease::verify(b"abd".to_vec(), digest);
+        assert!(matches!(result, Err(error) if error.contains("SHA-256 không khớp")));
+    }
+
+    #[test]
+    fn asset_urls_require_the_repository_download_prefix() {
+        for asset_name in ["release.dmg", "SHA256SUMS.txt"] {
+            assert!(is_github_release_asset_url(
+                &format!("https://github.com/{REPO}/releases/download/v0.4.0/{asset_name}"),
+                REPO,
+            ));
+        }
+
+        for url in [
+            "https://github.com/minhkhang1008/zalo-next-evil/releases/download/v1/release.dmg",
+            "http://github.com/minhkhang1008/zalo-next/releases/download/v1/release.dmg",
+            "https://github.com.example.org/minhkhang1008/zalo-next/releases/download/v1/release.dmg",
+            "https://github.com@evil.example/minhkhang1008/zalo-next/releases/download/v1/release.dmg",
+            "https://release-assets.githubusercontent.com/minhkhang1008/zalo-next/releases/download/v1/release.dmg",
+            "https://github.com/minhkhang1008/zalo-next/releases/downloads/v1/release.dmg",
+            "https://github.com/minhkhang1008/zalo-next/releases/download/%2e%2e/tag/v1",
+        ] {
+            assert!(!is_github_release_asset_url(url, REPO), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn release_metadata_discards_untrusted_asset_and_checksum_urls() {
+        let html_url = "https://github.com/minhkhang1008/zalo-next/releases/tag/v0.4.0";
+        let json = serde_json::json!({
+            "tag_name": "v0.4.0",
+            "html_url": html_url,
+            "assets": [
+                {
+                    "name": "release-arm64.dmg",
+                    "browser_download_url": "https://github.com/minhkhang1008/zalo-next-evil/releases/download/v0.4.0/release-arm64.dmg",
+                    "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+                },
+                {
+                    "name": "SHA256SUMS.txt",
+                    "browser_download_url": "https://example.org/SHA256SUMS.txt"
+                }
+            ]
+        });
+        let meta = parse_github_release_value(&json, "0.3.0", REPO, "macos", "aarch64");
+        assert!(meta.has_update);
+        assert_eq!(meta.html_url, html_url);
+        assert!(meta.download_url.is_none());
+        assert!(meta.expected_sha256.is_none());
+        assert!(meta.sha256sums_url.is_none());
+    }
+
+    #[test]
+    fn redirect_targets_require_https_and_an_allowed_github_host() {
+        for url in [
+            "https://github.com/minhkhang1008/zalo-next/releases/latest",
+            "https://objects.githubusercontent.com/asset",
+            "https://release-assets.githubusercontent.com/asset",
+            "https://another.cdn.githubusercontent.com/asset",
+        ] {
+            assert!(is_github_redirect_url(&reqwest::Url::parse(url).unwrap()));
+        }
+        for url in [
+            "http://github.com/release",
+            "http://objects.githubusercontent.com/asset",
+            "https://api.github.com/release",
+            "https://githubusercontent.com/asset",
+            "https://evilgithubusercontent.com/asset",
+            "https://objects.githubusercontent.com.evil.example/asset",
+            "https://github.com@evil.example/asset",
+            "https://127.0.0.1/asset",
+        ] {
+            assert!(
+                !is_github_redirect_url(&reqwest::Url::parse(url).unwrap()),
+                "accepted {url}"
+            );
+        }
+    }
+
     #[test]
     fn test_is_newer_semver_comparisons() {
         assert!(is_newer_semver("0.0.4", "0.0.3"));
@@ -824,6 +1008,12 @@ mod github_api_tests {
             Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
         );
         assert_eq!(win_meta.published_at, "2026-11-02");
+        assert_eq!(
+            win_meta.sha256sums_url.as_deref(),
+            Some(
+                "https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.0.4/SHA256SUMS.txt"
+            )
+        );
 
         let mac_meta = parse_github_release_value(
             &api_json,

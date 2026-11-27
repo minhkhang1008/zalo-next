@@ -4356,7 +4356,7 @@ const GITHUB_REPO: &str = "minhkhang1008/zalo-next";
 
 pub(crate) async fn fetch_github_latest_release() -> Result<UpdateCheckResult, String> {
     let current_ver = env!("CARGO_PKG_VERSION").to_string();
-    let client = reqwest::Client::builder()
+    let client = crate::updater::github_update_client()
         .user_agent(format!("zalo-next/{current_ver}"))
         .timeout(Duration::from_secs(12))
         .build()
@@ -4434,8 +4434,13 @@ pub(crate) async fn fetch_github_latest_release() -> Result<UpdateCheckResult, S
     );
 
     if meta.expected_sha256.is_none() {
-        if let (Some(ref s_url), Some(ref b_name)) = (&meta.sha256sums_url, &meta.asset_name) {
-            if let Ok(resp) = client.get(s_url).send().await {
+        if let (Some(s_url), Some(b_name)) = (&meta.sha256sums_url, &meta.asset_name) {
+            if let Ok(resp) = client
+                .get(s_url)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
                 if let Ok(txt) = resp.text().await {
                     meta.expected_sha256 = crate::updater::parse_sha256sums_for_asset(&txt, b_name);
                 }
@@ -4459,7 +4464,7 @@ pub(crate) async fn fetch_github_latest_release() -> Result<UpdateCheckResult, S
 }
 
 /// Stream-download the release asset from GitHub Releases with real-time progress reporting,
-/// verify binary integrity (PE/ELF magic + SHA-256 checksum when provided) via [`crate::updater`],
+/// verify its SHA-256 checksum and PE/ELF magic where applicable via [`crate::updater`],
 /// and atomically replace the running executable in-place with automatic rollback on failure.
 async fn apply_github_release_update(
     download_url: &str,
@@ -4469,7 +4474,14 @@ async fn apply_github_release_update(
     gui_tx: &GuiTx,
     ctx: &egui::Context,
 ) -> Result<bool, String> {
-    let client = reqwest::Client::builder()
+    if !crate::updater::is_github_release_asset_url(download_url, GITHUB_REPO) {
+        return Err(
+            "Đường dẫn gói cập nhật không hợp lệ. Hãy tải thủ công từ trang phát hành trên GitHub."
+                .into(),
+        );
+    }
+
+    let client = crate::updater::github_update_client()
         .user_agent(format!("zalo-next/{target_version}"))
         .timeout(Duration::from_secs(240))
         .build()
@@ -4483,7 +4495,7 @@ async fn apply_github_release_update(
         limits: crate::updater::DownloadLimits::default(),
     };
 
-    let bytes = crate::updater::download_release(&client, &req, |downloaded, total| {
+    let release = crate::updater::download_release(&client, &req, |downloaded, total| {
         let _ = gui_tx.send(GuiEvent::UpdateDownloadProgress { downloaded, total });
         ctx.request_repaint();
     })
@@ -4491,11 +4503,11 @@ async fn apply_github_release_update(
 
     let name_low = asset_name.to_lowercase();
 
-    // macOS: replace the running .app in place (only for a SHA-256-verified DMG), then relaunch.
+    // macOS: replace the running .app and relaunch.
     #[cfg(target_os = "macos")]
-    if name_low.ends_with(".dmg") && expected_sha256.is_some() {
+    if name_low.ends_with(".dmg") {
         if let Some(bundle) = crate::updater::current_app_bundle() {
-            let dmg = bytes.clone();
+            let dmg = release.clone();
             let target = bundle.clone();
             let installed = tokio::task::spawn_blocking(move || {
                 crate::updater::install_macos_app_from_dmg(&dmg, &target)
@@ -4527,7 +4539,7 @@ async fn apply_github_release_update(
                 // to `.exe.old` and atomically place the new portable binary at `exe_path`.
                 let new_path = exe_path.with_extension("exe.new");
                 let old_path = exe_path.with_extension("exe.old");
-                if std::fs::write(&new_path, &bytes).is_ok() {
+                if std::fs::write(&new_path, release.as_bytes()).is_ok() {
                     let _ = std::fs::remove_file(&old_path);
                     if std::fs::rename(&exe_path, &old_path).is_ok() {
                         if std::fs::rename(&new_path, &exe_path).is_ok() {
@@ -4551,7 +4563,7 @@ async fn apply_github_release_update(
             {
                 let args: Vec<String> = std::env::args().skip(1).collect();
                 if crate::updater::install_release(
-                    &bytes,
+                    &release,
                     &crate::updater::InstallTarget::Portable(exe_path),
                     |installed_path| {
                         std::process::Command::new(installed_path)
@@ -4583,7 +4595,7 @@ async fn apply_github_release_update(
     let dest_path = dl_dir.join(asset_name);
 
     crate::updater::install_release(
-        &bytes,
+        &release,
         &crate::updater::InstallTarget::Installer(dest_path),
         |installer_path| {
             #[cfg(target_os = "windows")]
