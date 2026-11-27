@@ -1948,46 +1948,11 @@ fn render_markdown_inline_rich(
                 }
             }
 
-            let mut end_idx = 0;
-            let mut word_count = 0;
-            let mut prev_is_space = false;
-            for (idx, ch) in after.char_indices() {
-                if ch == '\n'
-                    || ch == '\r'
-                    || matches!(
-                        ch,
-                        ',' | '.'
-                            | '!'
-                            | '?'
-                            | ':'
-                            | ';'
-                            | '('
-                            | ')'
-                            | '['
-                            | ']'
-                            | '"'
-                            | '\''
-                            | '`'
-                            | '<'
-                            | '>'
-                    )
-                {
-                    break;
-                }
-                if ch.is_whitespace() {
-                    word_count += 1;
-                    if word_count >= 5 || prev_is_space {
-                        break;
-                    }
-                    prev_is_space = true;
-                } else {
-                    prev_is_space = false;
-                }
-                end_idx = idx + ch.len_utf8();
-            }
-            let candidate_name = after[..end_idx].trim_end();
-            if !candidate_name.is_empty()
-                && candidate_name.chars().next().unwrap().is_alphanumeric()
+            let candidate_name = &after[..guessed_mention_name_len(after)];
+            if candidate_name
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric)
             {
                 let mention_len = 1 + candidate_name.len();
                 let mention_str = &rest[..mention_len];
@@ -4806,6 +4771,59 @@ pub(super) fn render_hover_reaction_bar(
 /// Names listed in the reaction-pill hover tooltip before collapsing into "và N người khác".
 const REACTION_TOOLTIP_MAX_NAMES: usize = 8;
 
+/// Most words taken into a mention guessed from plain text (Vietnamese full names have up to 4).
+const MENTION_GUESS_MAX_WORDS: usize = 4;
+
+/// Byte length of the name guessed after `@` when the message carries no mention spans.
+///
+/// The first word is always taken. Each following word is taken only when it starts with an
+/// uppercase letter: names are capitalised and the ordinary words after them usually are not,
+/// so `@Hoang Nam dạ anh` stops after `Hoang Nam`.
+fn guessed_mention_name_len(after: &str) -> usize {
+    let mut end = 0;
+    let mut words = 0;
+    let mut in_word = false;
+    for (idx, ch) in after.char_indices() {
+        if matches!(
+            ch,
+            '\n' | '\r'
+                | ','
+                | '.'
+                | '!'
+                | '?'
+                | ':'
+                | ';'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '"'
+                | '\''
+                | '`'
+                | '<'
+                | '>'
+        ) {
+            break;
+        }
+        if ch.is_whitespace() {
+            if !in_word {
+                break;
+            }
+            in_word = false;
+            continue;
+        }
+        if !in_word {
+            if words == MENTION_GUESS_MAX_WORDS || (words > 0 && !ch.is_uppercase()) {
+                break;
+            }
+            words += 1;
+            in_word = true;
+        }
+        end = idx + ch.len_utf8();
+    }
+    end
+}
+
 /// Lines for the reaction-pill hover tooltip (Zalo PC style: who reacted, one name per line).
 ///
 /// Reactors come only from the ledger (`reactor_ids`), deduplicated across emoji, in order of the
@@ -5574,6 +5592,20 @@ mod quote_navigation_tests {
         assert!(loading.contains(&crate::emoji_raster::texture_key("💌")));
         assert!(!is_inline_emoji_cluster("©"));
         assert!(is_inline_emoji_cluster("❤\u{FE0F}"));
+    }
+
+    #[test]
+    fn guessed_mention_stops_before_ordinary_words() {
+        fn name(s: &str) -> &str {
+            &s[..guessed_mention_name_len(s)]
+        }
+        assert_eq!(name("Hoang Nam dạ anh xem"), "Hoang Nam");
+        assert_eq!(name("Nguyễn Văn An ơi"), "Nguyễn Văn An");
+        assert_eq!(name("minh ngọc a xem"), "minh");
+        assert_eq!(name("An, mai họp"), "An");
+        assert_eq!(name("A B C D E"), "A B C D");
+        assert_eq!(name(" An"), "");
+        assert_eq!(name("Lan  Anh"), "Lan");
     }
 
     #[test]
