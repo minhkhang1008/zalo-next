@@ -177,39 +177,37 @@ pub fn initialize(args: &[String]) -> Result<PathBuf> {
         // Report the resolved path without creating the new per-user directory.
         return Ok(path);
     }
-    prepare(&path, private)?;
     let profile = args
         .iter()
         .any(|arg| arg == "--profile" || arg.starts_with("--profile="));
-    let selected = if private && !print_only && !explicit && !profile {
-        match platform {
-            Platform::MacOs(_) => {
-                migrate_and_report(&cwd, &path);
-                path.as_path()
-            }
-            #[cfg(windows)]
-            Platform::Windows(_) => {
-                let selected = migrate_windows_storage(&cwd, &executable, &path, probe_legacy_db);
-                if selected != path.as_path() {
-                    prepare(selected, false)?;
-                }
-                selected
-            }
-            _ => path.as_path(),
-        }
+    #[cfg(windows)]
+    let selected = if private && !print_only && !explicit {
+        migrate_windows_storage(
+            &cwd,
+            &executable,
+            &path,
+            profile,
+            || other_instance_running_after_wait(&executable),
+            probe_legacy_db,
+        )
     } else {
-        path.as_path()
+        path.clone()
     };
+    #[cfg(not(windows))]
+    let selected = path.clone();
+    prepare(&selected, private && selected == path)?;
+    if matches!(platform, Platform::MacOs(_)) && private && !print_only && !explicit && !profile {
+        migrate_and_report(&cwd, &path);
+    }
     // Legacy storage callers use relative paths; switch once before creating workers.
-    std::env::set_current_dir(selected)
+    std::env::set_current_dir(&selected)
         .with_context(|| format!("Không chọn được thư mục dữ liệu {}", selected.display()))?;
-    Ok(selected.to_path_buf())
+    Ok(selected)
 }
 
-fn migrate_and_report(source: &Path, target: &Path) -> bool {
+fn migrate_and_report(source: &Path, target: &Path) -> MigrationReport {
     let report = migrate_legacy_cwd_storage(source, target);
-    let moved = !report.moved.is_empty();
-    if moved {
+    if !report.moved.is_empty() && report.errors.is_empty() {
         eprintln!(
             "ℹ Đã chuyển dữ liệu cũ từ {} sang {}: {} (bản gốc đổi tên thành *.bak).",
             source.display(),
@@ -220,34 +218,129 @@ fn migrate_and_report(source: &Path, target: &Path) -> bool {
     for error in &report.errors {
         eprintln!("! Không chuyển được dữ liệu cũ: {error}");
     }
-    moved
+    report
 }
 
 #[cfg(any(windows, test))]
-fn migrate_windows_storage<'a>(
-    cwd: &'a Path,
-    executable: &'a Path,
-    target: &'a Path,
-    probe_db: impl Fn(&Path) -> std::io::Result<()>,
-) -> &'a Path {
-    let exe_dir = executable.parent().filter(|dir| !same_directory(cwd, dir));
-    for source in std::iter::once(cwd).chain(exe_dir) {
-        if !can_migrate_legacy_storage(source, target) {
-            continue;
+fn migrate_windows_storage(
+    cwd: &Path,
+    executable: &Path,
+    target: &Path,
+    profile: bool,
+    other_instance_running: impl FnOnce() -> bool,
+    probe_db: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> PathBuf {
+    let source = std::iter::once(cwd)
+        .chain(executable.parent())
+        .filter_map(|base| {
+            if profile {
+                let profiles = base.join("profiles");
+                let source = profiles.join(target.file_name()?);
+                // A direct profile migration must skip the same links as a tree copy.
+                if !is_legacy_item(&profiles, true) || !is_legacy_item(&source, true) {
+                    return None;
+                }
+                Some(source)
+            } else {
+                Some(base.to_path_buf())
+            }
+        })
+        .filter(|source| can_migrate_legacy_storage(source, target))
+        .enumerate()
+        .max_by_key(|(index, source)| (legacy_storage_priority(source), std::cmp::Reverse(*index)));
+    let Some((_, source)) = source else {
+        return target.to_path_buf();
+    };
+    if other_instance_running() {
+        eprintln!("! Chưa thể xác nhận phiên bản khác đã đóng. Sẽ thử chuyển dữ liệu vào lần khởi động sau.");
+        return source;
+    }
+    let db = source.join("zalo_history.db");
+    if is_legacy_item(&db, false)
+        && matches!(probe_db(&db), Err(error) if error.kind() != std::io::ErrorKind::NotFound)
+    {
+        eprintln!("! Không thể mở độc quyền cơ sở dữ liệu cũ. Sẽ thử chuyển dữ liệu vào lần khởi động sau.");
+        return source;
+    }
+    let report = migrate_and_report(&source, target);
+    if report.errors.is_empty() || !report.moved.is_empty() {
+        target.to_path_buf()
+    } else {
+        source
+    }
+}
+
+#[cfg(windows)]
+fn other_instance_running_after_wait(executable: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::time::{Duration, Instant};
+
+    let Some(name) = executable.file_name() else {
+        return true;
+    };
+    let name: Vec<u16> = name.encode_wide().collect();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match snapshot_has_other_instance(&name) {
+            Ok(false) => return false,
+            Ok(true) => {}
+            Err(error) => {
+                eprintln!("! Không kiểm tra được các phiên bản đang chạy: {error:#}");
+                return true;
+            }
         }
-        if matches!(
-            probe_db(&source.join("zalo_history.db")),
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound
-        ) {
-            eprintln!("! Không thể mở độc quyền cơ sở dữ liệu cũ. Sẽ thử chuyển dữ liệu vào lần khởi động sau.");
-            // Keep using the legacy data for this launch while the old process closes its DB.
-            return source;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
         }
-        if migrate_and_report(source, target) {
+        std::thread::sleep(remaining.min(Duration::from_millis(250)));
+    }
+}
+
+#[cfg(windows)]
+fn snapshot_has_other_instance(name: &[u16]) -> windows::core::Result<bool> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES};
+    use windows::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // SAFETY: For a system-wide process snapshot the second argument is ignored.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? };
+    let own_pid = std::process::id();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: The live snapshot and the writable entry with its size set satisfy ToolHelp.
+    let mut next = unsafe { Process32FirstW(snapshot, &mut entry) };
+    let mut found = false;
+    while next.is_ok() {
+        let end = entry
+            .szExeFile
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        // SAFETY: Both UTF-16 slices are valid for the lengths passed to Windows.
+        if entry.th32ProcessID != own_pid
+            && unsafe { CompareStringOrdinal(&entry.szExeFile[..end], name, true) } == CSTR_EQUAL
+        {
+            found = true;
             break;
         }
+        // SAFETY: The same live snapshot and writable entry advance the enumeration.
+        next = unsafe { Process32NextW(snapshot, &mut entry) };
     }
-    target
+    // SAFETY: This function owns the handle and closes it once after enumeration.
+    let closed = unsafe { CloseHandle(snapshot) };
+    if let Err(error) = next {
+        if error.code() != ERROR_NO_MORE_FILES.to_hresult() {
+            return Err(error);
+        }
+    }
+    closed?;
+    Ok(found)
 }
 
 #[cfg(windows)]
@@ -280,16 +373,23 @@ const LEGACY_FILES: &[&str] = &[
     "sync_rsa_identity.json",
     "sync_v2_keys.json",
 ];
-/// Per-account data (`accounts/<uin>.json`, `<uin>_history.db`, ...).
-const LEGACY_DIRS: &[&str] = &["accounts"];
-/// A working directory only counts as legacy storage when it holds one of these.
-const LEGACY_ANCHORS: &[&str] = &["session.json", "zalo_history.db", "accounts"];
+/// Per-account data and named profiles.
+const LEGACY_DIRS: &[&str] = &["accounts", "profiles"];
+/// Legacy anchors, ordered from strongest to weakest, with their expected types.
+const LEGACY_ANCHORS: &[(&str, bool)] = &[
+    ("session.json", false),
+    ("accounts", true),
+    ("zalo_history.db", false),
+];
+const MIGRATION_STAGING: &str = ".migration-staging";
+const PUBLISH_LIST: &str = "publish-list";
 
 /// Result of [`migrate_legacy_cwd_storage`].
 #[derive(Debug, Default)]
 pub struct MigrationReport {
-    /// Names copied into the new data directory (originals renamed to `*.bak`).
+    /// Names committed to the new data directory.
     pub moved: Vec<String>,
+    /// Migration or backup failures. An empty report means there was nothing to migrate.
     pub errors: Vec<String>,
 }
 
@@ -308,8 +408,10 @@ fn copy_tree_private(source: &Path, destination: &Path) -> Result<u64> {
             total += copy_tree_private(&path, &destination.join(entry.file_name()))?;
         }
         Ok(total)
-    } else {
+    } else if source.is_file() {
         copy_private(source, destination)
+    } else {
+        bail!("không thể sao chép loại tệp này");
     }
 }
 
@@ -330,20 +432,21 @@ fn tree_size(path: &Path) -> std::io::Result<u64> {
 }
 
 /// Free `name.bak` (or `name.bak.N`) next to `path`.
-fn backup_path(path: &Path) -> PathBuf {
+fn backup_path(path: &Path) -> std::io::Result<PathBuf> {
     let base = path.file_name().map(|n| n.to_string_lossy().into_owned());
     let base = base.unwrap_or_default();
-    (0..)
-        .map(|n| {
-            let suffix = if n == 0 {
-                ".bak".to_string()
-            } else {
-                format!(".bak.{n}")
-            };
-            path.with_file_name(format!("{base}{suffix}"))
-        })
-        .find(|p| !p.exists())
-        .unwrap_or_else(|| path.with_file_name(format!("{base}.bak")))
+    let mut n = 0;
+    loop {
+        let candidate = if n == 0 {
+            path.with_file_name(format!("{base}.bak"))
+        } else {
+            path.with_file_name(format!("{base}.bak.{n}"))
+        };
+        if existing_entry(&candidate)?.is_none() {
+            return Ok(candidate);
+        }
+        n += 1;
+    }
 }
 
 fn same_directory(first: &Path, second: &Path) -> bool {
@@ -355,51 +458,203 @@ fn same_directory(first: &Path, second: &Path) -> bool {
 }
 
 fn can_migrate_legacy_storage(source: &Path, target: &Path) -> bool {
+    let staging = target.join(MIGRATION_STAGING);
     !same_directory(source, target)
-        && !LEGACY_ANCHORS.iter().any(|n| target.join(n).exists())
-        && LEGACY_ANCHORS.iter().any(|n| source.join(n).exists())
+        && ((is_legacy_item(&staging, true) && is_legacy_item(&staging.join(PUBLISH_LIST), false))
+            || !LEGACY_ANCHORS
+                .iter()
+                .any(|(name, _)| std::fs::symlink_metadata(target.join(name)).is_ok()))
+        && legacy_storage_priority(source) > 0
+}
+
+fn legacy_storage_priority(source: &Path) -> usize {
+    LEGACY_ANCHORS
+        .iter()
+        .position(|(name, directory)| is_legacy_item(&source.join(name), *directory))
+        .map_or(0, |index| LEGACY_ANCHORS.len() - index)
+}
+
+fn is_legacy_item(path: &Path, directory: bool) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        if directory {
+            metadata.is_dir()
+        } else {
+            metadata.is_file()
+        }
+    })
+}
+
+fn existing_entry(path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn clear_migration_staging(target: &Path, staging: &Path) -> Result<()> {
+    let Some(metadata) = existing_entry(staging)? else {
+        return Ok(());
+    };
+    if !metadata.is_dir() {
+        bail!("thư mục tạm chuyển dữ liệu không hợp lệ");
+    }
+    let list = staging.join(PUBLISH_LIST);
+    if let Some(metadata) = existing_entry(&list)? {
+        if !metadata.is_file() {
+            bail!("danh sách tệp cần chuyển không hợp lệ");
+        }
+        let names = std::fs::read_to_string(&list)?;
+        if !names
+            .lines()
+            .all(|name| LEGACY_FILES.contains(&name) || LEGACY_DIRS.contains(&name))
+        {
+            bail!("danh sách tệp cần chuyển không hợp lệ");
+        }
+        // A listed item missing from staging was published before the interruption.
+        for name in names.lines() {
+            let staged = staging.join(name);
+            let published = target.join(name);
+            if existing_entry(&staged)?.is_none() && existing_entry(&published)?.is_some() {
+                std::fs::rename(&published, &staged)
+                    .with_context(|| format!("Không thể hoàn tác việc chuyển {name}"))?;
+            }
+        }
+        std::fs::remove_file(list)?;
+    }
+    std::fs::remove_dir_all(staging)?;
+    Ok(())
+}
+
+fn stage_legacy_storage(source: &Path, target: &Path, staging: &Path) -> Result<Vec<&'static str>> {
+    let mut staged = Vec::new();
+    let staging_location = staging.canonicalize()?;
+    let items = LEGACY_FILES
+        .iter()
+        .map(|&name| (name, false))
+        .chain(LEGACY_DIRS.iter().map(|&name| (name, true)));
+    for (name, directory) in items {
+        let from = source.join(name);
+        let Some(metadata) = existing_entry(&from)? else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || existing_entry(&target.join(name))?.is_some() {
+            continue;
+        }
+        let result = (|| -> Result<()> {
+            if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
+                bail!("loại tệp không hợp lệ");
+            }
+            if directory && staging_location.starts_with(from.canonicalize()?) {
+                bail!("thư mục tạm nằm trong thư mục nguồn");
+            }
+            let to = staging.join(name);
+            let expected = tree_size(&from)?;
+            let copied = copy_tree_private(&from, &to)?;
+            if copied != expected || tree_size(&to)? != expected {
+                bail!("kích thước bản sao không khớp");
+            }
+            Ok(())
+        })();
+        result.with_context(|| format!("Không sao chép được {name}"))?;
+        staged.push(name);
+    }
+    Ok(staged)
 }
 
 /// Move session, history and settings that older builds kept in a launch directory into the
 /// per-user data directory.
 ///
-/// Non-destructive and idempotent: each item is copied (owner-only), verified by size, and only
-/// then renamed to `<name>.bak` in the source (the `*.bak` pattern is git-ignored). Items already
-/// present in `target` are never overwritten, and nothing happens unless the target holds no
-/// session/history yet and the source holds some. Errors are reported, never fatal.
+/// Copies are staged and size-checked before any item is published. Originals become `*.bak`
+/// once the new copies are in place. Existing target items are preserved.
 pub fn migrate_legacy_cwd_storage(cwd: &Path, target: &Path) -> MigrationReport {
     let mut report = MigrationReport::default();
     if !can_migrate_legacy_storage(cwd, target) {
         return report;
     }
-    for name in LEGACY_FILES.iter().chain(LEGACY_DIRS) {
-        let (from, to) = (cwd.join(name), target.join(name));
-        let is_symlink = std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_symlink());
-        if is_symlink || !from.exists() || to.exists() {
-            continue;
+    let staging = target.join(MIGRATION_STAGING);
+    let list = staging.join(PUBLISH_LIST);
+    let mut published = Vec::new();
+    let result = (|| -> Result<()> {
+        ensure_private_dir(target)?;
+        #[cfg(unix)]
+        let _target_lock = {
+            let directory = std::fs::File::open(target)?;
+            directory.lock()?;
+            directory
+        };
+        // Recheck after locking in case another startup just finished the migration.
+        if !can_migrate_legacy_storage(cwd, target) {
+            return Ok(());
         }
-        let result = (|| -> Result<()> {
-            let expected = tree_size(&from)?;
-            let copied = copy_tree_private(&from, &to)?;
-            if copied != expected || tree_size(&to)? != expected {
-                // Roll the partial copy back so the next launch can retry cleanly.
-                let _ = if to.is_dir() {
-                    std::fs::remove_dir_all(&to)
-                } else {
-                    std::fs::remove_file(&to)
-                };
-                bail!("kích thước bản sao của {name} không khớp");
+        clear_migration_staging(target, &staging).context("Không dọn được dữ liệu tạm cũ")?;
+        if !can_migrate_legacy_storage(cwd, target) {
+            return Ok(());
+        }
+        let mut backups = Vec::new();
+        let migration = (|| -> Result<()> {
+            publish_legacy_storage(cwd, target, &staging, &list, &mut published)?;
+            for &name in &published {
+                let original = cwd.join(name);
+                let backup = backup_path(&original)?;
+                std::fs::rename(&original, &backup)
+                    .with_context(|| format!("Không đổi tên bản gốc của {name}"))?;
+                backups.push((original, backup));
             }
-            std::fs::rename(&from, backup_path(&from))
-                .with_context(|| format!("Không đổi tên bản gốc của {name}"))?;
             Ok(())
         })();
-        match result {
-            Ok(()) => report.moved.push((*name).to_string()),
-            Err(error) => report.errors.push(format!("{name}: {error:#}")),
+        if let Err(error) = migration {
+            report.errors.push(format!("{error:#}"));
+            for (original, backup) in backups.into_iter().rev() {
+                if let Err(error) = std::fs::rename(backup, &original) {
+                    report.errors.push(format!(
+                        "Không khôi phục được bản gốc {}: {error}",
+                        original.display()
+                    ));
+                }
+            }
+            if report.errors.len() > 1 {
+                // Keep the complete target if a backup could not be restored to its source.
+                return Ok(());
+            }
+            let published = std::mem::take(&mut published);
+            if !published.is_empty() && existing_entry(&list)?.is_none() {
+                ensure_private_dir(&staging)?;
+                write_private_atomic(&list, published.join("\n").as_bytes())?;
+            }
+            clear_migration_staging(target, &staging)
+                .context("Không hoàn tác được dữ liệu đã chuyển")?;
         }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        report.errors.push(format!("{error:#}"));
     }
+    report.moved = published.into_iter().map(str::to_owned).collect();
     report
+}
+
+fn publish_legacy_storage(
+    source: &Path,
+    target: &Path,
+    staging: &Path,
+    list: &Path,
+    published: &mut Vec<&'static str>,
+) -> Result<()> {
+    ensure_private_dir(staging)?;
+    let staged = stage_legacy_storage(source, target, staging)?;
+    write_private_atomic(list, staged.join("\n").as_bytes())?;
+    for name in staged {
+        let destination = target.join(name);
+        if existing_entry(&destination)?.is_some() {
+            bail!("đích đến của {name} đã tồn tại");
+        }
+        std::fs::rename(staging.join(name), destination)
+            .with_context(|| format!("Không chuyển được {name} vào thư mục dữ liệu"))?;
+        published.push(name);
+    }
+    std::fs::remove_dir_all(staging).context("Không xóa được thư mục tạm chuyển dữ liệu")?;
+    Ok(())
 }
 
 fn create_private_file(parent: &Path, prefix: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
@@ -952,7 +1207,7 @@ mod tests {
         let missing_db = |_: &Path| Err(std::io::ErrorKind::NotFound.into());
 
         assert_eq!(
-            migrate_windows_storage(&cwd, &exe, &target, missing_db),
+            migrate_windows_storage(&cwd, &exe, &target, false, || false, missing_db),
             target
         );
         assert_eq!(
@@ -964,7 +1219,7 @@ mod tests {
 
         let second_target = root.join("second-storage");
         assert_eq!(
-            migrate_windows_storage(&cwd, &exe, &second_target, missing_db),
+            migrate_windows_storage(&cwd, &exe, &second_target, false, || false, missing_db),
             second_target
         );
         assert_eq!(
@@ -973,6 +1228,28 @@ mod tests {
         );
         assert!(exe_dir.join("session.json.bak").is_file());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_migration_prefers_session_over_bootstrap_db() {
+        let root = PrivateTempDir::new("ctdozlite-ranking-test").unwrap();
+        let cwd = root.path().join("cwd");
+        let exe = root.path().join("bin/zalo-next.exe");
+        let exe_dir = exe.parent().unwrap();
+        let target = root.path().join("storage");
+        write(&cwd.join("zalo_history.db"), b"");
+        write(&exe_dir.join("session.json"), b"session fixture");
+        write(&exe_dir.join("zalo_history.db"), b"history fixture");
+
+        assert_eq!(
+            migrate_windows_storage(&cwd, &exe, &target, false, || false, |_| Ok(())),
+            target
+        );
+        assert_eq!(
+            std::fs::read(target.join("zalo_history.db")).unwrap(),
+            b"history fixture"
+        );
+        assert!(cwd.join("zalo_history.db").is_file());
     }
 
     #[test]
@@ -988,7 +1265,10 @@ mod tests {
             write(&source.join("zalo_history.db"), b"db fixture");
         }
         let locked = |_: &Path| Err(std::io::ErrorKind::PermissionDenied.into());
-        assert_eq!(migrate_windows_storage(&cwd, &exe, &target, locked), cwd);
+        assert_eq!(
+            migrate_windows_storage(&cwd, &exe, &target, false, || false, locked),
+            cwd
+        );
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
         assert!(cwd.join("session.json").is_file());
         assert!(exe_dir.join("session.json").is_file());
@@ -996,23 +1276,118 @@ mod tests {
         let clean_cwd = root.join("empty-cwd");
         std::fs::create_dir(&clean_cwd).unwrap();
         assert_eq!(
-            migrate_windows_storage(&clean_cwd, &exe, &target, locked),
+            migrate_windows_storage(&clean_cwd, &exe, &target, false, || false, locked),
             exe_dir
         );
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
         assert!(exe_dir.join("zalo_history.db").is_file());
 
         assert_eq!(
-            migrate_windows_storage(&cwd, &exe, &target, |_| Ok(())),
+            migrate_windows_storage(&cwd, &exe, &target, false, || false, |_| Ok(())),
             target
         );
         assert!(target.join("zalo_history.db").is_file());
         assert!(cwd.join("zalo_history.db.bak").is_file());
         assert_eq!(
-            migrate_windows_storage(&clean_cwd, &exe, &target, locked),
+            migrate_windows_storage(&clean_cwd, &exe, &target, false, || false, locked),
             target
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_migration_uses_legacy_after_staging_fails() {
+        let root = PrivateTempDir::new("ctdozlite-fallback-test").unwrap();
+        let cwd = root.path().join("cwd");
+        let exe = root.path().join("bin/zalo-next.exe");
+        let target = root.path().join("storage");
+        write(&cwd.join("session.json"), b"session fixture");
+        write(&cwd.join("zalo_history.db-wal/unexpected"), b"bad WAL");
+        write(&exe.parent().unwrap().join("session.json"), b"alternate");
+
+        assert_eq!(
+            migrate_windows_storage(&cwd, &exe, &target, false, || false, |_| Ok(())),
+            cwd
+        );
+        assert!(!target.join("session.json").exists());
+        assert!(cwd.join("session.json").is_file());
+        assert!(exe.parent().unwrap().join("session.json").is_file());
+    }
+
+    #[test]
+    fn windows_named_profile_migrates_from_executable_directory_after_wait_and_probe() {
+        let root = PrivateTempDir::new("ctdozlite-profile-test").unwrap();
+        let cwd = root.path().join("cwd");
+        let exe = root.path().join("bin/zalo-next.exe");
+        let local_app_data = root.path().join("Local");
+        let (target, _) = resolve(
+            &["--profile=work!".into()],
+            &cwd,
+            &exe,
+            Platform::Windows(Some(&local_app_data)),
+        )
+        .unwrap();
+        let source = exe.parent().unwrap().join("profiles/work");
+        let db = source.join("zalo_history.db");
+        write(&db, b"profile history");
+        write(&cwd.join("session.json"), b"default login");
+        write(
+            &cwd.join("profiles/personal/session.json"),
+            b"other profile",
+        );
+
+        assert_eq!(
+            migrate_windows_storage(
+                &cwd,
+                &exe,
+                &target,
+                true,
+                || true,
+                |_| panic!("DB probe ran while another instance was still running"),
+            ),
+            source
+        );
+        assert!(!target.exists());
+        let waited = std::cell::Cell::new(false);
+        let check = || {
+            waited.set(true);
+            false
+        };
+        assert_eq!(
+            migrate_windows_storage(&cwd, &exe, &target, true, check, |path| {
+                assert!(waited.get());
+                assert_eq!(path, db);
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }),
+            source
+        );
+        assert!(!target.exists());
+        assert!(db.is_file());
+
+        assert_eq!(
+            migrate_windows_storage(&cwd, &exe, &target, true, || false, |_| Ok(())),
+            target
+        );
+        assert_eq!(
+            std::fs::read(target.join("zalo_history.db")).unwrap(),
+            b"profile history"
+        );
+        assert!(source.join("zalo_history.db.bak").is_file());
+        assert!(cwd.join("session.json").is_file());
+        assert!(cwd.join("profiles/personal/session.json").is_file());
+        write(&source.join("session.json"), b"legacy profile login");
+        assert_eq!(
+            migrate_windows_storage(
+                &cwd,
+                &exe,
+                &target,
+                true,
+                || panic!("Existing target profile must bypass the wait"),
+                |_| panic!("Existing target profile must bypass the probe"),
+            ),
+            target
+        );
+        assert!(source.join("session.json").is_file());
     }
 
     #[test]
@@ -1024,6 +1399,7 @@ mod tests {
         write(&cwd.join("zalo_history.db-wal"), b"wal fixture");
         write(&cwd.join("accounts/1234.json"), b"account fixture");
         write(&cwd.join("accounts/1234_history.db"), b"account db");
+        write(&cwd.join("profiles/work/session.json"), b"profile session");
         write(&cwd.join("unrelated.txt"), b"keep me");
         write(&cwd.join("README.md"), b"keep me too");
         prepare(&target, true).unwrap();
@@ -1050,6 +1426,11 @@ mod tests {
             b"session fixture"
         );
         assert!(cwd.join("accounts.bak/1234.json").is_file());
+        assert_eq!(
+            std::fs::read(target.join("profiles/work/session.json")).unwrap(),
+            b"profile session"
+        );
+        assert!(cwd.join("profiles.bak/work/session.json").is_file());
         assert!(!cwd.join("session.json").exists());
         assert_eq!(
             std::fs::read(cwd.join("unrelated.txt")).unwrap(),
@@ -1068,6 +1449,93 @@ mod tests {
         let again = migrate_legacy_cwd_storage(&cwd, &target);
         assert!(again.moved.is_empty() && again.errors.is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_leaves_sources_and_target_intact_after_a_staging_failure() {
+        let root = PrivateTempDir::new("ctdozlite-staging-test").unwrap();
+        let (cwd, target) = (root.path().join("repo"), root.path().join("support"));
+        write(&cwd.join("session.json"), b"session fixture");
+        write(&cwd.join("zalo_history.db"), b"db fixture");
+        write(&cwd.join("zalo_history.db-wal/unexpected"), b"bad WAL");
+        write(&target.join(".migration-staging/stale"), b"stale copy");
+        write(&target.join("theme.json"), b"target theme");
+        write(&cwd.join("theme.json"), b"source theme");
+
+        let failed = migrate_legacy_cwd_storage(&cwd, &target);
+        assert!(!failed.errors.is_empty());
+        assert!(failed.moved.is_empty());
+        assert!(cwd.join("session.json").is_file());
+        assert!(cwd.join("zalo_history.db").is_file());
+        assert!(cwd.join("zalo_history.db-wal/unexpected").is_file());
+        assert!(!cwd.join("session.json.bak").exists());
+        assert!(!cwd.join("zalo_history.db.bak").exists());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+        assert!(!target.join(".migration-staging").exists());
+
+        std::fs::remove_dir_all(cwd.join("zalo_history.db-wal")).unwrap();
+        write(&cwd.join("zalo_history.db-wal"), b"wal fixture");
+        let retried = migrate_legacy_cwd_storage(&cwd, &target);
+        assert!(retried.errors.is_empty(), "{:?}", retried.errors);
+        assert_eq!(retried.moved.len(), 3);
+        assert_eq!(
+            std::fs::read(target.join("zalo_history.db-wal")).unwrap(),
+            b"wal fixture"
+        );
+        assert_eq!(
+            std::fs::read(target.join("theme.json")).unwrap(),
+            b"target theme"
+        );
+        assert!(cwd.join("theme.json").is_file());
+        assert!(!target.join(".migration-staging").exists());
+    }
+
+    #[test]
+    fn migration_retries_after_an_interrupted_publish() {
+        let root = PrivateTempDir::new("ctdozlite-interrupted-test").unwrap();
+        let (cwd, target) = (root.path().join("repo"), root.path().join("support"));
+        let staging = target.join(MIGRATION_STAGING);
+        write(&cwd.join("session.json"), b"session fixture");
+        write(&cwd.join("zalo_history.db"), b"db fixture");
+        write(&target.join("session.json"), b"interrupted session copy");
+        write(&staging.join("zalo_history.db"), b"interrupted db copy");
+        write(
+            &staging.join(PUBLISH_LIST),
+            b"session.json\nzalo_history.db",
+        );
+
+        let retried = migrate_legacy_cwd_storage(&cwd, &target);
+        assert!(retried.errors.is_empty(), "{:?}", retried.errors);
+        assert_eq!(retried.moved, ["session.json", "zalo_history.db"]);
+        assert_eq!(
+            std::fs::read(target.join("session.json")).unwrap(),
+            b"session fixture"
+        );
+        assert_eq!(
+            std::fs::read(target.join("zalo_history.db")).unwrap(),
+            b"db fixture"
+        );
+        assert!(cwd.join("session.json.bak").is_file());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn migration_rejects_a_target_inside_the_legacy_profiles_tree() {
+        let root = PrivateTempDir::new("ctdozlite-overlap-test").unwrap();
+        let source = root.path();
+        let target = source.join("profiles/target");
+        write(&source.join("session.json"), b"default session");
+        write(
+            &source.join("profiles/work/session.json"),
+            b"profile session",
+        );
+
+        let report = migrate_legacy_cwd_storage(source, &target);
+        assert!(!report.errors.is_empty());
+        assert!(report.moved.is_empty());
+        assert!(source.join("session.json").is_file());
+        assert!(source.join("profiles/work/session.json").is_file());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
     }
 
     #[test]
