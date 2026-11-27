@@ -1129,3 +1129,46 @@ Entry template:
   - redirect hops on automatic session-client image loads;
   - an album cell can't open the original after its thumbnail failed.
 - Status: committed locally, not pushed.
+
+## 2026-11-27 — Windows colour emoji (COLR renderer) and Windows parity fixes  (agent: Claude Code, claude-opus-5-5 (orchestrator) + Codex (read-only OS audit, 2 review rounds))
+- Request: colour emoji still plain on Windows (fixed on macOS earlier); then find and fix other OS gaps.
+- Root cause: `emoji_raster` only read embedded PNG strikes (`sbix`/`CBDT`). Windows' Segoe UI Emoji is a
+  `COLR` vector font (v0 on Windows 10, v1 on 11), so `glyph_raster_image` returned nothing and every emoji
+  fell back to egui's monochrome glyph. No call site was macOS-gated; only the font reader was.
+- Changes:
+  - New `src/emoji_raster/colr.rs`: COLR v0+v1 renderer on `ttf_parser::colr::Painter`. Outlines are
+    flattened and filled with `ab_glyph_rasterizer` (already in the tree via egui; now a direct dep, no new
+    crate), with segments clamped to the canvas so the row-major accumulator cannot wrap. Solid/linear/
+    radial (two-point conical)/sweep paints per pixel, gradients interpolated in linear light (OpenType
+    CPAL spec), sweep angles with the +1.0 bias, all Porter-Duff and W3C blend modes for PaintComposite.
+    Canvas capped at 8×em (em ≤ 160 px) and ≤8 colour glyphs per cluster (untrusted message text).
+  - `emoji_raster.rs`: bitmap first, else paint every shaped glyph (so unsupported sequences/flags render as
+    Windows does); Segoe path from `%WINDIR%` via new `src/system_fonts.rs` (read into memory, not
+    mmapped, since the env var could point anywhere), also used by `theme.rs` for the Windows UI/CJK fonts. Flag assertions tolerate Segoe's monochrome flags (would have broken Windows CI).
+  - From the Codex audit (verified against code first): Windows drag-drop reads the live cursor with
+    `GetCursorPos`; Linux drops always go to preview (stale pointer could quick-send); quick send now needs the
+    last hover frame and the live cursor to agree. Windows screenshot uses `ShellExecuteW` (no PowerShell
+    console flash) and reports launch failure; it still asks for Ctrl+V (see review).
+    Attachment names that are Windows device names (`CON`, `nul.txt`, `COM1`, `COM²`…) get a `_` prefix.
+    macOS hover/menu labels say Cmd+V / Cmd+F.
+- Verification: `cargo test --locked` all green (434 lib + integration). No clippy warnings on changed lines.
+  COLR checked by eye on Noto-COLRv1 (v1: gradients, composites, transforms) and Twemoji Mozilla (v0):
+  `ZALO_COLR_TEST_FONT=<font.ttf> ZALO_COLR_TEST_OUT=<dir> cargo test --locked --lib rasterizes_colr_font_from_env`
+  writes `colr_sheet.png`. Windows-only blocks (drag cursor, ShellExecute helper, screenshot wait) were
+  type-checked on macOS by temporarily flipping their cfg; they were never compiled for or run on Windows.
+- NOT verified: real Segoe UI Emoji on Windows 10/11 (no copy here), any Windows/Linux build or GUI run,
+  drop-zone behaviour under mixed-DPI monitors.
+- Review (`codex review --scope working-tree`, 2 rounds, cap reached):
+  - round 1 (9 findings): fixed canvas/glyph cap, flag test that would fail on Windows CI, linear-light
+    gradient interpolation, sweep-angle bias, drop race (hover+live must agree), superscript device names,
+    changelog wording; kept two for round 2.
+  - round 2 (6): dropped the Windows auto-attach of snips (could attach an unrelated clipboard image, or land
+    in another chat if the user switched), clamped the COLR size, Segoe read into memory instead of mmap.
+  - Remaining, accepted: on Windows a file can still quick-send if the user releases over the composer and
+    moves back into the messages within one frame (~16 ms) — winit drops the native drop position.
+- Open (audit, need owner decisions): Windows data dir is the launch directory (move to %LOCALAPPDATA% with
+  migration?); Windows updater relaunch/installer flow; no Windows/Linux desktop notifications; release EXE
+  has no console for `--version`/TUI; PDF helper lacks Job Object limits; no ACL hardening on Windows; FFmpeg
+  only via WinGet; Linux AppImage self-update path, tray, apt-only FFmpeg; Windows CI only on tags/labels.
+  Inferred only (need a live Windows session): image-only Ctrl+V quick taps missed; Telex Space recovery.
+- Status: committed locally, not pushed.
