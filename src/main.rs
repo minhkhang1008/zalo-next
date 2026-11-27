@@ -45,8 +45,15 @@ fn activate_logged_in_account(s: &Session) {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Short-lived runtime for the async steps that run before the GUI or TUI starts. The GUI never
+/// keeps one: its worker owns the only runtime in GUI mode (`gui/worker.rs`).
+fn startup_runtime() -> Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?)
+}
+
+fn main() -> Result<()> {
     let (wait_pid, args) = updater::take_wait_for_pid(std::env::args().skip(1).collect());
     // Relaunched by the updater: never run next to the old instance (shared session and
     // database). If it has not exited in time, quit; the old instance keeps running.
@@ -66,7 +73,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if args.iter().any(|a| a == "--check-update") {
-        match gui::check_github_release_cli().await {
+        match startup_runtime()?.block_on(gui::check_github_release_cli()) {
             Ok(info) => {
                 if info.has_update {
                     println!(
@@ -105,7 +112,7 @@ async fn main() -> Result<()> {
         }
     }
     let data_path = data_dir::initialize(&args)?;
-    zalo_rust::video_tools::refresh(&data_path).await;
+    startup_runtime()?.block_on(zalo_rust::video_tools::refresh(&data_path));
     if args.iter().any(|a| a == "--print-data-dir") {
         println!("{}", data_path.display());
         return Ok(());
@@ -269,6 +276,20 @@ async fn main() -> Result<()> {
         return res;
     }
 
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_tui_mode(s, args, dev_mode, force_qr, session_restored))
+}
+
+/// Validate or create the session, load threads, then run the TUI.
+async fn run_tui_mode(
+    mut s: Session,
+    args: Vec<String>,
+    dev_mode: bool,
+    force_qr: bool,
+    session_restored: bool,
+) -> Result<()> {
     // 1. Initial server info check for TUI mode
     if let Ok(resp) = login::get_server_info(&s).await {
         if let Some(d) = resp.get("data") {
