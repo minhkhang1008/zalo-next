@@ -251,6 +251,10 @@ mod tests {
     /// Exercises the real system font; skipped where it is not installed.
     #[test]
     fn rasterizes_single_and_sequence_emoji_when_font_present() {
+        // Every supported Windows ships Segoe UI Emoji, so a miss there is a path bug, not a
+        // missing font; fail loudly so a green Windows CI run proves the COLR path ran.
+        #[cfg(windows)]
+        assert!(emoji_font().is_some(), "Segoe UI Emoji not found");
         if emoji_font().is_none() {
             return;
         }
