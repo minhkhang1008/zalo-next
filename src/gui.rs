@@ -1192,9 +1192,14 @@ impl ZaloGuiApp {
             return;
         }
         self.storage_settings.confirmation = None;
+        let download_dir = self.settings.download_dir.trim();
         let command = WorkerCmd::ClearStorage {
             target,
             expected_account: self.user_uin.clone(),
+            protected: (!download_dir.is_empty())
+                .then(|| std::path::PathBuf::from(download_dir))
+                .into_iter()
+                .collect(),
         };
         self.storage_settings.busy = WORKER_TX.get().is_some_and(|tx| tx.send(command).is_ok());
         self.storage_settings.clear_result = if self.storage_settings.busy {

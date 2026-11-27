@@ -79,11 +79,15 @@ pub fn scan(data_dir: &Path, current_account: Option<&str>) -> Usage {
 
 /// Clear eligible files at least ten minutes old, preserving the cache roots.
 /// A current-account-only clear requires an account ID.
+///
+/// `protected` lists folders the user chose for their own files (the download folder): any of
+/// them inside the data directory is left alone, with everything under it.
 pub fn clear(
     data_dir: &Path,
     target: ClearTarget,
     current_account: Option<&str>,
     now: SystemTime,
+    protected: &[PathBuf],
 ) -> ClearReport {
     if target
         == (ClearTarget::Media {
@@ -99,12 +103,20 @@ pub fn clear(
             ..ClearReport::default()
         };
     };
+    // Only folders strictly inside the data directory matter; a protected folder that contains
+    // the whole data directory would otherwise exempt everything.
+    let protected = protected
+        .iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .filter(|path| path.starts_with(&root) && *path != root)
+        .collect();
     let mut walk = Walk::new(
         current_account,
         Some(Cleanup {
             root: &root,
             target,
             now,
+            protected,
         }),
     );
     walk.layout(&root, Layout::Root, 0);
@@ -134,6 +146,15 @@ fn unchanged_path(path: &Path) -> io::Result<()> {
 
 fn real_directory(meta: &Metadata) -> bool {
     meta.is_dir() && !platform::is_link(meta)
+}
+
+fn is_committed_media(name: &OsStr) -> bool {
+    let bytes = name.as_encoded_bytes();
+    bytes.len() == 70
+        && bytes.ends_with(b".media")
+        && bytes[..64]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 
 fn is_account_hash(name: &OsStr) -> bool {
@@ -241,6 +262,7 @@ struct Cleanup<'a> {
     root: &'a Path,
     target: ClearTarget,
     now: SystemTime,
+    protected: Vec<PathBuf>,
 }
 
 struct Walk<'a> {
@@ -309,7 +331,26 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// A folder the user keeps their own files in (see [`clear`]'s `protected`).
+    fn protected(&mut self, dir: &Path) -> bool {
+        let hit = self
+            .cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.protected.iter().any(|p| dir.starts_with(p)));
+        if hit {
+            self.report.skipped += 1;
+            let message = "Bỏ qua thư mục Tải về nằm trong thư mục dữ liệu.";
+            if !self.report.errors.iter().any(|e| e == message) {
+                self.report.errors.push(message.into());
+            }
+        }
+        hit
+    }
+
     fn tree(&mut self, path: &Path, category: Category, depth: usize, keep_root: bool) {
+        if self.protected(path) {
+            return;
+        }
         let Some(entries) = self.read_dir(path, depth) else {
             return;
         };
@@ -341,7 +382,10 @@ impl<'a> Walk<'a> {
         }
     }
 
-    fn media(&mut self, path: &Path, kind: MediaKind, current: bool, depth: usize) {
+    fn media(&mut self, path: &Path, _kind: MediaKind, current: bool, depth: usize) {
+        if self.protected(path) {
+            return;
+        }
         let Some(entries) = self.read_dir(path, depth) else {
             return;
         };
@@ -366,10 +410,9 @@ impl<'a> Walk<'a> {
             let Some(meta) = self.metadata(&path) else {
                 continue;
             };
-            if !meta.is_file()
-                || (matches!(kind, MediaKind::Video)
-                    && path.extension() != Some(OsStr::new("media")))
-            {
+            // Only committed cache entries (`<64 hex>.media`, see PrivateMediaCache): never a
+            // download still being written (`*.privatepart`) or a file put there by hand.
+            if !meta.is_file() || !is_committed_media(&entry.file_name()) {
                 continue;
             }
             if self.cleanup.is_some() {
@@ -409,6 +452,16 @@ impl<'a> Walk<'a> {
             self.measure(category, meta.len());
             return;
         };
+        // A pasted image waits in `stickers_cache/clipboard_*.png` until the message is sent,
+        // however long the composer keeps it.
+        if category == Category::Cache
+            && path
+                .file_name()
+                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"clipboard_"))
+        {
+            self.report.skipped += 1;
+            return;
+        }
         let result = if category == Category::Logs {
             cleanup.truncate_log(path, meta)
         } else {
@@ -539,13 +592,23 @@ impl Cleanup<'_> {
         if platform::is_link(&before) || !before.is_file() || !platform::one_link(&before) {
             return Ok(None);
         }
-        let file = fs::OpenOptions::new().write(true).open(path)?;
-        let opened = file.metadata()?;
-        if !platform::same_file(&before, &opened) || !self.old_enough(&opened)? {
-            return Ok(None);
+        #[cfg(unix)]
+        {
+            let file = fs::OpenOptions::new().write(true).open(path)?;
+            let opened = file.metadata()?;
+            if !platform::same_file(&before, &opened) || !self.old_enough(&opened)? {
+                return Ok(None);
+            }
+            file.set_len(0)?;
+            Ok(Some(opened.len()))
         }
-        file.set_len(0)?;
-        Ok(Some(opened.len()))
+        // Without a link count to check, remove the name instead: deleting one hard link never
+        // touches the data behind another name. A log held open by a writer fails to delete.
+        #[cfg(not(unix))]
+        {
+            fs::remove_file(path)?;
+            Ok(Some(before.len()))
+        }
     }
 }
 
@@ -578,18 +641,11 @@ mod platform {
         }
     }
 
-    /// Whether two metadata snapshots describe the same file (Unix device and inode).
+    /// Whether two metadata snapshots describe the same file (device and inode).
+    #[cfg(unix)]
     pub(super) fn same_file(first: &Metadata, second: &Metadata) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            first.dev() == second.dev() && first.ino() == second.ino()
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (first, second);
-            true
-        }
+        use std::os::unix::fs::MetadataExt;
+        first.dev() == second.dev() && first.ino() == second.ino()
     }
 }
 
@@ -613,6 +669,11 @@ mod tests {
         path
     }
 
+    /// A committed cache entry name (`<64 hex>.media`), distinct per `n`.
+    fn entry(n: u8) -> String {
+        format!("{}.media", format!("{n:02x}").repeat(32))
+    }
+
     fn media_dir(kind: &str, account: &str) -> PathBuf {
         let hash = format!("{:x}", Sha256::digest(account.as_bytes()));
         Path::new("media_cache").join(kind).join(hash)
@@ -631,13 +692,14 @@ mod tests {
         write(root, "video_tools/ffmpeg", b"mnop");
         write(root, "stickers_cache/thumbs/sticker.png", b"qrst");
         write(root, "media_cache/notification_avatar/avatar.png", b"uvw");
+        write(root, media_dir("video", CURRENT).join(entry(1)), b"12345");
+        write(root, media_dir("voice", CURRENT).join(entry(2)), b"123");
+        write(root, media_dir("voice", OTHER).join(entry(3)), b"123456");
         write(
             root,
-            media_dir("video", CURRENT).join("current.media"),
-            b"12345",
+            media_dir("voice", CURRENT).join("x.drop.privatepart"),
+            b"partial",
         );
-        write(root, media_dir("voice", CURRENT).join("recording"), b"123");
-        write(root, media_dir("voice", OTHER).join("recording"), b"123456");
         write(root, "call.log", b"1234567");
         write(root, "log.txt", b"1");
         write(root, "cache/legacy", b"12");
@@ -709,7 +771,7 @@ mod tests {
                 .unwrap();
         }
 
-        let report = clear(root, ClearTarget::Cache, None, now);
+        let report = clear(root, ClearTarget::Cache, None, now, &[]);
         assert_eq!(
             report,
             ClearReport {
@@ -737,7 +799,7 @@ mod tests {
         let nested = write(root, "profiles/test/nested.log", b"keep");
         let inside_log_named_dir = write(root, "directory.log/inner", b"keep");
 
-        let report = clear(root, ClearTarget::Logs, None, SystemTime::now() + HOUR);
+        let report = clear(root, ClearTarget::Logs, None, SystemTime::now() + HOUR, &[]);
         assert_eq!(
             report,
             ClearReport {
@@ -758,18 +820,15 @@ mod tests {
     fn clear_current_media_preserves_other_accounts_and_unrecognized_files() {
         let dir = fixture();
         let root = dir.path();
-        let video = write(
+        let video = write(root, media_dir("video", CURRENT).join(entry(4)), b"video");
+        let voice = write(root, media_dir("voice", CURRENT).join(entry(5)), b"voice");
+        let other_video = write(root, media_dir("video", OTHER).join(entry(6)), b"keep");
+        let other_voice = write(root, media_dir("voice", OTHER).join(entry(7)), b"keep");
+        let partial = write(
             root,
-            media_dir("video", CURRENT).join("video.media"),
-            b"video",
+            media_dir("voice", CURRENT).join("y.drop.privatepart"),
+            b"keep",
         );
-        let voice = write(
-            root,
-            media_dir("voice", CURRENT).join("recording"),
-            b"voice",
-        );
-        let other_video = write(root, media_dir("video", OTHER).join("video.media"), b"keep");
-        let other_voice = write(root, media_dir("voice", OTHER).join("recording"), b"keep");
         let saved = write(root, media_dir("video", CURRENT).join("saved.mp4"), b"keep");
         let misplaced = write(root, "media_cache/video/unknown/video.media", b"keep");
         let target = ClearTarget::Media {
@@ -777,10 +836,10 @@ mod tests {
         };
         let now = SystemTime::now() + HOUR;
 
-        assert_eq!(clear(root, target, None, now), ClearReport::default());
+        assert_eq!(clear(root, target, None, now, &[]), ClearReport::default());
         assert!(video.is_file());
         assert_eq!(
-            clear(root, target, Some(CURRENT), now),
+            clear(root, target, Some(CURRENT), now, &[]),
             ClearReport {
                 freed: 10,
                 removed: 2,
@@ -792,7 +851,7 @@ mod tests {
             assert!(!path.exists());
             assert!(path.parent().unwrap().is_dir());
         }
-        for path in [&other_video, &other_voice, &saved, &misplaced] {
+        for path in [&other_video, &other_voice, &saved, &misplaced, &partial] {
             assert_eq!(fs::read(path).unwrap(), b"keep");
         }
 
@@ -800,7 +859,7 @@ mod tests {
             current_account_only: false,
         };
         assert_eq!(
-            clear(root, all_media, None, now),
+            clear(root, all_media, None, now, &[]),
             ClearReport {
                 freed: 8,
                 removed: 2,
@@ -811,6 +870,7 @@ mod tests {
         assert!(!other_video.exists());
         assert!(!other_voice.exists());
         assert!(misplaced.is_file());
+        assert!(partial.is_file());
         assert!(saved.is_file());
     }
 
@@ -826,7 +886,13 @@ mod tests {
         let nested_nonlegacy = write(root, "accounts/user-1/dir/media_cache/keep", b"keep");
         let avatar = write(root, "media_cache/notification_avatar/keep", b"keep");
 
-        let report = clear(root, ClearTarget::Foreign, None, SystemTime::now() + HOUR);
+        let report = clear(
+            root,
+            ClearTarget::Foreign,
+            None,
+            SystemTime::now() + HOUR,
+            &[],
+        );
         assert_eq!(
             report,
             ClearReport {
@@ -861,7 +927,13 @@ mod tests {
         symlink(&outside_file, &link).unwrap();
         symlink(outside.path(), root.join("media_cache")).unwrap();
 
-        let report = clear(root, ClearTarget::Cache, None, SystemTime::now() + HOUR);
+        let report = clear(
+            root,
+            ClearTarget::Cache,
+            None,
+            SystemTime::now() + HOUR,
+            &[],
+        );
         assert_eq!(
             report,
             ClearReport {
@@ -875,6 +947,30 @@ mod tests {
         assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
         assert_eq!(fs::read(outside_file).unwrap(), b"keep");
         assert_eq!(scan(root, None).total, 0);
+    }
+
+    #[test]
+    fn download_folder_inside_the_data_dir_and_pasted_images_are_never_cleared() {
+        let dir = fixture();
+        let root = dir.path();
+        let saved = write(root, "media/downloads/photo.jpg", b"keep");
+        let legacy = write(root, "media/old", b"old");
+        let pasted = write(root, "stickers_cache/clipboard_1.png", b"keep");
+        let downloads = root.join("media/downloads");
+        let now = SystemTime::now() + HOUR;
+
+        let report = clear(root, ClearTarget::Foreign, None, now, &[downloads]);
+        assert_eq!(fs::read(&saved).unwrap(), b"keep");
+        assert!(!legacy.exists());
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.errors.len(), 1);
+
+        clear(root, ClearTarget::Cache, None, now, &[]);
+        assert_eq!(fs::read(pasted).unwrap(), b"keep");
+
+        // A protected folder that contains the whole data directory exempts nothing.
+        let report = clear(root, ClearTarget::Foreign, None, now, &[root.to_path_buf()]);
+        assert!(report.errors.is_empty());
     }
 
     #[test]
@@ -919,7 +1015,7 @@ mod tests {
             ClearTarget::Foreign,
         ] {
             assert_eq!(
-                clear(root, target, Some(CURRENT), SystemTime::now() + HOUR),
+                clear(root, target, Some(CURRENT), SystemTime::now() + HOUR, &[]),
                 ClearReport::default(),
             );
             for path in protected {
@@ -936,7 +1032,13 @@ mod tests {
         let kept = write(root, deep.join("keep"), b"keep");
         let shallow = write(root, "stickers_cache/remove", b"remove");
 
-        let report = clear(root, ClearTarget::Cache, None, SystemTime::now() + HOUR);
+        let report = clear(
+            root,
+            ClearTarget::Cache,
+            None,
+            SystemTime::now() + HOUR,
+            &[],
+        );
         assert_eq!(
             report,
             ClearReport {
@@ -961,7 +1063,7 @@ mod tests {
         symlink(&system, root.join("soft.log")).unwrap();
         fs::hard_link(&system, root.join("hard.log")).unwrap();
 
-        let report = clear(root, ClearTarget::Logs, None, SystemTime::now() + HOUR);
+        let report = clear(root, ClearTarget::Logs, None, SystemTime::now() + HOUR, &[]);
         assert_eq!(
             report,
             ClearReport {
@@ -984,7 +1086,13 @@ mod tests {
         symlink(outside.path(), &alias).unwrap();
         let alias = alias.join(".");
 
-        let report = clear(&alias, ClearTarget::Cache, None, SystemTime::now() + HOUR);
+        let report = clear(
+            &alias,
+            ClearTarget::Cache,
+            None,
+            SystemTime::now() + HOUR,
+            &[],
+        );
         assert_eq!(report.errors.len(), 1);
         assert_eq!(report.removed, 0);
         assert_eq!(scan(&alias, None), Usage::default());
@@ -1005,6 +1113,7 @@ mod tests {
             root: &root,
             target: ClearTarget::Cache,
             now: SystemTime::now() + HOUR,
+            protected: Vec::new(),
         };
 
         // The cache folder is swapped for a link to somewhere else after the walk.

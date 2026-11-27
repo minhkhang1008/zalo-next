@@ -286,6 +286,8 @@ pub enum WorkerCmd {
     ClearStorage {
         target: ClearTarget,
         expected_account: String,
+        /// The user's download folder: never cleared even when it sits in the data directory.
+        protected: Vec<std::path::PathBuf>,
     },
     TriggerScreenshot,
     SendTyping {
@@ -3709,7 +3711,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 .filter(|uin| !uin.is_empty());
                             let tx = gui_tx.clone();
                             tokio::spawn(async move {
-                                let event = if let WorkerCmd::ClearStorage { target, expected_account } = command {
+                                let event = if let WorkerCmd::ClearStorage { target, expected_account, protected } = command {
                                     let result = if target == (ClearTarget::Media { current_account_only: true })
                                         && account.as_deref() != Some(expected_account.as_str())
                                     {
@@ -3722,6 +3724,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 target,
                                                 account.as_deref(),
                                                 std::time::SystemTime::now(),
+                                                &protected,
                                             )
                                         }).await
                                     };
