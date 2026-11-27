@@ -8,6 +8,12 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+### Security (Bảo mật)
+- **Tự cập nhật an toàn hơn:** chỉ cài khi kiểm tra được mã SHA-256 (thiếu mã thì hướng dẫn tải thủ công); chỉ tải từ trang phát hành của repo này, kể cả khi bị chuyển hướng.
+- **Không tự tải ảnh từ máy chủ lạ:** ảnh, album, ảnh bìa video và ảnh xem trước liên kết từ máy chủ ngoài Zalo chỉ hiện khi bạn bấm **Hiện ảnh**. Ảnh từ Zalo vẫn hiện như cũ. Mọi lượt tải ảnh đều có giới hạn dung lượng và không gửi cookie Zalo tới máy chủ khác.
+- Cookie phiên `zpw_sek` không bao giờ được gửi qua kết nối không mã hoá; tệp `threads_cache.json` chỉ chủ máy đọc được (quyền `0600`).
+- Ảnh lỗi không còn bị tải lại liên tục; bấm để thử lại.
+
 ## [0.4.0] - 2026-11-17
 
 Bản cập nhật lớn: đổi tên thành **Zalo-next**, trợ lý AI `@AI`, giao diện tùy biến, cuộc gọi đến hoạt động trở lại.
