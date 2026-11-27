@@ -113,12 +113,13 @@ pub fn notify_running(dir: &Path) -> bool {
 pub fn serve_show_requests(dir: &Path, wake: impl Fn() + Send + 'static) {
     #[cfg(unix)]
     {
-        let path = socket_path(dir);
-        // Binding touches the filesystem: keep it off the caller (the GUI thread).
+        let dir = dir.to_path_buf();
+        // Resolving and binding touch the filesystem: keep them off the caller (the GUI thread).
         let spawned = std::thread::Builder::new()
             .name("single-instance".into())
             .spawn(move || {
                 use std::io::Read;
+                let path = socket_path(&dir);
                 let listener = match path.as_deref().map(bind_private_socket) {
                     Some(Ok(listener)) => listener,
                     Some(Err(error)) => {
