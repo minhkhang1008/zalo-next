@@ -12,11 +12,27 @@ pub fn macos_default_dir(home: &Path) -> PathBuf {
     home.join("Library/Application Support/ctdozlite")
 }
 
+/// Data directory used on Linux: `$XDG_DATA_HOME/ctdozlite`, else `~/.local/share/ctdozlite`
+/// (XDG Base Directory spec). A relative or empty `XDG_DATA_HOME` is invalid per the spec and is
+/// ignored. `None` when neither variable gives an absolute path.
+pub fn linux_default_dir(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(xdg) = xdg_data_home.filter(|p| p.is_absolute()) {
+        return Some(xdg.join("ctdozlite"));
+    }
+    home.filter(|p| p.is_absolute())
+        .map(|home| home.join(".local/share/ctdozlite"))
+}
+
 /// Platform paths supplied by the caller, independently of the test or build host.
 #[derive(Clone, Copy)]
 pub enum Platform<'a> {
     MacOs(Option<&'a Path>),
     Windows(Option<&'a Path>),
+    /// Linux and other Unix desktops: `$XDG_DATA_HOME`, then `$HOME`.
+    Linux {
+        xdg_data_home: Option<&'a Path>,
+        home: Option<&'a Path>,
+    },
     Other,
 }
 
@@ -111,6 +127,13 @@ pub fn resolve(
         Platform::Windows(Some(local_app_data)) if local_app_data.is_absolute() => {
             (local_app_data.join("ctdozlite"), true)
         }
+        Platform::Linux {
+            xdg_data_home,
+            home,
+        } => match linux_default_dir(xdg_data_home, home) {
+            Some(dir) => (dir, true),
+            None => (cwd.to_path_buf(), false),
+        },
         _ => (cwd.to_path_buf(), false),
     };
     if let Some(prof) = profile_name {
@@ -166,7 +189,14 @@ pub fn initialize(args: &[String]) -> Result<PathBuf> {
     #[cfg(windows)]
     let platform = Platform::Windows(local_app_data.as_deref());
     #[cfg(not(any(target_os = "macos", windows)))]
-    let platform = Platform::Other;
+    let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let platform = Platform::Linux {
+        xdg_data_home: xdg_data_home.as_deref(),
+        home: home.as_deref(),
+    };
     let (path, private) = resolve(args, &cwd, &executable, platform)?;
     let print_only = args.iter().any(|arg| arg == "--print-data-dir");
     let explicit = args
@@ -196,8 +226,18 @@ pub fn initialize(args: &[String]) -> Result<PathBuf> {
     #[cfg(not(windows))]
     let selected = path.clone();
     prepare(&selected, private && selected == path)?;
-    if matches!(platform, Platform::MacOs(_)) && private && !print_only && !explicit && !profile {
-        migrate_and_report(&cwd, &path);
+    // Earlier macOS and Linux builds kept their data in the working directory: copy it over once.
+    // A `--profile` run copies that profile's own legacy folder (`./profiles/<name>`).
+    if matches!(platform, Platform::MacOs(_) | Platform::Linux { .. })
+        && private
+        && !print_only
+        && !explicit
+    {
+        if !profile {
+            migrate_and_report(&cwd, &path);
+        } else if let Some(name) = path.file_name() {
+            migrate_and_report(&cwd.join("profiles").join(name), &path);
+        }
     }
     // Legacy storage callers use relative paths; switch once before creating workers.
     std::env::set_current_dir(&selected)
@@ -1074,6 +1114,58 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn linux_uses_xdg_data_home_then_local_share() {
+        let cwd = Path::new("/work/repo");
+        let exe = Path::new("/usr/bin/zalo-next");
+        let home = Path::new("/home/fixture");
+        let linux = |xdg: Option<&'static str>, home: Option<&'static Path>| Platform::Linux {
+            xdg_data_home: xdg.map(Path::new),
+            home,
+        };
+        assert_eq!(
+            resolve(&[], cwd, exe, linux(Some("/data/xdg"), Some(home))).unwrap(),
+            (PathBuf::from("/data/xdg/ctdozlite"), true)
+        );
+        // A relative XDG_DATA_HOME is invalid per the spec: fall back to HOME.
+        assert_eq!(
+            resolve(&[], cwd, exe, linux(Some("rel/xdg"), Some(home))).unwrap(),
+            (PathBuf::from("/home/fixture/.local/share/ctdozlite"), true)
+        );
+        assert_eq!(
+            resolve(&[], cwd, exe, linux(None, Some(home))).unwrap(),
+            (PathBuf::from("/home/fixture/.local/share/ctdozlite"), true)
+        );
+        // Neither variable usable: the old working-directory behaviour.
+        assert_eq!(
+            resolve(&[], cwd, exe, linux(None, Some(Path::new("rel")))).unwrap(),
+            (cwd.to_path_buf(), false)
+        );
+        assert_eq!(
+            resolve(
+                &["--profile".into(), "work".into()],
+                cwd,
+                exe,
+                linux(None, Some(home))
+            )
+            .unwrap(),
+            (
+                PathBuf::from("/home/fixture/.local/share/ctdozlite/profiles/work"),
+                true
+            )
+        );
+        assert_eq!(
+            resolve(
+                &["--data-dir=/srv/z".into()],
+                cwd,
+                exe,
+                linux(Some("/data/xdg"), Some(home))
+            )
+            .unwrap(),
+            (PathBuf::from("/srv/z"), true)
+        );
+    }
+
+    #[test]
     fn macos_non_bundled_runs_share_application_support() {
         let cwd = Path::new("/work/repo");
         let home = Path::new("/Users/fixture");
@@ -1536,6 +1628,36 @@ mod tests {
         assert!(source.join("session.json").is_file());
         assert!(source.join("profiles/work/session.json").is_file());
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn profile_run_migrates_its_own_legacy_profile_folder() {
+        let root = fixture();
+        let cwd = root.join("repo");
+        let (target, private) = resolve(
+            &["--profile".into(), "work".into()],
+            &cwd,
+            Path::new("/usr/bin/zalo-next"),
+            Platform::Linux {
+                xdg_data_home: Some(&root.join("xdg")),
+                home: None,
+            },
+        )
+        .unwrap();
+        assert!(private);
+        write(&cwd.join("profiles/work/session.json"), b"work session");
+        write(&cwd.join("profiles/home/session.json"), b"home session");
+        prepare(&target, true).unwrap();
+
+        // What `initialize` runs for `--profile work`.
+        let name = target.file_name().unwrap();
+        let report = migrate_legacy_cwd_storage(&cwd.join("profiles").join(name), &target);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            std::fs::read(target.join("session.json")).unwrap(),
+            b"work session"
+        );
+        assert!(cwd.join("profiles/home/session.json").is_file());
     }
 
     #[test]
