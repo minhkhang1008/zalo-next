@@ -6189,8 +6189,8 @@ pub(super) enum DropZone {
 /// A dropped file waiting in the composer preview strip.
 pub(super) struct PendingDropFile {
     pub(super) path: std::path::PathBuf,
-    name: String,
-    is_image: bool,
+    pub(super) name: String,
+    pub(super) is_image: bool,
     /// Filled in from the background `DropThumb` result.
     size: Option<u64>,
     thumb: Option<TextureHandle>,

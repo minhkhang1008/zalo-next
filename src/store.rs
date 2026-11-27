@@ -225,6 +225,150 @@ impl MessageStore {
         Ok(out)
     }
 
+    fn query_stored(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params, |row| {
+            let is_outgoing_num: i64 = row.get(7)?;
+            Ok(StoredMessage {
+                msg_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                sender_id: row.get(2).unwrap_or_default(),
+                sender_name: row.get(3).unwrap_or_default(),
+                text: row.get(4).unwrap_or_default(),
+                msg_type: row.get(5).unwrap_or_default(),
+                ts: row.get(6)?,
+                is_outgoing: is_outgoing_num != 0,
+                raw_json: row.get(8).unwrap_or_default(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Messages of **one** thread whose text, sender name or stored metadata (link URL/title,
+    /// file name, quoted text) contains `query`, newest first. Used by the Assistant's tools.
+    pub fn search_thread_messages(
+        &self,
+        thread_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        self.query_stored(
+            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+             FROM messages
+             WHERE thread_id = ?1
+               AND (LOWER(text) LIKE LOWER(?2) ESCAPE '\\'
+                    OR LOWER(sender_name) LIKE LOWER(?2) ESCAPE '\\'
+                    OR LOWER(raw_json) LIKE LOWER(?2) ESCAPE '\\')
+             ORDER BY ts DESC
+             LIMIT ?3",
+            &[&thread_id, &pattern, &(limit as i64)],
+        )
+    }
+
+    /// Messages of one thread that may carry a link (in the text or as a stored card), newest
+    /// first. Callers filter precisely; this only narrows the scan.
+    pub fn thread_link_candidates(
+        &self,
+        thread_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        self.query_stored(
+            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+             FROM messages
+             WHERE thread_id = ?1
+               AND (text LIKE '%http%' OR text LIKE '%www.%' OR raw_json LIKE '%\"link_url\"%')
+             ORDER BY ts DESC
+             LIMIT ?2",
+            &[&thread_id, &(limit as i64)],
+        )
+    }
+
+    /// Newest `limit` messages of a thread older than `before_ts` (all when `None`), oldest first.
+    pub fn messages_before(
+        &self,
+        thread_id: &str,
+        before_ts: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let mut rows = self.query_stored(
+            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+             FROM messages
+             WHERE thread_id = ?1 AND ts < ?2
+             ORDER BY ts DESC
+             LIMIT ?3",
+            &[&thread_id, &before_ts.unwrap_or(i64::MAX), &(limit as i64)],
+        )?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// One message of a thread by id (`None` if it belongs to another thread).
+    pub fn message_in_thread(
+        &self,
+        thread_id: &str,
+        msg_id: &str,
+    ) -> Result<Option<StoredMessage>> {
+        Ok(self
+            .query_stored(
+                "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+                 FROM messages WHERE thread_id = ?1 AND msg_id = ?2 LIMIT 1",
+                &[&thread_id, &msg_id],
+            )?
+            .into_iter()
+            .next())
+    }
+
+    /// A message of a thread plus `radius` messages before and after it, oldest first. Empty when
+    /// the id is not in that thread.
+    pub fn messages_around(
+        &self,
+        thread_id: &str,
+        msg_id: &str,
+        radius: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let Some(center) = self.message_in_thread(thread_id, msg_id)? else {
+            return Ok(Vec::new());
+        };
+        let mut out = self.query_stored(
+            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+             FROM messages
+             WHERE thread_id = ?1 AND (ts < ?2 OR (ts = ?2 AND msg_id < ?3))
+             ORDER BY ts DESC, msg_id DESC
+             LIMIT ?4",
+            &[&thread_id, &center.ts, &msg_id, &(radius as i64)],
+        )?;
+        out.reverse();
+        let after = self.query_stored(
+            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+             FROM messages
+             WHERE thread_id = ?1 AND (ts > ?2 OR (ts = ?2 AND msg_id > ?3))
+             ORDER BY ts ASC, msg_id ASC
+             LIMIT ?4",
+            &[&thread_id, &center.ts, &msg_id, &(radius as i64)],
+        )?;
+        out.push(center);
+        out.extend(after);
+        Ok(out)
+    }
+
     /// Insert or update thread metadata.
     pub fn upsert_thread(&mut self, t: &StoredThread) -> Result<()> {
         self.conn.execute(
@@ -1679,6 +1823,87 @@ fn import_official_zalo_pc_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(thread: &str, id: &str, ts: i64, text: &str, raw_json: &str) -> StoredMessage {
+        StoredMessage {
+            msg_id: id.into(),
+            thread_id: thread.into(),
+            sender_id: "1".into(),
+            sender_name: "An".into(),
+            text: text.into(),
+            msg_type: "webchat".into(),
+            ts,
+            is_outgoing: false,
+            raw_json: raw_json.into(),
+        }
+    }
+
+    #[test]
+    fn assistant_queries_never_cross_threads() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        for m in [
+            row("A", "a1", 1, "hẹn 7h", ""),
+            row(
+                "A",
+                "a2",
+                2,
+                "",
+                r#"{"link_url":"https://example.org/doc"}"#,
+            ),
+            row("A", "a3", 3, "xem https://x.example/p nhé", ""),
+            row("A", "a4", 4, "100%_ chắc", ""),
+            row(
+                "B",
+                "b1",
+                5,
+                "hẹn 7h bên B https://b.example",
+                r#"{"link_url":"https://example.org/doc"}"#,
+            ),
+        ] {
+            store.upsert_message(&m).unwrap();
+        }
+        let ids = |rows: Vec<StoredMessage>| rows.into_iter().map(|r| r.msg_id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store.search_thread_messages("A", "hẹn", 10).unwrap()),
+            ["a1"]
+        );
+        assert_eq!(
+            ids(store
+                .search_thread_messages("A", "example.org", 10)
+                .unwrap()),
+            ["a2"]
+        );
+        assert_eq!(
+            ids(store.search_thread_messages("A", "%_", 10).unwrap()),
+            ["a4"]
+        );
+        assert!(store
+            .search_thread_messages("A", "  ", 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            ids(store.thread_link_candidates("A", 10).unwrap()),
+            ["a3", "a2"]
+        );
+        assert_eq!(
+            ids(store.messages_before("A", Some(3), 10).unwrap()),
+            ["a1", "a2"]
+        );
+        assert_eq!(
+            ids(store.messages_before("A", None, 2).unwrap()),
+            ["a3", "a4"]
+        );
+        assert_eq!(
+            ids(store.messages_around("A", "a2", 1).unwrap()),
+            ["a1", "a2", "a3"]
+        );
+        assert!(store.messages_around("A", "b1", 5).unwrap().is_empty());
+        assert!(store.message_in_thread("A", "b1").unwrap().is_none());
+        assert_eq!(
+            store.message_in_thread("B", "b1").unwrap().unwrap().msg_id,
+            "b1"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

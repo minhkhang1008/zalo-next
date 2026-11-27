@@ -1282,7 +1282,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                         }
                         WorkerCmd::AiAsk { req } => {
                             let tx = gui_tx.clone();
-                            tokio::spawn(async move { run_ai_ask(req, tx, "zalo_history.db".to_string()).await });
+                            let session = session.clone();
+                            tokio::spawn(async move {
+                                // Only for downloading Zalo-hosted attachments; never sent to the AI host.
+                                let zalo_http = session.lock().await.http.clone();
+                                run_ai_ask(req, tx, "zalo_history.db".to_string(), Some(zalo_http)).await
+                            });
                         }
                         WorkerCmd::AiLoadThread { thread_id } => {
                             let tx = gui_tx.clone();
@@ -4790,7 +4795,12 @@ pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::C
 
 /// Persist the question, ask the Assistant and report the answer. Runs on the worker; nothing here
 /// touches the Zalo session or any Zalo endpoint (INV-5 / INV-6).
-async fn run_ai_ask(mut req: crate::ai::AskRequest, tx: GuiTx, db_path: String) {
+async fn run_ai_ask(
+    mut req: crate::ai::AskRequest,
+    tx: GuiTx,
+    db_path: String,
+    zalo_http: Option<reqwest::Client>,
+) {
     use crate::ai::{AiMessage, AiRole, Turn};
     let fail = |tx: &GuiTx, thread_id: &str, error: String| {
         let _ = tx.send(GuiEvent::AiFailed {
@@ -4799,7 +4809,11 @@ async fn run_ai_ask(mut req: crate::ai::AskRequest, tx: GuiTx, db_path: String) 
         });
     };
     // 1. Persist the question and load local context on the blocking pool.
-    let (user_msg, thread_id, exclude) = (req.user_msg.clone(), req.thread_id.clone(), req.user_msg_id.clone());
+    let (user_msg, thread_id, exclude) = (
+        req.user_msg.clone(),
+        req.thread_id.clone(),
+        req.user_msg_id.clone(),
+    );
     let read_zalo_history = req.share && req.digest.is_none();
     let (thread_name, is_group) = (req.thread_name.clone(), req.is_group);
     let db_for_load = db_path.clone();
@@ -4838,16 +4852,41 @@ async fn run_ai_ask(mut req: crate::ai::AskRequest, tx: GuiTx, db_path: String) 
         .collect();
     // 2. Configuration (env overrides settings; key from env or the private key file).
     let (base_url, model) = (req.base_url.clone(), req.model.clone());
-    let cfg = match tokio::task::spawn_blocking(move || crate::ai::AiConfig::resolve(&base_url, &model)).await {
-        Ok(Ok(cfg)) => cfg,
-        Ok(Err(e)) => return fail(&tx, &req.thread_id, e.to_string()),
-        Err(_) => return fail(&tx, &req.thread_id, "Không đọc được cấu hình trợ lý AI".into()),
-    };
-    // 3. Ask.
-    let answer = crate::ai::answer(&req, &history, |turns, max_tokens| {
-        let cfg = cfg.clone();
-        async move { crate::ai::chat_completion(&cfg, &turns, max_tokens).await }
-    })
+    let cfg =
+        match tokio::task::spawn_blocking(move || crate::ai::AiConfig::resolve(&base_url, &model))
+            .await
+        {
+            Ok(Ok(cfg)) => cfg,
+            Ok(Err(e)) => return fail(&tx, &req.thread_id, e.to_string()),
+            Err(_) => {
+                return fail(
+                    &tx,
+                    &req.thread_id,
+                    "Không đọc được cấu hình trợ lý AI".into(),
+                )
+            }
+        };
+    // 3. Attachments (bounded downloads from Zalo hosts or local files only).
+    let extras = resolve_ai_extras(&req.attachments, zalo_http.as_ref()).await;
+    // 4. Ask, with read-only tools over this conversation when sharing is on.
+    let tool_ctx = std::sync::Arc::new(AiToolCtx {
+        db_path: db_path.clone(),
+        thread_id: req.thread_id.clone(),
+        thread_name: req.thread_name.clone(),
+        is_group: req.is_group,
+        lines: req.transcript.clone(),
+        zalo_http: zalo_http.clone(),
+    });
+    let answer = crate::ai::answer_with(
+        &req,
+        &history,
+        &extras,
+        |turns, tools, max_tokens| {
+            let cfg = cfg.clone();
+            async move { crate::ai::chat_request(&cfg, &turns, tools.as_ref(), max_tokens).await }
+        },
+        |call| run_ai_tool(call, tool_ctx.clone()),
+    )
     .await;
     let answer = match answer {
         Ok(a) => a,
@@ -4871,6 +4910,365 @@ async fn run_ai_ask(mut req: crate::ai::AskRequest, tx: GuiTx, db_path: String) 
     })
     .await;
     let _ = tx.send(GuiEvent::AiReply(reply));
+}
+
+/// What the Assistant's tools may read: one conversation of the local history plus the lines the
+/// GUI sent (newest messages may not be stored yet).
+struct AiToolCtx {
+    db_path: String,
+    thread_id: String,
+    thread_name: String,
+    is_group: bool,
+    lines: Vec<crate::ai::TranscriptLine>,
+    zalo_http: Option<reqwest::Client>,
+}
+
+impl AiToolCtx {
+    /// Run a read on the local history (blocking pool) and convert the rows.
+    async fn stored<F>(&self, read: F) -> Result<Vec<crate::ai::TranscriptLine>, String>
+    where
+        F: FnOnce(&crate::store::MessageStore) -> anyhow::Result<Vec<crate::store::StoredMessage>>
+            + Send
+            + 'static,
+    {
+        let (db, name, is_group) = (
+            self.db_path.clone(),
+            self.thread_name.clone(),
+            self.is_group,
+        );
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let store = crate::store::MessageStore::open(&db)?;
+            let rows = read(&store)?;
+            Ok(crate::ai::stored_transcript(&rows, &name, is_group))
+        })
+        .await
+        .map_err(|_| "Không đọc được lịch sử cục bộ.".to_string())?
+        .map_err(|_| "Không đọc được lịch sử cục bộ.".to_string())
+    }
+
+    fn newest(
+        &self,
+        stored: Vec<crate::ai::TranscriptLine>,
+        keep: impl Fn(&crate::ai::TranscriptLine) -> bool,
+        limit: usize,
+    ) -> Vec<crate::ai::TranscriptLine> {
+        let gui: Vec<_> = self.lines.iter().filter(|l| keep(l)).cloned().collect();
+        let stored: Vec<_> = stored.into_iter().filter(|l| keep(l)).collect();
+        let mut merged = crate::ai::merge_transcripts(gui, stored);
+        let extra = merged.len().saturating_sub(limit);
+        merged.drain(..extra);
+        merged
+    }
+
+    async fn find_line(&self, message_id: &str) -> Option<crate::ai::TranscriptLine> {
+        if let Some(line) = self.lines.iter().find(|l| l.id == message_id) {
+            return Some(line.clone());
+        }
+        let (thread, id) = (self.thread_id.clone(), message_id.to_string());
+        self.stored(move |store| Ok(store.message_in_thread(&thread, &id)?.into_iter().collect()))
+            .await
+            .ok()?
+            .into_iter()
+            .next()
+    }
+}
+
+/// Execute one tool call against the asking conversation only. Errors become text for the model.
+async fn run_ai_tool(
+    call: crate::ai::ToolCall,
+    ctx: std::sync::Arc<AiToolCtx>,
+) -> crate::ai::ToolOutput {
+    use crate::ai::{render_tool_result, render_tool_text, ToolOutput, ToolRequest};
+    let name = call.name.clone();
+    let text = |t: String| ToolOutput {
+        text: render_tool_text(&name, &t),
+        images: Vec::new(),
+    };
+    let request = match crate::ai::parse_tool_call(&call) {
+        Ok(r) => r,
+        Err(e) => return text(e),
+    };
+    let thread = ctx.thread_id.clone();
+    let lines = match request {
+        ToolRequest::Search { query, limit } => {
+            let q = query.clone();
+            ctx.stored(move |s| s.search_thread_messages(&thread, &q, limit))
+                .await
+                .map(|rows| ctx.newest(rows, |l| crate::ai::line_matches(l, &query), limit))
+        }
+        ToolRequest::Links { query, limit } => ctx
+            .stored(move |s| s.thread_link_candidates(&thread, 1_000))
+            .await
+            .map(|rows| {
+                ctx.newest(
+                    rows,
+                    |l| {
+                        crate::ai::line_has_link(l)
+                            && query
+                                .as_deref()
+                                .is_none_or(|q| crate::ai::line_matches(l, q))
+                    },
+                    limit,
+                )
+            }),
+        ToolRequest::Recent { limit, before_id } => {
+            let before_ts = match &before_id {
+                Some(id) => match ctx.find_line(id).await {
+                    Some(line) => Some(line.ts),
+                    None => return text(format!("Không có tin #{id} trong cuộc trò chuyện này.")),
+                },
+                None => None,
+            };
+            ctx.stored(move |s| s.messages_before(&thread, before_ts, limit))
+                .await
+                .map(|rows| ctx.newest(rows, |l| before_ts.is_none_or(|ts| l.ts < ts), limit))
+        }
+        ToolRequest::Around { message_id, radius } => {
+            let id = message_id.clone();
+            let rows = ctx
+                .stored(move |s| s.messages_around(&thread, &id, radius))
+                .await;
+            match rows {
+                Ok(rows) if !rows.is_empty() => Ok(rows),
+                Ok(_) => match ctx.lines.iter().position(|l| l.id == message_id) {
+                    Some(i) => Ok(ctx.lines
+                        [i.saturating_sub(radius)..(i + radius + 1).min(ctx.lines.len())]
+                        .to_vec()),
+                    None => {
+                        return text(format!(
+                            "Không có tin #{message_id} trong cuộc trò chuyện này."
+                        ))
+                    }
+                },
+                Err(e) => Err(e),
+            }
+        }
+        ToolRequest::Attachment { message_id } => {
+            let Some(line) = ctx.find_line(&message_id).await else {
+                return text(format!(
+                    "Không có tin #{message_id} trong cuộc trò chuyện này."
+                ));
+            };
+            let Some(attachment) = crate::ai::zalo_ref(&line) else {
+                return text(format!(
+                    "Tin #{message_id} không có ảnh hoặc tệp đọc được. Nội dung: {}",
+                    render_tool_result(&name, std::slice::from_ref(&line))
+                ));
+            };
+            return match resolve_ai_attachment(&attachment, ctx.zalo_http.as_ref()).await {
+                AiResolved::Image(url) => ToolOutput {
+                    text: render_tool_text(
+                        &name,
+                        &format!("Ảnh của tin #{message_id} được gửi kèm ngay sau kết quả này."),
+                    ),
+                    images: vec![url],
+                },
+                AiResolved::Text(body) => text(format!("Tệp {}:\n{body}", attachment.name())),
+                AiResolved::Note(note) => text(note),
+            };
+        }
+    };
+    match lines {
+        Ok(lines) => ToolOutput {
+            text: render_tool_result(&name, &lines),
+            images: Vec::new(),
+        },
+        Err(e) => text(e),
+    }
+}
+
+/// One attachment made ready for the model.
+enum AiResolved {
+    Image(String),
+    Text(String),
+    /// Not sent; the reason (in Vietnamese) for the model and the note.
+    Note(String),
+}
+
+async fn ai_attachment_bytes(
+    attachment: &crate::ai::AttachmentRef,
+    zalo_http: Option<&reqwest::Client>,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    match attachment {
+        crate::ai::AttachmentRef::Local { path, .. } => {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                let meta = std::fs::metadata(&path)
+                    .map_err(|_| "tệp đính kèm không còn trên máy".to_string())?;
+                if !meta.is_file() {
+                    return Err("không phải tệp".to_string());
+                }
+                if meta.len() > limit as u64 {
+                    return Err("tệp quá lớn".to_string());
+                }
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::fs::File::open(&path)
+                    .and_then(|f| f.take(limit as u64 + 1).read_to_end(&mut bytes))
+                    .map_err(|_| "không đọc được tệp".to_string())?;
+                if bytes.len() > limit {
+                    return Err("tệp quá lớn".to_string());
+                }
+                Ok(bytes)
+            })
+            .await
+            .map_err(|_| "không đọc được tệp".to_string())?
+        }
+        crate::ai::AttachmentRef::Zalo { url, kind, .. } => {
+            let url = if *kind == crate::ai::AttachmentKind::Photo {
+                crate::store::jxl_to_jpg_url(url)
+            } else {
+                url.clone()
+            };
+            if !crate::ai::may_fetch_media(&url) {
+                return Err("chỉ tải ảnh/tệp từ máy chủ Zalo; đã gửi liên kết dạng chữ".to_string());
+            }
+            let cookie_free;
+            let client = if crate::ai::media_needs_session(&url) {
+                zalo_http.ok_or_else(|| "chưa đăng nhập Zalo".to_string())?
+            } else {
+                cookie_free = crate::media_resources::credential_free_client()
+                    .map_err(|_| "không tạo được kết nối tải".to_string())?;
+                &cookie_free
+            };
+            let fetch = async {
+                let resp = client
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await
+                    .map_err(|_| crate::media_resources::MediaError::Offline)?;
+                crate::media_resources::read_bounded_response(resp, limit).await
+            };
+            match tokio::time::timeout(std::time::Duration::from_secs(45), fetch).await {
+                Ok(Ok(bytes)) => Ok(bytes),
+                Ok(Err(crate::media_resources::MediaError::TooLarge)) => Err("tệp quá lớn".into()),
+                Ok(Err(_)) => Err("không tải được".into()),
+                Err(_) => Err("hết thời gian tải".into()),
+            }
+        }
+    }
+}
+
+/// Download (Zalo hosts only) or read (composer files) one attachment and turn it into an image
+/// data URL or text. Never fails: problems become a note.
+async fn resolve_ai_attachment(
+    attachment: &crate::ai::AttachmentRef,
+    zalo_http: Option<&reqwest::Client>,
+) -> AiResolved {
+    let name = attachment.name();
+    if attachment.is_image() {
+        let bytes =
+            match ai_attachment_bytes(attachment, zalo_http, crate::media_resources::PREVIEW_LIMIT)
+                .await
+            {
+                Ok(b) => b,
+                Err(e) => return AiResolved::Note(format!("Ảnh {name} không gửi được: {e}")),
+            };
+        return match tokio::task::spawn_blocking(move || crate::ai::image_data_url(&bytes)).await {
+            Ok(Ok(url)) => AiResolved::Image(url),
+            Ok(Err(e)) => AiResolved::Note(format!("Ảnh {name} không gửi được: {e}")),
+            Err(_) => AiResolved::Note(format!("Ảnh {name} không gửi được")),
+        };
+    }
+    let kind = crate::ai::document_kind(&name);
+    if kind == crate::ai::DocumentKind::Unsupported {
+        return AiResolved::Note(format!(
+            "Tệp {name}: chưa đọc được nội dung loại tệp này, chỉ có tên và liên kết"
+        ));
+    }
+    let bytes =
+        match ai_attachment_bytes(attachment, zalo_http, crate::doc_preview::MAX_PREVIEW_BYTES)
+            .await
+        {
+            Ok(b) => b,
+            Err(e) => return AiResolved::Note(format!("Tệp {name} không đọc được: {e}")),
+        };
+    let text = match kind {
+        crate::ai::DocumentKind::Pdf => crate::doc_preview::extract_pdf_isolated(bytes)
+            .await
+            .map_err(|e| e.to_string()),
+        crate::ai::DocumentKind::Preview(ext) => {
+            tokio::task::spawn_blocking(move || crate::doc_preview::extract_text(&bytes, &ext))
+                .await
+                .unwrap_or_else(|_| Err("không trích được nội dung".into()))
+        }
+        crate::ai::DocumentKind::PlainText => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        crate::ai::DocumentKind::Unsupported => Err(String::new()),
+    };
+    match text {
+        Ok(t) if !t.trim().is_empty() => {
+            AiResolved::Text(crate::ai::cap_file_text(&t, crate::ai::FILE_TEXT_CAP_CHARS))
+        }
+        Ok(_) => AiResolved::Note(format!("Tệp {name} không có chữ đọc được")),
+        Err(e) => AiResolved::Note(format!("Tệp {name} không đọc được: {e}")),
+    }
+}
+
+/// Resolve every attachment of a question within the per-question caps.
+async fn resolve_ai_extras(
+    refs: &[crate::ai::AttachmentRef],
+    zalo_http: Option<&reqwest::Client>,
+) -> crate::ai::Extras {
+    let mut extras = crate::ai::Extras::default();
+    let (mut image_bytes, mut file_chars, mut failed) = (0usize, 0usize, 0usize);
+    for attachment in refs {
+        if attachment.is_image() && extras.images.len() >= crate::ai::MAX_REQUEST_IMAGES {
+            extras.notes.push(format!(
+                "Ảnh {} không gửi: quá số ảnh cho một câu hỏi",
+                attachment.name()
+            ));
+            continue;
+        }
+        if !attachment.is_image() && file_chars >= crate::ai::FILES_TOTAL_CAP_CHARS {
+            extras.notes.push(format!(
+                "Tệp {} không gửi: quá giới hạn nội dung tệp",
+                attachment.name()
+            ));
+            continue;
+        }
+        match resolve_ai_attachment(attachment, zalo_http).await {
+            AiResolved::Image(url) => {
+                if image_bytes + url.len() > crate::ai::MAX_IMAGE_DATA_BYTES {
+                    extras.notes.push(format!(
+                        "Ảnh {} không gửi: quá dung lượng ảnh cho một câu hỏi",
+                        attachment.name()
+                    ));
+                    continue;
+                }
+                image_bytes += url.len();
+                extras.images.push(url);
+            }
+            AiResolved::Text(text) => {
+                let room = crate::ai::FILES_TOTAL_CAP_CHARS - file_chars;
+                let text = crate::ai::cap_file_text(&text, room);
+                file_chars += text.chars().count();
+                extras.files.push((attachment.name(), text));
+            }
+            AiResolved::Note(note) => {
+                failed += 1;
+                extras.notes.push(note);
+            }
+        }
+    }
+    let (images, files) = (extras.images.len(), extras.files.len());
+    if images + files > 0 {
+        let mut parts = Vec::new();
+        if images > 0 {
+            parts.push(format!("{images} ảnh"));
+        }
+        if files > 0 {
+            parts.push(format!("{files} tệp"));
+        }
+        extras.user_notes.push(format!("kèm {}", parts.join(", ")));
+    }
+    if failed > 0 {
+        extras
+            .user_notes
+            .push(format!("{failed} tệp/ảnh không gửi được"));
+    }
+    extras
 }
 
 #[cfg(test)]
@@ -5094,10 +5492,17 @@ async fn run_ai_preload(
         .await
         .map_err(|_| "Không đọc được cấu hình trợ lý AI".to_string())?
         .map_err(|e| e.to_string())?;
-    crate::ai::build_digest(thread_id, thread_name, is_group, lines, covers_until, |turns, max_tokens| {
-        let cfg = cfg.clone();
-        async move { crate::ai::chat_completion(&cfg, &turns, max_tokens).await }
-    })
+    crate::ai::build_digest(
+        thread_id,
+        thread_name,
+        is_group,
+        lines,
+        covers_until,
+        |turns, max_tokens| {
+            let cfg = cfg.clone();
+            async move { crate::ai::chat_completion(&cfg, &turns, max_tokens).await }
+        },
+    )
     .await
     .map_err(|e| cfg.redact(&e.to_string()))
 }
@@ -5111,7 +5516,10 @@ mod ai_worker_tests {
     /// Serves `bodies` in order, one connection each, and records every request body.
     async fn fake_ai(bodies: Vec<&'static str>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://127.0.0.1:{}/v1", listener.local_addr().unwrap().port());
+        let url = format!(
+            "http://127.0.0.1:{}/v1",
+            listener.local_addr().unwrap().port()
+        );
         let handle = tokio::spawn(async move {
             let mut seen = Vec::new();
             for body in bodies {
@@ -5125,7 +5533,11 @@ mod ai_worker_tests {
                     if let Some(end) = text.find("\r\n\r\n") {
                         let len = text
                             .lines()
-                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
                             .unwrap_or(0);
                         if buf.len() >= end + 4 + len {
                             break;
@@ -5178,12 +5590,17 @@ mod ai_worker_tests {
             share,
             base_url: url.into(),
             model: "test-model".into(),
+            attachments: Vec::new(),
         }
     }
 
     #[tokio::test]
     async fn ask_persists_both_sides_replies_and_leaves_the_zalo_store_untouched() {
-        let dir = std::env::temp_dir().join(format!("zalo-next-ai-{}-{}", std::process::id(), crate::ai::now_ms()));
+        let dir = std::env::temp_dir().join(format!(
+            "zalo-next-ai-{}-{}",
+            std::process::id(),
+            crate::ai::now_ms()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("history.db").to_string_lossy().to_string();
         let mut store = crate::store::MessageStore::open(&db).unwrap();
@@ -5205,15 +5622,20 @@ mod ai_worker_tests {
         };
         store.upsert_message(&stale).unwrap();
         drop(store);
-        let (url, server) = fake_ai(vec![r#"{"choices":[{"message":{"content":"Rust là ngôn ngữ hệ thống."}}]}"#]).await;
+        let (url, server) = fake_ai(vec![
+            r#"{"choices":[{"message":{"content":"Rust là ngôn ngữ hệ thống."}}]}"#,
+        ])
+        .await;
         let (tx, rx) = std::sync::mpsc::channel();
         let gui_tx = GuiTx::new(tx, egui::Context::default());
         let mut req = request(&url, true);
         req.transcript[0].id = stale.msg_id.clone();
         req.transcript[0].ts = stale.ts;
-        run_ai_ask(req, gui_tx, db.clone()).await;
+        run_ai_ask(req, gui_tx, db.clone(), None).await;
         let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        let GuiEvent::AiReply(reply) = event else { panic!("expected AiReply") };
+        let GuiEvent::AiReply(reply) = event else {
+            panic!("expected AiReply")
+        };
         assert_eq!(reply.role, AiRole::Assistant);
         assert_eq!(reply.text, "Rust là ngôn ngữ hệ thống.");
         assert_eq!(reply.note.as_deref(), Some("Đã đọc 2 tin gần nhất"));
@@ -5227,31 +5649,56 @@ mod ai_worker_tests {
         // Both sides are stored in the local table, and Zalo messages are unchanged.
         let store = crate::store::MessageStore::open(&db).unwrap();
         let rows = crate::ai::load_thread(&store.conn, "thread-1", 10).unwrap();
-        assert_eq!(rows.iter().map(|m| m.role).collect::<Vec<_>>(), [AiRole::User, AiRole::Assistant]);
+        assert_eq!(
+            rows.iter().map(|m| m.role).collect::<Vec<_>>(),
+            [AiRole::User, AiRole::Assistant]
+        );
         assert_eq!(store.messages_for("thread-1", 10).unwrap(), [older, stale]);
         // Deleting the conversation removes the dialogue too.
         let mut store = store;
         store.delete_thread("thread-1").unwrap();
-        assert!(crate::ai::load_thread(&store.conn, "thread-1", 10).unwrap().is_empty());
+        assert!(crate::ai::load_thread(&store.conn, "thread-1", 10)
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
     async fn sharing_off_sends_no_conversation_text_and_errors_are_reported_not_stored() {
-        let dir = std::env::temp_dir().join(format!("zalo-next-ai-off-{}-{}", std::process::id(), crate::ai::now_ms()));
+        let dir = std::env::temp_dir().join(format!(
+            "zalo-next-ai-off-{}-{}",
+            std::process::id(),
+            crate::ai::now_ms()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("history.db").to_string_lossy().to_string();
         let (url, server) = fake_ai(vec![r#"{"choices":[{"message":{"content":"ok"}}]}"#]).await;
         let (tx, rx) = std::sync::mpsc::channel();
         let gui_tx = GuiTx::new(tx, egui::Context::default());
-        run_ai_ask(request(&url, false), gui_tx.clone(), db.clone()).await;
-        let GuiEvent::AiReply(reply) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap() else { panic!() };
+        run_ai_ask(request(&url, false), gui_tx.clone(), db.clone(), None).await;
+        let GuiEvent::AiReply(reply) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(reply.note.as_deref(), Some("AI không đọc cuộc trò chuyện"));
         let sent = server.await.unwrap().remove(0);
-        assert!(!sent.contains("hẹn 7h nhé"), "conversation text leaked while sharing was off");
+        assert!(
+            !sent.contains("hẹn 7h nhé"),
+            "conversation text leaked while sharing was off"
+        );
         // Unreachable endpoint: the GUI gets a failure event and nothing extra is stored.
-        run_ai_ask(request("http://127.0.0.1:1/v1", false), gui_tx, db.clone()).await;
-        let GuiEvent::AiFailed { error, .. } = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap() else { panic!() };
+        run_ai_ask(
+            request("http://127.0.0.1:1/v1", false),
+            gui_tx,
+            db.clone(),
+            None,
+        )
+        .await;
+        let GuiEvent::AiFailed { error, .. } =
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+        else {
+            panic!()
+        };
         assert!(!error.is_empty());
         let store = crate::store::MessageStore::open(&db).unwrap();
         let rows = crate::ai::load_thread(&store.conn, "thread-1", 10).unwrap();
@@ -5260,7 +5707,11 @@ mod ai_worker_tests {
     }
     #[tokio::test]
     async fn preload_reads_local_history_and_returns_an_in_memory_digest() {
-        let dir = std::env::temp_dir().join(format!("zalo-next-ai-pre-{}-{}", std::process::id(), crate::ai::now_ms()));
+        let dir = std::env::temp_dir().join(format!(
+            "zalo-next-ai-pre-{}-{}",
+            std::process::id(),
+            crate::ai::now_ms()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("history.db").to_string_lossy().to_string();
         {
@@ -5285,9 +5736,17 @@ mod ai_worker_tests {
                     .unwrap();
             }
         }
-        let before: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-        let (url, server) = fake_ai(vec![r#"{"choices":[{"message":{"content":"Họp lúc 9h mai."}}]}"#]).await;
-        let digest = run_ai_preload("thread-1", "Sơn", false, url, "test-model".into(), db).await.unwrap();
+        let before: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        let (url, server) = fake_ai(vec![
+            r#"{"choices":[{"message":{"content":"Họp lúc 9h mai."}}]}"#,
+        ])
+        .await;
+        let digest = run_ai_preload("thread-1", "Sơn", false, url, "test-model".into(), db)
+            .await
+            .unwrap();
         assert_eq!(digest.text, "Họp lúc 9h mai.");
         assert_eq!(digest.message_count, 4);
         assert_eq!(digest.covers_until_ms, 1_700_000_000_003);
@@ -5295,11 +5754,193 @@ mod ai_worker_tests {
         assert!(sent.contains("mai họp lúc 9h") && sent.contains("Tôi: ok"));
         assert!(sent.contains("[Liên kết: https://example.org/agenda]"));
         // Nothing but the existing history database exists afterwards: the digest is not stored.
-        let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let after: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         assert_eq!(before.len(), after.len());
         // An empty conversation is reported, not summarised.
-        let err = run_ai_preload("nobody", "X", false, "http://127.0.0.1:1/v1".into(), "m".into(), dir.join("history.db").to_string_lossy().to_string()).await.unwrap_err();
+        let err = run_ai_preload(
+            "nobody",
+            "X",
+            false,
+            "http://127.0.0.1:1/v1".into(),
+            "m".into(),
+            dir.join("history.db").to_string_lossy().to_string(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("Chưa có tin nhắn"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn tool_ctx(db: &str, lines: Vec<crate::ai::TranscriptLine>) -> std::sync::Arc<AiToolCtx> {
+        std::sync::Arc::new(AiToolCtx {
+            db_path: db.into(),
+            thread_id: "A".into(),
+            thread_name: "Nhóm".into(),
+            is_group: true,
+            lines,
+            zalo_http: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn tools_read_only_the_asking_conversation_plus_unsaved_gui_lines() {
+        let dir = std::env::temp_dir().join(format!(
+            "zalo-next-ai-tools-{}-{}",
+            std::process::id(),
+            crate::ai::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("history.db").to_string_lossy().to_string();
+        {
+            let mut store = crate::store::MessageStore::open(&db).unwrap();
+            for (thread, id, ts, text, raw) in [
+                (
+                    "A",
+                    "a1",
+                    1_700_000_000_000i64,
+                    "tài liệu đây",
+                    r#"{"link_url":"https://docs.example/a","link_title":"Kế hoạch"}"#,
+                ),
+                ("A", "a2", 1_700_000_001_000, "ok", ""),
+                (
+                    "B",
+                    "b1",
+                    1_700_000_002_000,
+                    "bí mật https://secret.example",
+                    "",
+                ),
+            ] {
+                store
+                    .upsert_message(&crate::store::StoredMessage {
+                        msg_id: id.into(),
+                        thread_id: thread.into(),
+                        sender_id: "1".into(),
+                        sender_name: "An".into(),
+                        text: text.into(),
+                        msg_type: "webchat".into(),
+                        ts,
+                        is_outgoing: false,
+                        raw_json: raw.into(),
+                    })
+                    .unwrap();
+            }
+        }
+        let unsaved = crate::ai::TranscriptLine {
+            id: "g1".into(),
+            ts: 1_700_000_003_000,
+            who: "Bình".into(),
+            text: "link mới https://new.example/x".into(),
+            ..Default::default()
+        };
+        let ctx = tool_ctx(&db, vec![unsaved]);
+        let call = |name: &str, args: &str| crate::ai::ToolCall {
+            id: "c".into(),
+            name: name.into(),
+            arguments: args.into(),
+        };
+        let links = run_ai_tool(call("list_links", "{}"), ctx.clone())
+            .await
+            .text;
+        assert!(
+            links.contains("https://docs.example/a") && links.contains("https://new.example/x")
+        );
+        assert!(
+            !links.contains("secret.example"),
+            "another conversation leaked: {links}"
+        );
+        let found = run_ai_tool(
+            call("search_messages", r#"{"query":"bí mật"}"#),
+            ctx.clone(),
+        )
+        .await
+        .text;
+        assert!(found.contains("Không tìm thấy"));
+        let around = run_ai_tool(
+            call("get_messages_around", r#"{"message_id":"b1"}"#),
+            ctx.clone(),
+        )
+        .await
+        .text;
+        assert!(around.contains("Không có tin #b1"));
+        let recent = run_ai_tool(
+            call("get_recent_messages", r#"{"before_id":"a2"}"#),
+            ctx.clone(),
+        )
+        .await
+        .text;
+        assert!(recent.contains("#a1") && !recent.contains("#a2") && !recent.contains("#g1"));
+        let bad = run_ai_tool(call("search_messages", "{"), ctx.clone())
+            .await
+            .text;
+        assert!(bad.contains("JSON"));
+        // A link card has no photo/file to open; nothing is downloaded.
+        let open = run_ai_tool(call("read_attachment", r#"{"message_id":"a1"}"#), ctx).await;
+        assert!(open.images.is_empty() && open.text.contains("không có ảnh hoặc tệp"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn attachments_resolve_from_local_files_and_never_from_other_hosts() {
+        let dir = std::env::temp_dir().join(format!(
+            "zalo-next-ai-att-{}-{}",
+            std::process::id(),
+            crate::ai::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let notes = dir.join("ghi-chu.md");
+        std::fs::write(&notes, "# Việc cần làm\n- gửi báo giá").unwrap();
+        let png = dir.join("anh.png");
+        image::RgbImage::from_pixel(40, 20, image::Rgb([1, 2, 3]))
+            .save(&png)
+            .unwrap();
+        let refs = vec![
+            crate::ai::AttachmentRef::Local {
+                path: notes,
+                name: "ghi-chu.md".into(),
+                is_image: false,
+            },
+            crate::ai::AttachmentRef::Local {
+                path: png,
+                name: "anh.png".into(),
+                is_image: true,
+            },
+            crate::ai::AttachmentRef::Local {
+                path: dir.join("missing.txt"),
+                name: "missing.txt".into(),
+                is_image: false,
+            },
+            crate::ai::AttachmentRef::Zalo {
+                message_id: "m".into(),
+                kind: crate::ai::AttachmentKind::Photo,
+                url: "https://images.example.org/cat.jpg".into(),
+                name: None,
+            },
+        ];
+        let extras = resolve_ai_extras(&refs, None).await;
+        assert_eq!(
+            extras.files,
+            [(
+                "ghi-chu.md".to_string(),
+                "# Việc cần làm\n- gửi báo giá".to_string()
+            )]
+        );
+        assert_eq!(extras.images.len(), 1);
+        assert!(extras.images[0].starts_with("data:image/jpeg;base64,"));
+        assert!(extras
+            .notes
+            .iter()
+            .any(|n| n.contains("không còn trên máy")));
+        assert!(extras
+            .notes
+            .iter()
+            .any(|n| n.contains("chỉ tải ảnh/tệp từ máy chủ Zalo")));
+        assert_eq!(
+            extras.user_notes,
+            ["kèm 1 ảnh, 1 tệp", "2 tệp/ảnh không gửi được"]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -152,6 +152,70 @@ fn host_of(url: &str) -> String {
         .unwrap_or_else(|| "máy chủ AI".to_string())
 }
 
+/// What the user asked: the prompt, what it replies to, and composer attachments.
+struct AskInput {
+    prompt: String,
+    /// `(id, text)` of the Assistant message being replied to.
+    quoted: Option<(String, String)>,
+    /// The Zalo message being replied to.
+    quoted_msg: Option<TranscriptLine>,
+    local: Vec<ai::AttachmentRef>,
+}
+
+/// Enter goes to the Assistant: `@AI ...`, or a reply to an Assistant message.
+pub(super) fn ai_intercepts(enabled: bool, input: &str, replying_to_id: Option<&str>) -> bool {
+    enabled && (ai::parse_ai_command(input).is_some() || replying_to_id.is_some_and(ai::is_ai_id))
+}
+
+const ATTACHMENT_LINE_PREFIX: &str = "\n📎 ";
+
+/// The question as shown in its bubble: the prompt plus the names of composer attachments.
+fn question_text(prompt: &str, local: &[ai::AttachmentRef]) -> String {
+    if local.is_empty() {
+        return prompt.to_string();
+    }
+    let names: Vec<String> = local.iter().map(ai::AttachmentRef::name).collect();
+    format!("{prompt}{ATTACHMENT_LINE_PREFIX}{}", names.join(", "))
+}
+
+fn strip_attachment_line(text: &str) -> String {
+    match text.rfind(ATTACHMENT_LINE_PREFIX) {
+        Some(i) => text[..i].to_string(),
+        None => text.to_string(),
+    }
+}
+
+fn local_refs(refs: &[ai::AttachmentRef]) -> Vec<ai::AttachmentRef> {
+    refs.iter()
+        .filter(|r| matches!(r, ai::AttachmentRef::Local { .. }))
+        .cloned()
+        .collect()
+}
+
+/// Composer attachments always; with sharing on, also the photo/file of the Zalo message being
+/// replied to and recent photos when the question is about images. No duplicates.
+pub(super) fn request_attachments(
+    local: Vec<ai::AttachmentRef>,
+    quoted_msg: Option<&TranscriptLine>,
+    transcript: &[TranscriptLine],
+    prompt: &str,
+    share: bool,
+) -> Vec<ai::AttachmentRef> {
+    let mut out = local;
+    if share {
+        let candidates = quoted_msg
+            .and_then(ai::zalo_ref)
+            .into_iter()
+            .chain(ai::recent_photo_refs(transcript, prompt, share));
+        for r in candidates {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
 impl ZaloGuiApp {
     /// Context sharing for a conversation: its own choice, else the global default (off).
     pub(super) fn ai_share_enabled(&self, thread_id: &str) -> bool {
@@ -170,16 +234,15 @@ impl ZaloGuiApp {
             && self.settings.ai_preload_threads.contains(thread_id)
     }
 
-    /// True when Enter in the composer should go to the Assistant instead of Zalo.
+    /// True when Enter in the composer should go to the Assistant instead of Zalo. A pasted image or
+    /// dropped file goes with the question to the Assistant (it used to be sent to Zalo with the
+    /// `@AI ...` text as its caption).
     pub(super) fn ai_intercepts_send(&self) -> bool {
-        self.settings.ai_enabled
-            && self.pending_clipboard_image.is_none()
-            && self.pending_drop_files.is_empty()
-            && (ai::parse_ai_command(&self.input_message).is_some()
-                || self
-                    .replying_to
-                    .as_ref()
-                    .is_some_and(|q| ai::is_ai_id(&q.id)))
+        ai_intercepts(
+            self.settings.ai_enabled,
+            &self.input_message,
+            self.replying_to.as_ref().map(|q| q.id.as_str()),
+        )
     }
 
     /// Take the composer text and start a request. Nothing is sent to Zalo.
@@ -199,6 +262,27 @@ impl ZaloGuiApp {
             return;
         }
         self.input_message.clear();
+        // Composer attachments go to the Assistant with the question. The pasted image's temp file
+        // is kept (not deleted) so Retry/Regenerate can read it again.
+        let mut local = Vec::new();
+        if let Some((path, _, _, _)) = self.pending_clipboard_image.take() {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "ảnh dán.png".into());
+            local.push(ai::AttachmentRef::Local {
+                path,
+                name,
+                is_image: true,
+            });
+        }
+        for file in self.pending_drop_files.drain(..) {
+            local.push(ai::AttachmentRef::Local {
+                name: file.name.clone(),
+                is_image: file.is_image,
+                path: file.path,
+            });
+        }
         let (quoted, quoted_msg) = match self.replying_to.take() {
             Some(q) if replying_ai => (Some((q.id, q.text)), None),
             Some(q) if self.ai_share_enabled(thread_id) => (
@@ -211,18 +295,22 @@ impl ZaloGuiApp {
             _ => (None, None),
         };
         self.reply_auto_mention = None;
-        self.ai_begin_ask(thread_id, prompt, quoted, quoted_msg);
+        self.ai_begin_ask(thread_id, prompt, quoted, quoted_msg, local);
     }
 
     fn ai_build_request(
         &self,
         thread_id: &str,
-        prompt: String,
-        quoted: Option<(String, String)>,
-        quoted_msg: Option<TranscriptLine>,
+        input: AskInput,
         user_msg: Option<AiMessage>,
         user_msg_id: String,
     ) -> Option<AskRequest> {
+        let AskInput {
+            prompt,
+            quoted,
+            quoted_msg,
+            local,
+        } = input;
         let thread = self.threads.iter().find(|t| t.id == thread_id)?;
         let share = self.ai_share_enabled(thread_id);
         // With a fresh pre-read summary only the messages after it are sent; a summary that has
@@ -241,6 +329,9 @@ impl ZaloGuiApp {
                 transcript = transcript_for(thread, 0);
             }
         }
+        let quoted_msg = quoted_msg.filter(|_| share);
+        let attachments =
+            request_attachments(local, quoted_msg.as_ref(), &transcript, &prompt, share);
         Some(AskRequest {
             thread_id: thread_id.to_string(),
             thread_name: thread.name.clone(),
@@ -250,12 +341,13 @@ impl ZaloGuiApp {
             user_msg_id,
             reply_to_id: quoted.as_ref().map(|(id, _)| id.clone()),
             quoted: quoted.map(|(_, text)| text),
-            quoted_msg: quoted_msg.filter(|_| share),
+            quoted_msg,
             transcript,
             digest,
             share,
             base_url: self.settings.ai_base_url.clone(),
             model: self.settings.ai_model.clone(),
+            attachments,
         })
     }
 
@@ -265,21 +357,26 @@ impl ZaloGuiApp {
         prompt: String,
         quoted: Option<(String, String)>,
         quoted_msg: Option<TranscriptLine>,
+        local: Vec<ai::AttachmentRef>,
     ) {
         let id = ai::make_id();
         let user_msg = AiMessage {
             id: id.clone(),
             thread_id: thread_id.to_string(),
             role: AiRole::User,
-            text: prompt.clone(),
+            text: question_text(&prompt, &local),
             ts: ai::now_ms(),
             reply_to_id: quoted.as_ref().map(|(qid, _)| qid.clone()),
             model: None,
             note: None,
         };
-        if let Some(req) =
-            self.ai_build_request(thread_id, prompt, quoted, quoted_msg, Some(user_msg), id)
-        {
+        let input = AskInput {
+            prompt,
+            quoted,
+            quoted_msg,
+            local,
+        };
+        if let Some(req) = self.ai_build_request(thread_id, input, Some(user_msg), id) {
             self.ai_dispatch(req);
         }
     }
@@ -550,28 +647,38 @@ impl ZaloGuiApp {
                 if let Some(tx) = WORKER_TX.get() {
                     let _ = tx.send(WorkerCmd::AiDelete { msg_id: id });
                 }
-                if let Some(req) = self.ai_build_request(
-                    &thread_id,
-                    question.text.clone(),
-                    None,
-                    None,
-                    None,
-                    question.id,
-                ) {
+                // The last request for this question still knows its prompt and composer
+                // attachments; otherwise use the stored text without the attachment line.
+                let (prompt, local) = match self
+                    .ai
+                    .last_req
+                    .get(&thread_id)
+                    .filter(|r| r.user_msg_id == question.id)
+                {
+                    Some(r) => (r.prompt.clone(), local_refs(&r.attachments)),
+                    None => (strip_attachment_line(&question.text), Vec::new()),
+                };
+                let input = AskInput {
+                    prompt,
+                    quoted: None,
+                    quoted_msg: None,
+                    local,
+                };
+                if let Some(req) = self.ai_build_request(&thread_id, input, None, question.id) {
                     self.ai_dispatch(req);
                 }
             }
             AiAction::Retry => {
                 if let Some(req) = self.ai.last_req.get(&thread_id).cloned() {
                     // Rebuild the transcript so a retry sees the latest messages.
-                    let Some(req) = self.ai_build_request(
-                        &thread_id,
-                        req.prompt,
-                        req.quoted.map(|q| (req.reply_to_id.unwrap_or_default(), q)),
-                        req.quoted_msg,
-                        None,
-                        req.user_msg_id,
-                    ) else {
+                    let input = AskInput {
+                        prompt: req.prompt,
+                        quoted: req.quoted.map(|q| (req.reply_to_id.unwrap_or_default(), q)),
+                        quoted_msg: req.quoted_msg,
+                        local: local_refs(&req.attachments),
+                    };
+                    let Some(req) = self.ai_build_request(&thread_id, input, None, req.user_msg_id)
+                    else {
                         return;
                     };
                     if let Some(l) = self.ai.messages.get_mut(&thread_id) {
@@ -655,6 +762,8 @@ impl ZaloGuiApp {
                 req.transcript.clear();
                 req.quoted_msg = None;
                 req.digest = None;
+                // Only what the user attached in the composer; nothing from the conversation.
+                req.attachments = local_refs(&req.attachments);
                 self.ai_dispatch(req);
             }
             Some(_) => self.ai.pending_confirm = None,
@@ -1405,5 +1514,66 @@ mod tests {
         assert_eq!(transcript_for(&thread, 1_700_000_050_000).len(), 1);
         assert_eq!(transcript_for(&thread, 1_700_000_050_000)[0].text, "mới");
         assert_eq!(transcript_for(&thread, 0).len(), 2);
+    }
+
+    #[test]
+    fn at_ai_with_pending_attachments_goes_to_the_assistant() {
+        // Pending images/files no longer decide this: "@AI …" always goes to the Assistant.
+        assert!(ai_intercepts(true, "@AI ảnh này là gì", None));
+        assert!(ai_intercepts(true, "trả lời tiếp", Some("ai_123")));
+        assert!(!ai_intercepts(true, "ảnh đẹp", None));
+        assert!(!ai_intercepts(true, "ảnh đẹp", Some("123456")));
+        assert!(!ai_intercepts(false, "@AI ảnh này là gì", None));
+    }
+
+    #[test]
+    fn question_text_lists_attachments_and_regenerate_strips_them() {
+        let local = vec![ai::AttachmentRef::Local {
+            path: "/tmp/a.png".into(),
+            name: "a.png".into(),
+            is_image: true,
+        }];
+        let text = question_text("mô tả", &local);
+        assert_eq!(text, "mô tả\n📎 a.png");
+        assert_eq!(strip_attachment_line(&text), "mô tả");
+        assert_eq!(question_text("hỏi", &[]), "hỏi");
+    }
+
+    #[test]
+    fn request_attachments_follow_sharing() {
+        let photo = TranscriptLine {
+            id: "p1".into(),
+            attachment: Some(ai::Attachment {
+                kind: ai::AttachmentKind::Photo,
+                url: Some("https://f1.zdn.vn/p1.jpg".into()),
+                title: None,
+                desc: None,
+            }),
+            ..Default::default()
+        };
+        let local = vec![ai::AttachmentRef::Local {
+            path: "/tmp/a.txt".into(),
+            name: "a.txt".into(),
+            is_image: false,
+        }];
+        // Sharing off: only what the user attached.
+        let off = request_attachments(
+            local.clone(),
+            Some(&photo),
+            std::slice::from_ref(&photo),
+            "ảnh gì",
+            false,
+        );
+        assert_eq!(off, local);
+        // Sharing on: the replied photo once, even though it is also a recent photo.
+        let on = request_attachments(
+            local.clone(),
+            Some(&photo),
+            std::slice::from_ref(&photo),
+            "ảnh gì",
+            true,
+        );
+        assert_eq!(on.len(), 2);
+        assert!(matches!(&on[1], ai::AttachmentRef::Zalo { message_id, .. } if message_id == "p1"));
     }
 }
