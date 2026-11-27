@@ -77,8 +77,10 @@ These go against the rules above. Fix each one as its own task, with an adversar
   host-checked against `github.com/minhkhang1008/zalo-next`.
 - **Legacy image/sticker loader** (`gui/worker.rs`, image fetch branch): uses the session HTTP client (cookie
   jar) for arbitrary `http(s)` image URLs without `is_trusted_zalo_url`, reads non-video bodies without a size
-  cap, and caches into the shared `stickers_cache/`. The cookie jar's domain scoping keeps `zpw_sek` on Zalo
-  hosts, but the fetch itself is unbounded and reaches non-Zalo hosts.
+  cap, and caches into the shared `stickers_cache/`. `zpw_sek` itself does not leak: it is
+  seeded into the jar only for trusted Zalo hosts (`session.rs`, `set_zpw_sek` loop guarded by
+  `is_trusted_zalo_url`), explicit `Cookie` headers are guarded the same way, and the client's default headers
+  are only `Origin`/`Referer`. The fetch itself is still unbounded and reaches non-Zalo hosts.
 - **Link-card thumbnails** in incoming messages are fetched automatically on a cache miss
   (`gui/messages.rs`). That is an automatic request to a URL chosen by the sender.
 - **`threads_cache.json`** and per-account thread snapshots are written with plain `std::fs::write`
