@@ -37,6 +37,7 @@ mod messages;
 mod modals;
 mod photo_gallery;
 mod picker;
+mod poll_card;
 mod productivity;
 mod reactions_dialog;
 mod stickers;

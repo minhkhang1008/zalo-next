@@ -1,6 +1,36 @@
 use super::*;
 
 impl ZaloGuiApp {
+    fn request_group_poll(
+        &mut self,
+        thread_id: &str,
+        poll_id: String,
+        option_ids: Option<Vec<String>>,
+    ) {
+        let state = self.group_polls.get(&poll_id);
+        let command = match option_ids {
+            None if matches!(state, None | Some(PollState::Error(_))) => WorkerCmd::FetchPoll {
+                account: self.user_uin.clone(),
+                thread_id: thread_id.to_owned(),
+                poll_id: poll_id.clone(),
+            },
+            Some(option_ids) if matches!(state, Some(PollState::Loaded(_))) => WorkerCmd::VotePoll {
+                account: self.user_uin.clone(),
+                thread_id: thread_id.to_owned(),
+                poll_id: poll_id.clone(),
+                option_ids,
+            },
+            _ => return,
+        };
+        self.group_polls.insert(poll_id.clone(), PollState::Loading);
+        if !WORKER_TX.get().is_some_and(|tx| tx.send(command).is_ok()) {
+            self.group_polls.insert(
+                poll_id,
+                PollState::Error("Không thể kết nối với tiến trình xử lý bình chọn.".to_owned()),
+            );
+        }
+    }
+
     /// Start loading the full-resolution texture the image viewer shows. Message bubbles and
     /// the media grid keep a 480 px copy; the `hd_` key keeps this one (and its disk cache) apart.
     pub(super) fn request_hd_texture(&mut self, full_url: &str) -> Option<String> {
@@ -3742,6 +3772,7 @@ impl ZaloGuiApp {
                         })
                         + (if self.pending_drop_files.is_empty() { 0.0 } else { PENDING_DROP_STRIP_H }) };
                     let mut pending_action: Option<(usize, BubbleAction)> = None;
+                    let mut pending_poll_fetches = Vec::new();
                     let mut load_older_clicked = false;
                     let mut custom_toast: Option<String> = None;
                     // each frame, so a 2 000-message group re-laid out 2 000 galleys per repaint.
@@ -3977,6 +4008,11 @@ impl ZaloGuiApp {
                                                     m.is_outgoing && !is_system_notice_message(m)
                                                 })
                                                 .map(|(i, _)| i);
+                                            let poll_card_owners = if is_group {
+                                                poll_card::card_owners(&thread.messages)
+                                            } else {
+                                                HashSet::new()
+                                            };
 
                                             // Local Assistant dialogue lives outside `thread.messages` (INV-5) and is drawn between
                                             // the real messages by timestamp.
@@ -4053,7 +4089,9 @@ impl ZaloGuiApp {
                                                 }
 
                                                 let row = ui.scope(|ui| {
-                                                    if is_system_notice_message(msg) {
+                                                    let poll_id = msg.poll_id.as_deref().filter(|_| is_group);
+                                                    let owns_poll_card = poll_id.is_some() && poll_card_owners.contains(&idx);
+                                                    if !owns_poll_card && (poll_id.is_some() || is_system_notice_message(msg)) {
                                                         render_system_notice_pill(ui, msg, pal);
                                                         ui.add_space(6.0);
                                                         return;
@@ -4095,19 +4133,25 @@ impl ZaloGuiApp {
                                                     } else {
                                                         &thread_name
                                                     };
-                                                    // Reactor id -> display name for the reaction-pill tooltip.
-                                                    let reactor_name = |id: &str| -> String {
+                                                    let member_name = |id: &str| -> Option<&str> {
                                                         if id == "0" || (!self.user_uin.is_empty() && id == self.user_uin) {
-                                                            return "Bạn".to_string();
+                                                            Some("Bạn")
+                                                        } else {
+                                                            member_name_by_uid.get(id).map(String::as_str)
                                                         }
-                                                        if let Some(name) = member_name_by_uid.get(id) {
-                                                            return name.clone();
-                                                        }
-                                                        if !is_group {
-                                                            return thread_name.to_string();
-                                                        }
-                                                        "Người dùng Zalo".to_string()
                                                     };
+                                                    let reactor_name = |id: &str| {
+                                                        member_name(id)
+                                                            .unwrap_or(if is_group { "Người dùng Zalo" } else { &thread_name })
+                                                            .to_owned()
+                                                    };
+                                                    let poll_card = poll_id.filter(|_| owns_poll_card).map(|poll_id| poll_card::PollCard {
+                                                        poll_id,
+                                                        state: self.group_polls.get(poll_id),
+                                                        user_uin: &self.user_uin,
+                                                        voter_name: &member_name,
+                                                        selecting_messages: self.multi_select.is_some(),
+                                                    });
                                                     if let Some(action) = render_chat_bubble(
                                                         ui,
                                                         msg,
@@ -4125,8 +4169,13 @@ impl ZaloGuiApp {
                                                         idx,
                                                         &reactor_name,
                                                         album_members.as_deref(),
+                                                        poll_card.as_ref(),
                                                     ) {
-                                                        pending_action = Some((idx, action));
+                                                        if matches!(action, BubbleAction::FetchPoll { .. }) {
+                                                            pending_poll_fetches.push((idx, action));
+                                                        } else {
+                                                            pending_action = Some((idx, action));
+                                                        }
                                                     }
                                                     ui.add_space(if next_same_sender {
                                                         2.5
@@ -4237,7 +4286,7 @@ impl ZaloGuiApp {
                     } else if load_older_clicked {
                         self.show_toast("Đang kiểm tra tin nhắn cũ từ máy chủ Zalo…");
                     }
-                    if let Some((idx, action)) = pending_action {
+                    for (idx, action) in pending_poll_fetches.into_iter().chain(pending_action) {
                         let target = self
                             .threads
                             .get(self.selected_thread_index)
@@ -4245,6 +4294,14 @@ impl ZaloGuiApp {
                             .cloned();
                         if let Some(m) = target {
                             match action {
+                                BubbleAction::FetchPoll { poll_id } => {
+                                    self.request_group_poll(&thread_id, poll_id, None);
+                                    ctx.request_repaint();
+                                }
+                                BubbleAction::VotePoll { poll_id, option_ids } => {
+                                    self.request_group_poll(&thread_id, poll_id, Some(option_ids));
+                                    ctx.request_repaint();
+                                }
                                 BubbleAction::Reply => {
                                     let tag = if is_group && !m.is_outgoing {
                                         reply_mention_for(&m, &member_name_by_uid, &self.user_uin)

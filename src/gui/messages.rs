@@ -1159,11 +1159,18 @@ pub(super) fn render_system_notice_pill(ui: &mut egui::Ui, msg: &ChatMessage, pa
             .rounding(Rounding::same(12.0))
             .inner_margin(Margin::symmetric(12.0, 4.0))
             .show(ui, |ui| {
-                ui.label(
-                    RichText::new(format!("{} {text}", lucide::SPARKLES))
-                        .size(12.0)
-                        .color(pal.text_secondary),
-                );
+                if msg.poll_id.is_some() {
+                    ui.set_max_width((pill_w - 24.0).max(0.0));
+                    let label = RichText::new(text).size(12.0).color(pal.text_secondary);
+                    ui.add(egui::Label::new(label).truncate())
+                        .on_hover_text(text);
+                } else {
+                    ui.label(
+                        RichText::new(format!("{} {text}", lucide::SPARKLES))
+                            .size(12.0)
+                            .color(pal.text_secondary),
+                    );
+                }
             });
     });
 }
@@ -3551,6 +3558,7 @@ pub(super) fn render_chat_bubble(
     idx: usize,
     reactor_name: &dyn Fn(&str) -> String,
     album: Option<&[&ChatMessage]>,
+    poll_card: Option<&super::poll_card::PollCard<'_>>,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
@@ -3563,8 +3571,12 @@ pub(super) fn render_chat_bubble(
     let is_file_card = !has_sticker && is_zalo_file_or_video_message(msg);
     let has_link_card =
         !has_sticker && !is_photo_card && !is_file_card && extract_message_link_view(msg).is_some();
-    let has_interactive_card =
-        is_call_card || has_link_card || is_photo_card || has_voice_card || is_file_card;
+    let has_interactive_card = poll_card.is_some()
+        || is_call_card
+        || has_link_card
+        || is_photo_card
+        || has_voice_card
+        || is_file_card;
 
     let show_timestamp = !msg.time.is_empty()
         && (!next_same_sender
@@ -3591,7 +3603,9 @@ pub(super) fn render_chat_bubble(
 
     // Pre-measure exact content width for both outgoing and incoming bubbles so every bubble,
     // photo, and call card hugs its content tightly without horizontal overflow or inner/outer frame mismatch.
-    let content_width = if has_sticker {
+    let content_width = if poll_card.is_some() {
+        max_text_width.min(320.0)
+    } else if has_sticker {
         116.0_f32
     } else if is_call_card {
         max_text_width.min(256.0)
@@ -3841,7 +3855,9 @@ pub(super) fn render_chat_bubble(
                         ui.set_max_width(content_width);
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
                             quote_action = render_quote_block(ui, msg, pal, true, content_width);
-                            if let Some(card) = &call_card_opt {
+                            if let Some(card) = poll_card {
+                                card_action = card.render(ui, msg, pal);
+                            } else if let Some(card) = &call_card_opt {
                                 card_action = render_call_card_widget(ui, card, pal, content_width);
                             } else if !render_sticker_widget(
                                 ui,
@@ -3895,7 +3911,9 @@ pub(super) fn render_chat_bubble(
                         });
                     });
                 if let Some(selecting) = multi_select_overlay(ui, &fr.response, msg, pal) {
-                    return selecting;
+                    return selecting.or_else(|| {
+                        card_action.filter(|action| matches!(action, BubbleAction::FetchPoll { .. }))
+                    });
                 }
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
@@ -4004,7 +4022,9 @@ pub(super) fn render_chat_bubble(
                                 ui.add_space(4.0);
                             }
                             quote_action = render_quote_block(ui, msg, pal, false, content_width);
-                            if let Some(card) = &call_card_opt {
+                            if let Some(card) = poll_card {
+                                card_action = card.render(ui, msg, pal);
+                            } else if let Some(card) = &call_card_opt {
                                 card_action = render_call_card_widget(ui, card, pal, content_width);
                             } else if !render_sticker_widget(
                                 ui,
@@ -4043,7 +4063,9 @@ pub(super) fn render_chat_bubble(
                         });
                     });
                 if let Some(selecting) = multi_select_overlay(ui, &fr.response, msg, pal) {
-                    return selecting;
+                    return selecting.or_else(|| {
+                        card_action.filter(|action| matches!(action, BubbleAction::FetchPoll { .. }))
+                    });
                 }
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
@@ -4075,6 +4097,13 @@ pub(super) fn render_chat_bubble(
 
 #[derive(Clone, PartialEq)]
 pub(super) enum BubbleAction {
+    FetchPoll {
+        poll_id: String,
+    },
+    VotePoll {
+        poll_id: String,
+        option_ids: Vec<String>,
+    },
     Reply,
     /// Enter multi-select mode with this message selected.
     StartMultiSelect,
@@ -5323,6 +5352,7 @@ mod quote_navigation_tests {
                                 &HashMap::new(),
                                 0,
                                 &|id: &str| id.to_string(),
+                                None,
                                 None,
                             );
                         });
