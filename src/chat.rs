@@ -68,6 +68,9 @@ pub struct ChatMessage {
     pub link_thumb: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_src: Option<String>,
+    /// Declared width and height in pixels for a photo or video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_size: Option<(u32, u32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_source: Option<Value>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -85,6 +88,7 @@ impl ChatMessage {
             self.unread_policy.clone(),
             self.delivery,
             self.history_source.clone(),
+            self.media_size,
         );
         if incoming.kind != crate::message_model::MessageKind::Unknown {
             self.kind = incoming.kind;
@@ -102,6 +106,7 @@ impl ChatMessage {
         if incoming.history_source.is_some() {
             self.history_source = incoming.history_source.clone();
         }
+        self.media_size = incoming.media_size.or(self.media_size);
         self.delivery = self.delivery.merge(incoming.delivery);
         previous_mentions != self.resolved_mention_uids
             || before
@@ -111,6 +116,7 @@ impl ChatMessage {
                     self.unread_policy.clone(),
                     self.delivery,
                     self.history_source.clone(),
+                    self.media_size,
                 )
     }
 
@@ -2273,6 +2279,7 @@ pub async fn send_attachment_ext(
             },
             link_thumb: Some(final_thumb),
             link_src: Some("Hình ảnh Zalo".into()),
+            media_size: valid_media_size(&(width, height)).then_some((width, height)),
             ..Default::default()
         };
         return Ok((send_resp, cm));
@@ -6008,6 +6015,58 @@ fn extract_link_info(
         _ => (None, None, None, None, None),
     }
 }
+
+/// Check the supported range for each side of a declared media size.
+pub(crate) fn valid_media_size((width, height): &(u32, u32)) -> bool {
+    (1..=20_000).contains(width) && (1..=20_000).contains(height)
+}
+
+fn parse_media_size(
+    content: &Value,
+    msg_type: &str,
+    is_photo: bool,
+    is_video: bool,
+) -> Option<(u32, u32)> {
+    let decoded_content;
+    let content = if let Some(text) = content.as_str() {
+        if !text.trim_start().starts_with('{') {
+            return None;
+        }
+        decoded_content = serde_json::from_str::<Value>(text).ok()?;
+        &decoded_content
+    } else {
+        content
+    };
+    let params = content.get("params")?;
+    let decoded_params;
+    let params = if let Some(text) = params.as_str() {
+        decoded_params = serde_json::from_str::<Value>(text).ok()?;
+        &decoded_params
+    } else {
+        params
+    };
+    let read_integer = |key| match params.get(key)? {
+        Value::Number(n) => u32::try_from(n.as_u64()?).ok(),
+        Value::String(s) => s.trim().parse::<u32>().ok(),
+        _ => None,
+    };
+    // Zalo Web's _estimateSize uses photo dimensions for text subtypes 1 (photo) and 2 (GIF).
+    // See re-notes/49_media_declared_size.md.
+    let is_text_photo = matches!(msg_type, "chat.text" | "webchat" | "text" | "1")
+        && matches!(read_integer("subType"), Some(1 | 2));
+    let (width_key, height_key) = if is_video
+        || matches!(msg_type, "chat.video.msg" | "chat.video.live.msg")
+    {
+        ("video_width", "video_height")
+    } else if is_photo || is_text_photo || matches!(msg_type, "chat.doodle" | "chat.gif" | "gif") {
+        ("width", "height")
+    } else {
+        return None;
+    };
+    let size = (read_integer(width_key)?, read_integer(height_key)?);
+    valid_media_size(&size).then_some(size)
+}
+
 fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let msg_type = normalize_msg_type(it);
 
@@ -6325,6 +6384,12 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
             }
         }
     }
+    let media_size = if !is_voice_msg && !is_undo_type && sticker_meta.is_none() {
+        raw_content_val
+            .and_then(|content| parse_media_size(content, &msg_type, is_photo_msg, is_video_msg))
+    } else {
+        None
+    };
     Some(ChatMessage {
         kind: if is_voice_msg {
             crate::message_model::MessageKind::Voice
@@ -6357,6 +6422,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         link_desc,
         link_thumb,
         link_src,
+        media_size,
 
         history_source: voice_source,
         ..Default::default()
@@ -10050,9 +10116,76 @@ mod send_identity_tests {
             }
         });
         let msg = parse_chat_message(&raw_photo).expect("must parse photo message");
+        assert_eq!(msg.media_size, Some((1280, 960)));
         assert_eq!(msg.link_src.as_deref(), Some("Hình ảnh Zalo"));
         assert_eq!(msg.text, "[Hình ảnh]");
         assert!(is_zalo_photo_cdn_url(msg.link_url.as_deref().unwrap()));
+    }
+
+    #[test]
+    fn parse_video_message_reads_declared_size_from_string_values() {
+        let raw = json!({
+            "msgId": "video-1",
+            "msgType": "chat.video.msg",
+            "content": {
+                "href": "https://video-stal.example.test/clip.mp4",
+                "params": "{\"video_width\":\"1080\",\"video_height\":\"1920\",\"width\":320,\"height\":180}"
+            }
+        });
+        let msg = parse_chat_message(&raw).expect("must parse video message");
+        assert_eq!(msg.media_size, Some((1080, 1920)));
+    }
+
+    #[test]
+    fn parse_photo_message_reads_gif_and_text_subtype_sizes() {
+        for (msg_type, subtype) in [
+            ("chat.gif", 0),
+            ("chat.doodle", 0),
+            ("chat.text", 1),
+            ("webchat", 2),
+        ] {
+            let content = json!({
+                "params": {"subType": subtype, "width": "480", "height": 360}
+            });
+            let raw = json!({
+                "msgId": "photo-1",
+                "msgType": msg_type,
+                "content": content.to_string()
+            });
+            let msg = parse_chat_message(&raw).expect("must parse message");
+            assert_eq!(msg.media_size, Some((480, 360)), "{msg_type}, {subtype}");
+        }
+    }
+
+    #[test]
+    fn parse_chat_message_ignores_invalid_media_dimensions() {
+        for (msg_type, width, height) in [
+            ("chat.photo", "width", "height"),
+            ("chat.video", "video_width", "video_height"),
+        ] {
+            let mut raw = json!({"msgId": "media-1", "msgType": msg_type, "content": {}});
+            for (w, h) in [(json!(0), json!(960)), (json!(1280), json!("20001"))] {
+                raw["content"]["params"] = json!({ (width): w, (height): h }).to_string().into();
+                let msg = parse_chat_message(&raw).expect("must parse message");
+                assert_eq!(msg.media_size, None, "{msg_type}");
+            }
+        }
+    }
+
+    #[test]
+    fn merge_message_metadata_keeps_size_until_incoming_supplies_one() {
+        let mut existing = ChatMessage {
+            media_size: Some((1280, 960)),
+            ..Default::default()
+        };
+        assert!(!existing.merge_message_metadata(&ChatMessage::default()));
+        assert_eq!(existing.media_size, Some((1280, 960)));
+        let incoming = ChatMessage {
+            media_size: Some((1920, 1080)),
+            ..Default::default()
+        };
+        assert!(existing.merge_message_metadata(&incoming));
+        assert_eq!(existing.media_size, incoming.media_size);
     }
 
     #[test]

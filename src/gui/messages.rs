@@ -2367,15 +2367,55 @@ fn is_video_card(msg: &ChatMessage, trimmed_text: &str) -> bool {
     msg.link_src.as_deref() == Some("Video Zalo") || trimmed_text.starts_with("[Video]")
 }
 
-/// Maximum poster width when the source dimensions are not available yet.
+fn photo_display_size(
+    max_text_width: f32,
+    declared: Option<(u32, u32)>,
+    texture_size: Option<[usize; 2]>,
+) -> Vec2 {
+    let texture = texture_size.filter(|&[w, h]| w > 2 && h > 2);
+    // A matching ratio lets the declared dimensions reserve the same space after load.
+    let declared = declared
+        .filter(crate::chat::valid_media_size)
+        .filter(|&(w, h)| {
+            texture.is_none_or(|[tw, th]| {
+                let ratio = (f64::from(w) / f64::from(h)) / (tw as f64 / th as f64);
+                (0.97..=1.03).contains(&ratio)
+            })
+        });
+    let Some([width, height]) = declared.map(|(w, h)| [w as usize, h as usize]).or(texture) else {
+        return Vec2::new(max_text_width.clamp(200.0, 280.0), 150.0);
+    };
+    let (width, height) = (width as f32, height as f32);
+    let max_w = max_text_width.clamp(220.0, 360.0);
+    let max_h = 340.0;
+    let scale = (max_w / width).min(max_h / height).min(1.0);
+    Vec2::new(
+        (width * scale).clamp(160.0, max_w),
+        (height * scale).clamp(120.0, max_h),
+    )
+}
+
+/// Maximum poster width at the current bubble width limit.
 fn video_card_width(max_text_width: f32) -> f32 {
     max_text_width.min(340.0).max(1.0).floor()
 }
 
-fn video_card_size(max_text_width: f32, texture_size: Option<[usize; 2]>) -> Vec2 {
+fn video_card_size(
+    max_text_width: f32,
+    declared: Option<(u32, u32)>,
+    texture_size: Option<[usize; 2]>,
+) -> Vec2 {
     let max_width = video_card_width(max_text_width);
-    let Some([width, height]) = texture_size.filter(|[width, height]| *width > 0 && *height > 0)
-    else {
+    let texture = texture_size.filter(|&[w, h]| w > 0 && h > 0);
+    let declared = declared
+        .filter(crate::chat::valid_media_size)
+        .filter(|&(w, h)| {
+            texture.is_none_or(|[tw, th]| {
+                let ratio = (f64::from(w) / f64::from(h)) / (tw as f64 / th as f64);
+                (0.97..=1.03).contains(&ratio)
+            })
+        });
+    let Some([width, height]) = declared.map(|(w, h)| [w as usize, h as usize]).or(texture) else {
         return Vec2::new(max_width, max_width * 9.0 / 16.0);
     };
     let source_width = width as f32;
@@ -2566,6 +2606,7 @@ pub(super) fn render_message_body(
     pal: &ThemePalette,
     outgoing: bool,
     max_text_width: f32,
+    media_max_width: f32,
     sticker_textures: &HashMap<String, TextureHandle>,
     loading_stickers: &mut HashSet<String>,
     failed_message_thumbnails: &HashSet<String>,
@@ -2681,19 +2722,18 @@ pub(super) fn render_message_body(
                         open_external_url(&open_target);
                     }
                 } else {
-                    let tw_f = tw as f32;
-                    let th_f = th as f32;
-                    let max_w = max_text_width.clamp(220.0, 360.0);
-                    let max_h = 340.0_f32;
-                    let scale = (max_w / tw_f).min(max_h / th_f).min(1.0);
-                    let disp_w = (tw_f * scale).clamp(160.0, max_w);
-                    let disp_h = (th_f * scale).clamp(120.0, max_h);
-                    let img = egui::Image::new(tex)
-                        .fit_to_exact_size(Vec2::new(disp_w, disp_h))
-                        .rounding(Rounding::same(12.0))
-                        .sense(Sense::click());
-                    let resp = ui
-                        .add(img)
+                    let size =
+                        photo_display_size(media_max_width, msg.media_size, Some([tw, th]));
+                    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+                    // Fit the image inside the reserved rectangle without stretching it.
+                    if ui.is_rect_visible(rect) {
+                        let image = egui::Image::new(tex)
+                            .fit_to_exact_size(size)
+                            .rounding(Rounding::same(12.0));
+                        let image_size = image.calc_size(size, Some(tex.size_vec2()));
+                        image.paint_at(ui, Rect::from_center_size(rect.center(), image_size));
+                    }
+                    let resp = resp
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .on_hover_text("Bấm để xem ảnh phóng to trong ứng dụng");
                     ui.painter().rect_stroke(
@@ -2758,10 +2798,8 @@ pub(super) fn render_message_body(
                     false,
                 );
                 // Loading / Placeholder frame with visual image icon and loading feedback
-                let disp_w = max_text_width.clamp(200.0, 280.0);
-                let disp_h = 150.0_f32;
-                let (rect, resp) =
-                    ui.allocate_exact_size(Vec2::new(disp_w, disp_h), Sense::click());
+                let size = photo_display_size(media_max_width, msg.media_size, None);
+                let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
                 let is_hover = resp.hovered();
                 let bg_col = if is_hover {
                     text_col.linear_multiply(0.09)
@@ -2949,12 +2987,16 @@ pub(super) fn render_message_body(
                 .filter(|url| !url.is_empty())
                 .map(|url| MessageThumbnail::new(msg, url, "video_thumb_"));
 
-            // Must equal the width `message_bubble` reserved (`video_card_width`), or the poster
+            // Use the same width limit and source dimensions as `render_chat_bubble`, or the poster
             // overflows its frame and outgoing bubbles drift right.
             let texture = poster
                 .as_ref()
                 .and_then(|poster| poster.texture(ui.ctx(), sticker_textures));
-            let card_size = video_card_size(max_text_width, texture.map(|texture| texture.size()));
+            let card_size = video_card_size(
+                media_max_width,
+                msg.media_size,
+                texture.map(TextureHandle::size),
+            );
             let (rect, response) = ui.allocate_exact_size(card_size, Sense::click());
             ui.painter()
                 .rect_filled(rect, Rounding::same(8.0), pal.bg_input);
@@ -3552,23 +3594,14 @@ pub(super) fn render_chat_bubble(
         super::album::album_width(max_text_width)
     } else if is_photo_card {
         let thumbnail = photo_primary_url(msg).map(|url| MessageThumbnail::new(msg, url, "thumb_"));
-        let texture = thumbnail
+        let texture_size = thumbnail
             .as_ref()
-            .and_then(|thumb| thumb.texture(ui.ctx(), sticker_textures));
-        let photo_w = if let Some(tex) = texture {
-            let [tw, th] = tex.size();
-            if tw <= 2 || th <= 2 {
-                max_text_width.clamp(180.0, 260.0)
-            } else {
-                let tw_f = tw as f32;
-                let th_f = th as f32;
-                let max_w = max_text_width.clamp(220.0, 360.0);
-                let max_h = 340.0_f32;
-                let scale = (max_w / tw_f).min(max_h / th_f).min(1.0);
-                (tw_f * scale).clamp(160.0, max_w).ceil()
-            }
+            .and_then(|thumb| thumb.texture(ui.ctx(), sticker_textures))
+            .map(TextureHandle::size);
+        let photo_w = if texture_size.is_some_and(|[w, h]| w <= 2 || h <= 2) {
+            max_text_width.clamp(180.0, 260.0)
         } else {
-            max_text_width.clamp(200.0, 280.0)
+            photo_display_size(max_text_width, msg.media_size, texture_size).x
         };
         if let Some(cap_str) = photo_caption {
             let cap_w = ui.fonts(|f| {
@@ -3581,7 +3614,7 @@ pub(super) fn render_chat_bubble(
                 .size()
                 .x
             });
-            photo_w.max(cap_w + 4.0).min(max_text_width).ceil()
+            photo_w.max((cap_w + 4.0).min(max_text_width).ceil())
         } else {
             photo_w
         }
@@ -3595,7 +3628,7 @@ pub(super) fn render_chat_bubble(
             .as_ref()
             .and_then(|poster| poster.texture(ui.ctx(), sticker_textures))
             .map(|texture| texture.size());
-        video_card_size(max_text_width, texture_size).x
+        video_card_size(max_text_width, msg.media_size, texture_size).x
     } else if is_file_card || has_link_card {
         let has_loaded_thumb = msg
             .link_thumb
@@ -3816,6 +3849,7 @@ pub(super) fn render_chat_bubble(
                                     pal,
                                     true,
                                     content_width,
+                                    max_text_width,
                                     sticker_textures,
                                     loading_stickers,
                                     failed_message_thumbnails,
@@ -3978,6 +4012,7 @@ pub(super) fn render_chat_bubble(
                                     pal,
                                     false,
                                     content_width,
+                                    max_text_width,
                                     sticker_textures,
                                     loading_stickers,
                                     failed_message_thumbnails,
@@ -5108,6 +5143,44 @@ fn cached_external_thumbnail_requires_a_click_for_each_message() {
 }
 
 #[cfg(test)]
+#[test]
+fn photo_display_size_uses_declared_dimensions_when_the_texture_agrees() {
+    let declared = Some((1280, 960));
+    let expected = Vec2::new(360.0, 270.0);
+    assert_eq!(photo_display_size(500.0, declared, None), expected);
+    assert_eq!(
+        photo_display_size(500.0, declared, Some([658, 480])),
+        expected
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn photo_display_size_uses_texture_when_dimensions_are_missing_or_disagree() {
+    let texture = Some([640, 360]);
+    assert_eq!(
+        photo_display_size(500.0, None, texture),
+        Vec2::new(360.0, 202.5)
+    );
+
+    let texture = Some([660, 480]);
+    assert_eq!(
+        photo_display_size(500.0, Some((1280, 960)), texture),
+        photo_display_size(500.0, None, texture)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn photo_display_size_uses_fixed_placeholder_without_dimensions() {
+    assert_eq!(photo_display_size(500.0, None, None), Vec2::new(280.0, 150.0));
+    assert_eq!(
+        photo_display_size(500.0, None, Some([2, 2])),
+        Vec2::new(280.0, 150.0)
+    );
+}
+
+#[cfg(test)]
 mod video_message_tests {
     use super::*;
 
@@ -5125,15 +5198,27 @@ mod video_message_tests {
 
     #[test]
     fn video_card_size_preserves_landscape_and_portrait_posters() {
-        let landscape = video_card_size(500.0, Some([1_920, 1_080]));
+        let landscape = video_card_size(500.0, None, Some([1_920, 1_080]));
         assert_eq!(landscape, Vec2::new(340.0, 191.25));
 
-        let portrait = video_card_size(500.0, Some([1_080, 1_920]));
+        let portrait = video_card_size(500.0, None, Some([1_080, 1_920]));
         assert_eq!(portrait, Vec2::new(202.5, 360.0));
         assert!(portrait.x < portrait.y);
 
-        let missing = video_card_size(180.0, None);
+        let missing = video_card_size(180.0, None, None);
         assert_eq!(missing, Vec2::new(180.0, 101.25));
+    }
+
+    #[test]
+    fn video_card_size_uses_declared_size_until_the_poster_disagrees() {
+        let declared = Some((1_080, 1_920));
+        let portrait = Vec2::new(202.5, 360.0);
+        assert_eq!(video_card_size(500.0, declared, None), portrait);
+        assert_eq!(video_card_size(500.0, declared, Some([550, 960])), portrait);
+        assert_eq!(
+            video_card_size(500.0, declared, Some([1_920, 1_080])),
+            Vec2::new(340.0, 191.25)
+        );
     }
 
     #[test]

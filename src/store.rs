@@ -572,6 +572,7 @@ impl MessageStore {
                 let mut link_desc = None;
                 let mut link_thumb = None;
                 let mut link_src = None;
+                let mut media_size = None;
                 if !sm.raw_json.is_empty() {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sm.raw_json) {
                         sticker_id = val
@@ -647,6 +648,10 @@ impl MessageStore {
                             .get("link_src")
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
+                        media_size = val
+                            .get("media_size")
+                            .and_then(|value| <(u32, u32)>::deserialize(value).ok())
+                            .filter(crate::chat::valid_media_size);
                     }
                 }
                 let cm = ChatMessage {
@@ -675,6 +680,7 @@ impl MessageStore {
                     link_desc,
                     link_thumb,
                     link_src,
+                    media_size,
 
                     ..Default::default()
                 };
@@ -687,6 +693,9 @@ impl MessageStore {
                                     && cm.ts != 0
                                     && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
+                    if existing.id == cm.id && existing.media_size.is_none() {
+                        existing.media_size = cm.media_size;
+                    }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
                         existing.sticker_cate_id = cm.sticker_cate_id;
@@ -805,6 +814,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if let Some(lsrc) = &m.link_src {
             meta.insert("link_src".into(), serde_json::json!(lsrc));
+        }
+        if let Some((width, height)) = m.media_size {
+            meta.insert("media_size".into(), serde_json::json!([width, height]));
         }
         let raw_json = if meta.is_empty() {
             String::new()
@@ -1774,6 +1786,41 @@ fn import_official_zalo_pc_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_size_round_trips_through_stored_message_metadata() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let thread = Thread {
+            id: "thread-1".into(),
+            name: "Test thread".into(),
+            messages: vec![
+                ChatMessage {
+                    id: "photo-1".into(),
+                    text: "[Hình ảnh]".into(),
+                    ts: 1000,
+                    media_size: Some((1280, 960)),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "photo-2".into(),
+                    text: "[Hình ảnh]".into(),
+                    ts: 10000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(persist_threads(&mut store, &[thread]).unwrap(), 2);
+
+        let rows = store.messages_for("thread-1", 10).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&rows[0].raw_json).unwrap();
+        assert_eq!(raw["media_size"], serde_json::json!([1280, 960]));
+
+        let mut hydrated = Vec::new();
+        assert_eq!(store.hydrate_threads(&mut hydrated, 10).unwrap(), 2);
+        assert_eq!(hydrated[0].messages[0].media_size, Some((1280, 960)));
+        assert_eq!(hydrated[0].messages[1].media_size, None);
+    }
 
     fn row(thread: &str, id: &str, ts: i64, text: &str, raw_json: &str) -> StoredMessage {
         StoredMessage {
