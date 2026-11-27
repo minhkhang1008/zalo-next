@@ -1747,7 +1747,8 @@ impl ZaloGuiApp {
                                 .id_salt("settings_navigation")
                                 .max_height(win_h - 32.0)
                                 .auto_shrink([false, false]);
-                            navigation.show(ui, |ui| {
+                            // The frame sits in a horizontal row: lay the tabs out top-down inside the scroll area.
+                            ui.vertical(|ui| navigation.show(ui, |ui| {
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new("Cài đặt")
@@ -1863,7 +1864,7 @@ impl ZaloGuiApp {
                                 {
                                     do_logout = true;
                                 }
-                            });
+                            }));
                         });
 
                     // Right Content Panel
