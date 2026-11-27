@@ -12,6 +12,68 @@ fn persist_app_settings(path: &std::path::Path, json: &str) -> std::io::Result<(
     std::fs::write(path, json)
 }
 
+async fn run_poll_command(
+    session: &Session,
+    account: &str,
+    poll_id: &str,
+    option_ids: Option<&[String]>,
+) -> Result<PollDetail, String> {
+    if account.is_empty() || session.login.as_ref().map(|login| login.uin.as_str()) != Some(account) {
+        return Err("Tài khoản đã thay đổi. Hãy mở lại bình chọn.".into());
+    }
+
+    if let Some(option_ids) = option_ids {
+        let details = crate::chat::vote_poll(session, poll_id, option_ids)
+            .await
+            .map_err(|error| poll_command_error(error, "Chưa xác nhận được lượt bình chọn."))?;
+        if let Some(details) = details {
+            return Ok(details);
+        }
+    }
+    let fallback = if option_ids.is_some() {
+        "Đã gửi bình chọn, nhưng không thể tải lại kết quả."
+    } else {
+        "Không thể tải bình chọn."
+    };
+    crate::chat::get_poll_detail(session, poll_id)
+        .await
+        .map_err(|error| poll_command_error(error, fallback))
+}
+
+/// Run a poll fetch or vote on its own task, queued behind earlier poll commands. The session
+/// snapshot is taken now, in command order. The thread id is UI context only: the endpoints take
+/// the poll id.
+async fn spawn_poll_command(
+    session: &std::sync::Arc<tokio::sync::Mutex<Session>>,
+    queue: &std::sync::Arc<tokio::sync::Mutex<()>>,
+    gui_tx: &GuiTx,
+    account: String,
+    poll_id: String,
+    option_ids: Option<Vec<String>>,
+) {
+    let snapshot = session.lock().await.clone();
+    let queue = queue.clone();
+    let gui_tx = gui_tx.clone();
+    tokio::spawn(async move {
+        let _turn = queue.lock().await;
+        let result = run_poll_command(&snapshot, &account, &poll_id, option_ids.as_deref()).await;
+        let event = if option_ids.is_some() {
+            GuiEvent::PollVoted { account, poll_id, result }
+        } else {
+            GuiEvent::PollLoaded { account, poll_id, result }
+        };
+        let _ = gui_tx.send(event);
+    });
+}
+
+fn poll_command_error(error: anyhow::Error, fallback: &str) -> String {
+    if let Some(unavailable) = error.downcast_ref::<crate::chat::PollUnavailable>() {
+        unavailable.to_string()
+    } else {
+        fallback.to_owned()
+    }
+}
+
 async fn run_storage_task<T: Send + 'static>(
     guard: Result<tokio::sync::OwnedMutexGuard<()>, tokio::sync::TryLockError>,
     operation: impl FnOnce(&std::path::Path) -> T + Send + 'static,
@@ -128,6 +190,17 @@ pub enum WorkerCmd {
         generation: u64,
         url: String,
         name: String,
+    },
+    FetchPoll {
+        account: String,
+        thread_id: String,
+        poll_id: String,
+    },
+    VotePoll {
+        account: String,
+        thread_id: String,
+        poll_id: String,
+        option_ids: Vec<String>,
     },
     Productivity {
         account: String,
@@ -1077,6 +1150,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                 let video_requests = crate::media_resources::RequestGeneration::default();
                 let voice_playback_requests = crate::media_resources::RequestGeneration::default();
                 let storage_operation = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                // Poll commands run in order (an earlier fetch must not overwrite a vote's result)
+                // without holding up the command loop; tokio's Mutex grants the lock FIFO.
+                let poll_queue = std::sync::Arc::new(tokio::sync::Mutex::new(()));
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         WorkerCmd::StartVideo {
@@ -4359,6 +4435,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let _ = gui_tx.send(GuiEvent::Productivity { account, update:result });
                             egui_ctx.request_repaint();
                         }
+                        WorkerCmd::FetchPoll { account, poll_id, .. } => {
+                            spawn_poll_command(&session, &poll_queue, &gui_tx, account, poll_id, None).await;
+                        }
+                        WorkerCmd::VotePoll { account, poll_id, option_ids, .. } => {
+                            spawn_poll_command(&session, &poll_queue, &gui_tx, account, poll_id, Some(option_ids)).await;
+                        }
                         WorkerCmd::FetchDocPreview { account, generation, url, name } => {
                             let snapshot=session.lock().await.clone();
                             if snapshot.login.as_ref().map(|l|l.uin.as_str())!=Some(account.as_str()) {
@@ -5393,6 +5475,22 @@ async fn resolve_ai_extras(
 mod tests {
     use super::prepare_avatar_texture;
     use image::{DynamicImage, Rgba, RgbaImage};
+
+    #[tokio::test]
+    async fn poll_commands_reject_an_account_that_is_no_longer_active() {
+        let mut session = crate::session::Session::new(false, false, false).unwrap();
+        session.login = Some(crate::session::LoginInfo {
+            uin: "active-account".into(),
+            ..Default::default()
+        });
+        let options = ["option-1".to_owned()];
+        for option_ids in [None, Some(options.as_slice())] {
+            assert_eq!(
+                super::run_poll_command(&session, "previous-account", "poll-1", option_ids).await,
+                Err("Tài khoản đã thay đổi. Hãy mở lại bình chọn.".into())
+            );
+        }
+    }
 
     #[test]
     fn original_images_get_a_larger_but_bounded_body_limit() {

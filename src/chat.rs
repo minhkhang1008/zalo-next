@@ -5,7 +5,8 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::session::{obj, Session};
+use crate::poll::PollDetail;
+use crate::session::{obj, Session, SessionError};
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
@@ -71,6 +72,9 @@ pub struct ChatMessage {
     /// Declared width and height in pixels for a photo or video.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_size: Option<(u32, u32)>,
+    /// Poll referenced by a group poll message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_source: Option<Value>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -107,8 +111,12 @@ impl ChatMessage {
             self.history_source = incoming.history_source.clone();
         }
         self.media_size = incoming.media_size.or(self.media_size);
+        let poll_changed = incoming.poll_id.is_some() && self.poll_id != incoming.poll_id;
+        if poll_changed {
+            self.poll_id.clone_from(&incoming.poll_id);
+        }
         self.delivery = self.delivery.merge(incoming.delivery);
-        previous_mentions != self.resolved_mention_uids
+        poll_changed || previous_mentions != self.resolved_mention_uids
             || before
                 != (
                     self.kind,
@@ -4429,6 +4437,85 @@ pub async fn recall_message(
     }
 }
 
+/// Fetch a group poll (cmd 12081, re-notes/50_group_poll.md).
+pub async fn get_poll_detail(s: &Session, poll_id: &str) -> Result<PollDetail> {
+    let body = json!({ "poll_id": poll_id, "imei": s.imei });
+    let data = request_poll(s, "/api/poll/detail", &body, false).await?;
+    Ok(serde_json::from_value(data)?)
+}
+
+/// Vote on a group poll (cmd 12084, re-notes/50_group_poll.md).
+/// An acknowledgement without poll details returns `None`.
+pub async fn vote_poll(
+    s: &Session,
+    poll_id: &str,
+    option_ids: &[String],
+) -> Result<Option<PollDetail>> {
+    let body = json!({
+        "poll_id": poll_id,
+        "option_ids": option_ids.iter().map(|id| poll_option_param(id)).collect::<Vec<_>>(),
+        "imei": s.imei,
+    });
+    let data = request_poll(s, "/api/poll/vote", &body, true).await?;
+    poll_vote_detail(data)
+}
+
+fn poll_vote_detail(data: Value) -> Result<Option<PollDetail>> {
+    let detail: Option<PollDetail> = serde_json::from_value(data)?;
+    Ok(detail.filter(|detail| detail != &PollDetail::default()))
+}
+
+fn poll_option_param(id: &str) -> Value {
+    if let Ok(value) = id.parse::<u64>() {
+        json!(value)
+    } else if let Ok(value) = id.parse::<i64>() {
+        json!(value)
+    } else {
+        json!(id)
+    }
+}
+
+/// Zalo code 166. The poll may have closed since its details were read.
+#[derive(Debug)]
+pub struct PollUnavailable;
+
+impl std::fmt::Display for PollUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bình chọn đã khóa hoặc không còn tồn tại.")
+    }
+}
+
+impl std::error::Error for PollUnavailable {}
+
+async fn request_poll(s: &Session, path: &str, body: &Value, is_vote: bool) -> Result<Value> {
+    if s.login.is_none() || s.is_expired_marked() {
+        anyhow::bail!("Chưa đăng nhập.");
+    }
+    let params = s.encoded_params(body)?;
+    let query = format!("{path}?{}&params={params}", s.common_params());
+    let response = s.get_group_poll(&query, is_vote).await.map_err(|error| {
+        if error
+            .downcast_ref::<SessionError>()
+            .is_some_and(|error| error.code == 166)
+        {
+            PollUnavailable.into()
+        } else {
+            error
+        }
+    })?;
+    let decoded = s.maybe_decrypt(response, s.session_key_bytes()).await;
+    poll_response_data(decoded)
+}
+
+fn poll_response_data(mut decoded: Value) -> Result<Value> {
+    match decoded.get("error_code").and_then(Value::as_i64) {
+        Some(0) => Ok(decoded.get_mut("data").map(Value::take).unwrap_or_default()),
+        Some(166) => Err(PollUnavailable.into()),
+        Some(code) => Err(SessionError::new(code, "Yêu cầu bình chọn bị từ chối.").into()),
+        None => anyhow::bail!("Phản hồi bình chọn không hợp lệ."),
+    }
+}
+
 /// `GET /api/preloadconvers/get-last-msgs` (cmd 10053).
 ///
 /// [O] request: GET `{convers_api}/api/preloadconvers/get-last-msgs?{common}&params={encodeAES(json)}`
@@ -6069,6 +6156,7 @@ fn parse_media_size(
 
 fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let msg_type = normalize_msg_type(it);
+    let is_poll = msg_type == "group.poll";
 
     let raw_content_val = it
         .get("content")
@@ -6079,19 +6167,42 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         })
         .or_else(|| it.get("msg"));
 
-    let mut sticker_meta = raw_content_val.and_then(extract_sticker_info);
+    let poll_content_json = if is_poll {
+        raw_content_val
+            .and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+    } else {
+        None
+    };
+    let poll_content = poll_content_json.as_ref().or(raw_content_val);
+    let poll_id = if is_poll {
+        poll_content.and_then(crate::poll::poll_id_from_message)
+    } else {
+        None
+    };
+    let media_content = if is_poll { None } else { raw_content_val };
+    let mut sticker_meta = media_content.and_then(extract_sticker_info);
     if sticker_meta.is_none()
         && (msg_type == "chat.sticker" || msg_type == "sticker" || msg_type == "5")
     {
         sticker_meta = extract_sticker_info(it);
     }
-    let (link_url, mut link_title, link_desc, mut link_thumb, mut link_src) = raw_content_val
+    let (link_url, mut link_title, link_desc, mut link_thumb, mut link_src) = media_content
         .map(extract_link_info)
         .unwrap_or((None, None, None, None, None));
 
-    let mut content = raw_content_val
-        .and_then(extract_content_text)
-        .unwrap_or_default();
+    let mut content = if is_poll {
+        poll_content
+            .and_then(crate::poll::question_from_message)
+            .map_or_else(
+                || "Bình chọn".to_owned(),
+                |question| format!("Bình chọn: {question}"),
+            )
+    } else {
+        raw_content_val
+            .and_then(extract_content_text)
+            .unwrap_or_default()
+    };
 
     let is_voice_msg = matches!(msg_type.as_str(), "chat.voice" | "voice" | "3");
     if is_voice_msg {
@@ -6179,7 +6290,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else if sticker_meta.is_some() && (content.is_empty() || content.starts_with('{')) {
         content = "[Nhãn dán]".to_string();
     }
-    if sticker_meta.is_none() {
+    if !is_poll && sticker_meta.is_none() {
         let parse_ami = |s: &str| -> Option<(u64, u64, u32)> {
             let pos = s.find("ami_fat_cat_")?;
             let num_str = s.get(pos + 12..pos + 14)?;
@@ -6384,7 +6495,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
             }
         }
     }
-    let media_size = if !is_voice_msg && !is_undo_type && sticker_meta.is_none() {
+    let media_size = if !is_poll && !is_voice_msg && !is_undo_type && sticker_meta.is_none() {
         raw_content_val
             .and_then(|content| parse_media_size(content, &msg_type, is_photo_msg, is_video_msg))
     } else {
@@ -6423,6 +6534,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         link_thumb,
         link_src,
         media_size,
+        poll_id,
 
         history_source: voice_source,
         ..Default::default()
@@ -10098,6 +10210,132 @@ mod send_identity_tests {
                 settings_until: None,
             }
         );
+    }
+
+    #[test]
+    fn poll_message_keeps_question_and_id_through_sqlite_round_trip() {
+        let mut raw = json!({
+            "msgId": "message-1",
+            "msgType": "group.poll",
+            "uidFrom": "user-1",
+            "ts": 1700000000000_i64,
+            "content": {
+                "thumb": "https://photo-stal.zdn.vn/test-image.jpg",
+                "params": r#"{"pollId":42,"question":"Chọn ngày nào?"}"#
+            },
+        });
+        let message = parse_chat_message(&raw).unwrap();
+        assert_eq!(message.text, "Bình chọn: Chọn ngày nào?");
+        assert_eq!(message.poll_id.as_deref(), Some("42"));
+        assert!(message.link_thumb.is_none());
+        raw["msgId"] = json!("message-2");
+        raw["ts"] = json!(1700000001000_i64);
+        raw["content"]["params"] = json!({"pollId": "poll-2", "question": "Chọn ngày nào?"});
+        let other_poll = parse_chat_message(&raw).unwrap();
+        let thread = Thread {
+            id: "group_test".into(),
+            name: "Test group".into(),
+            is_group: true,
+            messages: vec![message, other_poll],
+            ..Default::default()
+        };
+
+        let mut store = crate::store::MessageStore::open(":memory:").unwrap();
+        assert_eq!(
+            crate::store::persist_threads(&mut store, &[thread]).unwrap(),
+            2
+        );
+        let rows = store.messages_for("group_test", 10).unwrap();
+        let raw_json: Value = serde_json::from_str(&rows[0].raw_json).unwrap();
+        assert_eq!(raw_json["poll_id"], "42");
+        assert_eq!(rows[0].msg_type, "group.poll");
+
+        let mut threads = Vec::new();
+        assert_eq!(store.hydrate_threads(&mut threads, 10).unwrap(), 2);
+        let hydrated = &threads[0].messages[0];
+        assert_eq!(hydrated.text, "Bình chọn: Chọn ngày nào?");
+        assert_eq!(hydrated.poll_id.as_deref(), Some("42"));
+        assert_eq!(threads[0].messages[1].poll_id.as_deref(), Some("poll-2"));
+    }
+
+    #[tokio::test]
+    async fn poll_detail_parses_decrypted_response_with_mixed_id_types() {
+        let inner = json!({
+            "error_code": 0,
+            "data": {
+                "poll_id": 42,
+                "question": "Chọn ngày nào?",
+                "options": [
+                    {"option_id": 7, "content": "Thứ hai", "votes": 2, "voters": [1, "user-2"]},
+                    {"option_id": "option-2", "content": "Thứ ba"}
+                ],
+                "creator": 3,
+                "created_time": 1000,
+                "expired_time": 3000,
+                "status": "open",
+                "closed": false,
+                "joined": false,
+                "allow_multi_choices": true,
+                "allow_add_new_option": false,
+                "is_anonymous": true,
+                "is_hide_vote_preview": true,
+                "num_vote": 2
+            }
+        });
+        let key = [0x42; 16];
+        let encrypted = crate::crypto::encode_aes(&key, &inner.to_string()).unwrap();
+        let session = Session::new(false, false, false).unwrap();
+        let decrypted = session
+            .maybe_decrypt(json!({"error_code": 0, "data": encrypted}), &key)
+            .await;
+        let detail: PollDetail =
+            serde_json::from_value(poll_response_data(decrypted).unwrap()).unwrap();
+        assert_eq!(detail.poll_id.as_deref(), Some("42"));
+        assert_eq!(detail.creator.as_deref(), Some("3"));
+        assert_eq!(detail.options[0].option_id.as_deref(), Some("7"));
+        assert_eq!(detail.options[0].voters, ["1", "user-2"]);
+        assert_eq!(detail.options[1].option_id.as_deref(), Some("option-2"));
+        assert_eq!(detail.num_vote, Some(2));
+        assert_eq!(
+            crate::poll::VoteRules::for_poll(&detail, 2000),
+            crate::poll::VoteRules {
+                can_vote: true,
+                max_choices: 2,
+                show_counts: false,
+                show_voters: false,
+            }
+        );
+    }
+
+    #[test]
+    fn poll_error_166_has_a_recognisable_vietnamese_error() {
+        let error = poll_response_data(json!({"error_code": 166})).unwrap_err();
+        assert!(error.is::<PollUnavailable>());
+        assert_eq!(error.to_string(), "Bình chọn đã khóa hoặc không còn tồn tại.");
+    }
+
+    #[test]
+    fn poll_vote_encodes_integer_option_ids_without_rounding() {
+        for (id, expected) in [
+            ("42", json!(42)),
+            ("-1", json!(-1)),
+            ("18446744073709551615", json!(u64::MAX)),
+            ("option-2", json!("option-2")),
+        ] {
+            assert_eq!(poll_option_param(id), expected);
+        }
+    }
+
+    #[test]
+    fn poll_vote_acknowledgement_without_details_needs_a_refetch() {
+        for acknowledgement in [Value::Null, json!({}), json!({"success": true})] {
+            assert_eq!(poll_vote_detail(acknowledgement).unwrap(), None);
+        }
+        let updated = poll_vote_detail(json!({"poll_id": 42, "joined": true}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.poll_id.as_deref(), Some("42"));
+        assert_eq!(updated.joined, Some(true));
     }
 
     #[test]

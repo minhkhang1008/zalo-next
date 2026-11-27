@@ -24,6 +24,7 @@ pub mod message_model;
 /// Exact quoted-message references in loaded conversations.
 pub mod message_navigation;
 pub mod param_cipher;
+pub mod poll;
 pub mod qr;
 pub mod quick_messages;
 pub mod reactions;
