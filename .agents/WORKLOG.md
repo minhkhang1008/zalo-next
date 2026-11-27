@@ -1263,5 +1263,8 @@ Entry template:
   `credential_free_client` follows ≤5 redirects to https Zalo media hosts only (`media_redirect_allowed`) and uses
   the ZaloPC user agent; the video arm logs `MediaError` + host (no query) and shows the HTTP code.
 - Verification: cargo check, `media_redirects_stay_on_zalo_media_hosts`; release build launched for the owner.
-- NOT verified: that redirects were the real video cause (no capture) — if videos still fail, the log line
+- Follow-up (owner saw HTTP 301): log showed `*.dlmd.me` → 301 `video-stal-N.mdchat.me` → 302
+  `video-stal-N-te-…mdchat.me`. `mdchat.me` added to `is_trusted_zalo_media_url`; videos/voice use
+  `playback_client` (= credential-free client, redirects only to Zalo media hosts). Owner confirmed video plays.
+- Originally NOT verified: that redirects were the real video cause (no capture) — if videos still fail, the log line
   `video download` names the error; link clicks need the owner's GUI check.

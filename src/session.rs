@@ -58,7 +58,8 @@ pub fn is_trusted_zalo_media_url(url: &str) -> bool {
     let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
         return false;
     };
-    ["dlmd.me", "dlfl.vn"].iter().any(|base| {
+    // `mdchat.me`: video file servers that `*.dlmd.me` video links redirect to (observed 2026-11-27).
+    ["dlmd.me", "dlfl.vn", "mdchat.me"].iter().any(|base| {
         host == *base
             || host
                 .strip_suffix(base)
