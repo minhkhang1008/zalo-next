@@ -607,6 +607,18 @@ fn use_session_for_sticker_image(fetch_url: &str) -> bool {
     crate::session::is_trusted_zalo_url(fetch_url)
 }
 
+/// Full-resolution originals opened in the image viewer (`hd_` keys) can be much larger than
+/// grid thumbnails, so they get their own, still bounded, body limit.
+const ORIGINAL_IMAGE_LIMIT: usize = 64 * 1024 * 1024;
+
+fn sticker_image_body_limit(key: &str) -> usize {
+    if key.starts_with("hd_") {
+        ORIGINAL_IMAGE_LIMIT
+    } else {
+        crate::media_resources::PREVIEW_LIMIT
+    }
+}
+
 pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: egui::Context) {
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let _ = WORKER_TX.set(cmd_tx);
@@ -3295,7 +3307,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 Ok(resp) => {
                                                     crate::media_resources::read_bounded_response(
                                                         resp,
-                                                        crate::media_resources::PREVIEW_LIMIT,
+                                                        sticker_image_body_limit(&key),
                                                     )
                                                     .await
                                                     .ok()
@@ -4861,6 +4873,19 @@ async fn run_ai_ask(req: crate::ai::AskRequest, tx: GuiTx, db_path: String) {
 mod tests {
     use super::prepare_avatar_texture;
     use image::{DynamicImage, Rgba, RgbaImage};
+
+    #[test]
+    fn original_images_get_a_larger_but_bounded_body_limit() {
+        assert_eq!(
+            super::sticker_image_body_limit("thumb_abc"),
+            crate::media_resources::PREVIEW_LIMIT
+        );
+        assert_eq!(
+            super::sticker_image_body_limit("hd_abc"),
+            super::ORIGINAL_IMAGE_LIMIT
+        );
+        assert!(super::ORIGINAL_IMAGE_LIMIT > crate::media_resources::PREVIEW_LIMIT);
+    }
 
     #[test]
     fn privacy_regression_sticker_images_use_session_only_for_trusted_hosts() {

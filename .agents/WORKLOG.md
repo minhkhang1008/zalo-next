@@ -1091,3 +1091,41 @@ Entry template:
   `settings.local.json` and `skills` stay ignored. The deny rules were not exercised live, and a session restart
   may be needed for Claude Code to pick up the new project settings.
 - Status: done; committed locally, not pushed.
+
+## 2026-11-27 — Security fixes from security.md §7  (agent: Claude Code, claude-opus-5-5 (orchestrator) + Codex (worker, adversarial reviewer))
+- Request: owner approved fixing the code issues documented in `docs/standards/security.md` §7.
+- Workflow (first real use of CLAUDE.md): brief A (updater) → Codex write → Claude diff review + tests → commit;
+  brief B (media) the same way; Codex adversarial review found 5 more issues, all verified; brief C (follow-up)
+  → Codex, with 2 scope expansions approved; Claude fixed one regression itself; a final adversarial review
+  (round 2) found 3 more, of which Claude fixed one and the rest were recorded as debt (2-round cap).
+- Changes:
+  - `a42ab7d` updater: SHA-256 is mandatory on every path; `VerifiedRelease` type; asset/checksum URLs pinned to
+    `github.com/minhkhang1008/zalo-next/releases/download/`; https-only, no cookies, at most 3 redirects.
+  - `ab040f1` media:
+    - the legacy image loader uses the session client only for `is_trusted_zalo_url`, and the cookie-free
+      client otherwise;
+    - bodies are capped;
+    - link thumbnails from non-Zalo hosts need a click;
+    - thread snapshots are written `0600` atomically.
+  - `676e3a6`:
+    - the consent gate now covers photos, albums, video posters, the shared-media drawer and forward previews
+      (shared `MessageThumbnail`);
+    - failed thumbnails are no longer re-requested every frame (`failed_message_thumbnails`, cleared on account
+      switch);
+    - github.com redirect hops stay inside the repo;
+    - `zpw_sek` is seeded with `Secure`;
+    - snapshot write failures are logged;
+    - Claude kept the user's own `local://` sent images auto-loading (Codex's version required a click).
+  - Last commit: `hd_` originals get a 64 MiB cap instead of 16 MiB, fixing a regression the round-2 review
+    found. `security.md` §7 now lists what was fixed and what is still open.
+- Verification:
+  - `cargo test --locked` all green: 424 lib + 7 + 9 + 14 + 20 integration, run outside the Codex sandbox,
+    which denies loopback binds;
+  - no clippy warnings on changed lines (checked against the diff ranges).
+  - NOT verified: GUI look of the "Hiện ảnh" placeholders, live Zalo photo/sticker/thumbnail loading (risk:
+    Zalo CDN URLs that redirect, or `http://` Zalo images, now need a click or fail), a real update via GitHub
+    (redirect chain to `release-assets.githubusercontent.com`), and Windows/Linux.
+- Open (in `security.md` §7):
+  - redirect hops on automatic session-client image loads;
+  - an album cell can't open the original after its thumbnail failed.
+- Status: committed locally, not pushed.

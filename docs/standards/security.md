@@ -68,23 +68,23 @@ Message text, names, file names, sticker and link payloads, raw JSON, received d
 - Bound lengths, counts, nesting depth and decompressed size.
 - Wrap message text as **data** in Assistant prompts (prompt-injection defence, ADR-0004).
 
-## 7. Known debt (found 2026-11-27, not yet fixed)
+## 7. Known debt
 
-These go against the rules above. Fix each one as its own task, with an adversarial review:
-- **Updater:** the SHA-256 digest is optional. In-place macOS replacement requires it, but the Windows
-  portable `.exe` and Linux AppImage paths can install after format checks alone (`updater.rs`,
-  `gui/worker.rs::apply_github_release_update`). Asset and checksum URLs come from release metadata and are not
-  host-checked against `github.com/minhkhang1008/zalo-next`.
-- **Legacy image/sticker loader** (`gui/worker.rs`, image fetch branch): uses the session HTTP client (cookie
-  jar) for arbitrary `http(s)` image URLs without `is_trusted_zalo_url`, reads non-video bodies without a size
-  cap, and caches into the shared `stickers_cache/`. `zpw_sek` itself does not leak: it is
-  seeded into the jar only for trusted Zalo hosts (`session.rs`, `set_zpw_sek` loop guarded by
-  `is_trusted_zalo_url`), explicit `Cookie` headers are guarded the same way, and the client's default headers
-  are only `Origin`/`Referer`. The fetch itself is still unbounded and reaches non-Zalo hosts.
-- **Link-card thumbnails** in incoming messages are fetched automatically on a cache miss
-  (`gui/messages.rs`). That is an automatic request to a URL chosen by the sender.
-- **`threads_cache.json`** and per-account thread snapshots are written with plain `std::fs::write`
-  (`chat.rs`), so their mode depends on umask instead of being forced to `0600`.
+Fixed on 2026-11-27 (commits `a42ab7d`, `ab040f1`, `676e3a6`, plus the HD limit follow-up):
+- the updater requires SHA-256 on every path, pins asset, checksum and redirect URLs to this repo;
+- the image loader uses the cookie-free client off Zalo and caps bodies (16 MiB thumbnails, 64 MiB originals);
+- message images and link thumbnails from non-Zalo hosts need a click;
+- `zpw_sek` is `Secure`;
+- thread snapshots are `0600`.
+
+Still open. These go against the rules above; fix each one as its own task, with an adversarial review:
+- **Redirect hops on automatic image loads:** a trusted Zalo URL fetched through the session client follows
+  reqwest's default redirect policy. If a Zalo endpoint ever redirected off-allowlist, the destination would be
+  contacted without a click. This is not observed live. A fix needs a redirect-checking client for automatic
+  media loads.
+- **Album/shared-media cell after a failed thumbnail:** each click retries the thumbnail, so the original can't
+  be opened from that cell (`gui/album.rs`, `gui/workspace.rs` shared-photo drawer). There should be a separate
+  "open original" action.
 
 ## 8. Review checklist
 
