@@ -1,13 +1,13 @@
-//! Bounded macOS notification bridge: authorization plus delivery of new-message alerts.
+//! Native notification authorization and delivery for macOS and Windows.
 //!
-//! Delivery prefers the bundled `DailyNotifier` helper (`.app` builds) and falls back to
-//! `osascript` when the helper binary is absent, e.g. under `cargo run`. Text always travels as
-//! data (JSON on stdin for the helper, `argv` for `osascript`), never spliced into a script.
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+//! macOS uses the bundled `DailyNotifier` helper or falls back to `osascript` if it is absent.
+//! Windows uses the WinRT toast API. Both platforms pass message text as data.
+#[cfg(any(not(windows), test))]
+use std::path::PathBuf;
+#[cfg(not(windows))]
+use std::process::Stdio;
+use std::{path::Path, time::Duration};
+#[cfg(not(windows))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Longest notification title forwarded to the OS, in characters.
@@ -38,6 +38,9 @@ impl AuthorizationStatus {
     pub fn label(self) -> &'static str {
         match self {
             Self::NotDetermined => "Chưa yêu cầu quyền",
+            #[cfg(windows)]
+            Self::Denied => "Đã từ chối. Bạn có thể đổi trong Cài đặt > Hệ thống > Thông báo.",
+            #[cfg(not(windows))]
             Self::Denied => "Đã từ chối. Bạn có thể đổi trong Cài đặt hệ thống macOS.",
             Self::Authorized => "Đã cấp quyền",
             Self::Provisional => "Được phép thông báo im lặng",
@@ -53,14 +56,17 @@ pub enum NotificationError {
     ExplicitUserActionRequired,
     /// This platform or installation has no executable helper.
     HelperUnavailable,
-    /// The helper exceeded its deadline.
+    /// The notification operation exceeded its deadline.
     Timeout,
     /// The helper exited unsuccessfully or returned invalid/oversized output.
     InvalidResponse,
     /// The child pipe could not be read.
     Io,
-    /// The operating system has not authorized notifications for the helper.
+    /// The operating system has not authorized notifications for the app.
     NotAuthorized,
+    /// Windows could not register the app or use the toast API.
+    #[cfg(windows)]
+    WindowsApi,
 }
 impl std::fmt::Display for NotificationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -70,12 +76,18 @@ impl std::fmt::Display for NotificationError {
             Self::Timeout => "Đọc quyền thông báo quá thời gian. Hãy thử lại.",
             Self::InvalidResponse => "Trợ giúp quyền thông báo trả kết quả không hợp lệ.",
             Self::Io => "Lỗi đọc kết quả quyền thông báo. Hãy thử lại.",
+            #[cfg(windows)]
+            Self::NotAuthorized => "Windows chưa cho phép ứng dụng gửi thông báo.",
+            #[cfg(not(windows))]
             Self::NotAuthorized => "macOS chưa cho phép ứng dụng gửi thông báo.",
+            #[cfg(windows)]
+            Self::WindowsApi => "Không thể sử dụng thông báo Windows. Hãy thử lại.",
         })
     }
 }
 impl std::error::Error for NotificationError {}
 
+#[cfg(any(not(windows), test))]
 fn packaged_helper(executable: &Path) -> Option<PathBuf> {
     Some(
         executable
@@ -84,6 +96,7 @@ fn packaged_helper(executable: &Path) -> Option<PathBuf> {
             .join("Helpers/DailyNotifier.app/Contents/MacOS/DailyNotifier"),
     )
 }
+#[cfg(not(windows))]
 fn helper_path() -> PathBuf {
     let packaged = std::env::current_exe()
         .ok()
@@ -95,12 +108,14 @@ fn helper_path() -> PathBuf {
 }
 /// Spawn the helper, retrying briefly on `ETXTBSY`: a write handle to a freshly written executable
 /// can still be held by a concurrently forked child that has not reached `exec` yet.
+#[cfg(not(windows))]
 async fn spawn_helper(
     path: &Path,
     command: &str,
 ) -> Result<tokio::process::Child, NotificationError> {
     spawn_with(path, &[command], false).await
 }
+#[cfg(not(windows))]
 async fn spawn_with(
     path: &Path,
     args: &[&str],
@@ -130,6 +145,7 @@ async fn spawn_with(
     }
 }
 /// Run a child to completion under `deadline`, returning its bounded stdout on exit status 0.
+#[cfg(not(windows))]
 async fn collect_output(
     mut child: tokio::process::Child,
     stdin_payload: Option<Vec<u8>>,
@@ -171,6 +187,7 @@ async fn collect_output(
         .await
         .map_err(|_| NotificationError::Timeout)?
 }
+#[cfg(not(windows))]
 async fn invoke(
     path: &Path,
     command: &str,
@@ -179,6 +196,7 @@ async fn invoke(
     let child = spawn_helper(path, command).await?;
     parse_status(&collect_output(child, None, deadline).await?)
 }
+#[cfg(any(not(windows), test))]
 fn parse_status(output: &str) -> Result<AuthorizationStatus, NotificationError> {
     match output.trim() {
         "notDetermined" => Ok(AuthorizationStatus::NotDetermined),
@@ -190,6 +208,7 @@ fn parse_status(output: &str) -> Result<AuthorizationStatus, NotificationError> 
         _ => Err(NotificationError::InvalidResponse),
     }
 }
+#[cfg(not(windows))]
 async fn platform_invoke(
     command: &str,
     deadline: Duration,
@@ -203,21 +222,39 @@ async fn platform_invoke(
 ///
 /// # Errors
 /// Returns a typed error for unsupported platforms, missing helpers, deadlines or invalid output.
+/// Windows reports authorization lookup failures as [`AuthorizationStatus::Unavailable`].
 pub async fn status() -> Result<AuthorizationStatus, NotificationError> {
-    platform_invoke("--status", Duration::from_secs(10)).await
+    #[cfg(windows)]
+    {
+        Ok(windows_toast::status().await)
+    }
+    #[cfg(not(windows))]
+    {
+        platform_invoke("--status", Duration::from_secs(10)).await
+    }
 }
-/// Request authorization only after the user explicitly clicks the permission button.
+/// On macOS, request authorization only after the user clicks the permission button.
+///
+/// Windows has no permission prompt, so this returns the current status.
 ///
 /// # Errors
-/// Returns `ExplicitUserActionRequired` before spawning when the gesture is absent,
-/// or a typed helper error otherwise. This function never posts notifications.
+/// On macOS and unsupported platforms, returns `ExplicitUserActionRequired` when the
+/// gesture is absent, or a typed helper error otherwise.
 pub async fn request_if_user_action(
     explicit_user_action: bool,
 ) -> Result<AuthorizationStatus, NotificationError> {
-    if !explicit_user_action {
-        return Err(NotificationError::ExplicitUserActionRequired);
+    #[cfg(windows)]
+    {
+        let _ = explicit_user_action;
+        status().await
     }
-    platform_invoke("--request", Duration::from_secs(120)).await
+    #[cfg(not(windows))]
+    {
+        if !explicit_user_action {
+            return Err(NotificationError::ExplicitUserActionRequired);
+        }
+        platform_invoke("--request", Duration::from_secs(120)).await
+    }
 }
 
 /// Collapse control characters (including newlines) to spaces and cap the length, so the OS
@@ -236,6 +273,7 @@ fn sanitize(text: &str, max_chars: usize) -> String {
     cut
 }
 /// Opaque 64-hex request identifier required by the helper; it carries no message identity.
+#[cfg(any(not(windows), test))]
 fn opaque_id() -> String {
     use sha2::{Digest, Sha256};
     let mut seed = [0u8; 32];
@@ -252,6 +290,7 @@ fn opaque_id() -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
+#[cfg(any(not(windows), test))]
 fn helper_payload(title: &str, body: &str, attachment: Option<&Path>) -> Vec<u8> {
     serde_json::json!({
         "title": title,
@@ -266,6 +305,7 @@ fn helper_payload(title: &str, body: &str, attachment: Option<&Path>) -> Vec<u8>
     .to_string()
     .into_bytes()
 }
+#[cfg(any(not(windows), test))]
 fn parse_delivery(output: &str) -> Result<(), NotificationError> {
     match output.trim() {
         "submitted" => Ok(()),
@@ -273,6 +313,7 @@ fn parse_delivery(output: &str) -> Result<(), NotificationError> {
         _ => Err(NotificationError::InvalidResponse),
     }
 }
+#[cfg(not(windows))]
 async fn notify_via_helper(
     path: &Path,
     title: &str,
@@ -283,6 +324,7 @@ async fn notify_via_helper(
 }
 /// Self-drawn toast: shows the sender avatar as the only icon, which native banners cannot do.
 /// The helper prints `submitted` once the panel is on screen and exits when it is dismissed.
+#[cfg(not(windows))]
 async fn toast_via_helper(
     path: &Path,
     title: &str,
@@ -291,6 +333,7 @@ async fn toast_via_helper(
 ) -> Result<(), NotificationError> {
     run_helper_delivery(path, "--toast", title, body, attachment).await
 }
+#[cfg(not(windows))]
 async fn run_helper_delivery(
     path: &Path,
     mode: &str,
@@ -309,11 +352,13 @@ async fn run_helper_delivery(
     )
 }
 /// AppleScript that reads title and body from `argv`, so message text is never parsed as code.
+#[cfg(any(not(windows), test))]
 const OSASCRIPT_LINES: [&str; 3] = [
     "on run argv",
     "display notification (item 2 of argv) with title (item 1 of argv)",
     "end run",
 ];
+#[cfg(any(not(windows), test))]
 fn osascript_args<'a>(title: &'a str, body: &'a str) -> Vec<&'a str> {
     let mut args = Vec::with_capacity(9);
     for line in OSASCRIPT_LINES {
@@ -324,6 +369,7 @@ fn osascript_args<'a>(title: &'a str, body: &'a str) -> Vec<&'a str> {
     args.extend(["--", title, body]);
     args
 }
+#[cfg(not(windows))]
 async fn notify_via_osascript(title: &str, body: &str) -> Result<(), NotificationError> {
     let child = spawn_with(
         Path::new("/usr/bin/osascript"),
@@ -337,8 +383,8 @@ async fn notify_via_osascript(title: &str, body: &str) -> Result<(), Notificatio
 }
 /// Post a native new-message notification with `title` (sender or group) and `body` (preview).
 ///
-/// Uses the bundled `DailyNotifier` helper when its binary exists, otherwise `osascript`.
-/// A helper that reports `notAuthorized` is not bypassed through `osascript`.
+/// macOS uses the bundled `DailyNotifier` helper when its binary exists, otherwise `osascript`.
+/// Windows delivers a WinRT toast.
 ///
 /// # Errors
 /// Returns a typed error for unsupported platforms, missing tools, deadlines, denied
@@ -349,8 +395,8 @@ pub async fn notify(title: &str, body: &str) -> Result<(), NotificationError> {
 
 /// Post a native notification with an optional locally cached sender avatar attachment.
 ///
-/// The packaged macOS helper supports the attachment. The AppleScript fallback preserves the
-/// text notification and ignores the image because AppleScript has no attachment API.
+/// The packaged macOS helper and Windows toast support attachments. The AppleScript fallback
+/// delivers only the text because AppleScript has no attachment API.
 ///
 /// # Errors
 /// Returns the same bounded delivery errors as [`notify`].
@@ -359,7 +405,7 @@ pub async fn notify_with_attachment(
     body: &str,
     attachment: Option<&Path>,
 ) -> Result<(), NotificationError> {
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", windows)) {
         return Err(NotificationError::HelperUnavailable);
     }
     let title = sanitize(title, MAX_TITLE_CHARS);
@@ -374,19 +420,212 @@ pub async fn notify_with_attachment(
     } else {
         body
     };
-    let helper = helper_path();
-    if helper.is_file() {
-        // The toast needs no notification permission; fall back to the native banner if the
-        // helper cannot draw it (older helper binary, no screen).
-        if toast_via_helper(&helper, &title, &body, attachment)
-            .await
-            .is_ok()
-        {
-            return Ok(());
-        }
-        return notify_via_helper(&helper, &title, &body, attachment).await;
+    #[cfg(windows)]
+    {
+        windows_toast::notify(title, body, attachment.map(Path::to_path_buf)).await
     }
-    notify_via_osascript(&title, &body).await
+    #[cfg(not(windows))]
+    {
+        let helper = helper_path();
+        if helper.is_file() {
+            // The toast needs no notification permission; fall back to the native banner if the
+            // helper cannot draw it (older helper binary, no screen).
+            if toast_via_helper(&helper, &title, &body, attachment)
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+            return notify_via_helper(&helper, &title, &body, attachment).await;
+        }
+        notify_via_osascript(&title, &body).await
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_toast_template(with_image: bool) -> &'static str {
+    // The GUI controls notification sounds separately.
+    const TEXT: &str = r#"<toast>
+        <visual><binding template="ToastGeneric"><text/><text/></binding></visual>
+        <audio silent="true"/>
+    </toast>"#;
+    const TEXT_AND_IMAGE: &str = r#"<toast>
+        <visual><binding template="ToastGeneric">
+            <text/><text/><image placement="appLogoOverride" hint-crop="circle"/>
+        </binding></visual>
+        <audio silent="true"/>
+    </toast>"#;
+    if with_image {
+        TEXT_AND_IMAGE
+    } else {
+        TEXT
+    }
+}
+
+#[cfg(any(windows, test))]
+fn local_attachment_uri(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let uri = reqwest::Url::from_file_path(path).ok()?;
+    // A Windows UNC path also converts to a file URI. Reject its host before checking the file.
+    if uri.has_host() || !path.is_file() {
+        return None;
+    }
+    Some(uri.into())
+}
+
+#[cfg(any(windows, test))]
+fn windows_authorization_status(setting: Option<i32>) -> AuthorizationStatus {
+    // WinRT NotificationSetting discriminants. Unknown future values are unavailable.
+    match setting {
+        Some(0) => AuthorizationStatus::Authorized,
+        Some(1..=4) => AuthorizationStatus::Denied,
+        _ => AuthorizationStatus::Unavailable,
+    }
+}
+
+#[cfg(windows)]
+mod windows_toast {
+    use super::{
+        local_attachment_uri, windows_authorization_status, windows_toast_template,
+        AuthorizationStatus, NotificationError, NOTIFY_DEADLINE,
+    };
+    use std::{path::PathBuf, time::Duration};
+    use windows::{
+        core::{self, h, w, Interface, HSTRING, PCWSTR},
+        Data::Xml::Dom::{XmlDocument, XmlElement},
+        Win32::{
+            Foundation::ERROR_SUCCESS,
+            System::{
+                Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ},
+                WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
+            },
+        },
+        UI::Notifications::{ToastNotification, ToastNotificationManager, ToastNotifier},
+    };
+
+    const AUMID: &str = "com.ctdoteam1110.ctdozlite";
+
+    struct WinRtApartment;
+
+    impl Drop for WinRtApartment {
+        fn drop(&mut self) {
+            // SAFETY: The guard is created after successful initialization and stays on that thread.
+            unsafe { RoUninitialize() };
+        }
+    }
+
+    fn register_aumid() -> Result<(), NotificationError> {
+        let key: Vec<u16> = r"Software\Classes\AppUserModelId\"
+            .encode_utf16()
+            .chain(AUMID.encode_utf16())
+            .chain([0])
+            .collect();
+        let display_name: Vec<u16> = crate::APP_DISPLAY_NAME.encode_utf16().chain([0]).collect();
+        // SAFETY: Both UTF-16 buffers are NUL-terminated and live throughout the call.
+        // The REG_SZ byte count includes the terminating NUL.
+        let result = unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key.as_ptr()),
+                w!("DisplayName"),
+                REG_SZ.0,
+                Some(display_name.as_ptr().cast()),
+                std::mem::size_of_val(display_name.as_slice()) as u32,
+            )
+        };
+        if result == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(NotificationError::WindowsApi)
+        }
+    }
+
+    fn hstring(text: &str) -> core::Result<HSTRING> {
+        HSTRING::from_wide(&text.encode_utf16().collect::<Vec<_>>())
+    }
+
+    async fn with_notifier<T: Send + 'static>(
+        deadline: Duration,
+        operation: impl FnOnce(&ToastNotifier) -> Result<T, NotificationError> + Send + 'static,
+    ) -> Result<T, NotificationError> {
+        let mut task = tokio::task::spawn_blocking(move || {
+            // SAFETY: We pair every successful initialization, including S_FALSE, with
+            // RoUninitialize on this thread after the WinRT objects have been dropped.
+            unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
+                .map_err(|_| NotificationError::WindowsApi)?;
+            let _apartment = WinRtApartment;
+            register_aumid()?;
+            let notifier = hstring(AUMID)
+                .and_then(|id| ToastNotificationManager::CreateToastNotifierWithId(&id))
+                .map_err(|_| NotificationError::WindowsApi)?;
+            operation(&notifier)
+        });
+        match tokio::time::timeout(deadline, &mut task).await {
+            Ok(result) => result.map_err(|_| NotificationError::WindowsApi)?,
+            Err(_) => {
+                // This cancels queued work. A WinRT call already in progress runs to completion.
+                task.abort();
+                Err(NotificationError::Timeout)
+            }
+        }
+    }
+
+    fn read_setting(notifier: &ToastNotifier) -> Result<i32, NotificationError> {
+        notifier
+            .Setting()
+            .map(|setting| setting.0)
+            .map_err(|_| NotificationError::WindowsApi)
+    }
+
+    pub(super) async fn status() -> AuthorizationStatus {
+        windows_authorization_status(
+            with_notifier(Duration::from_secs(10), read_setting)
+                .await
+                .ok(),
+        )
+    }
+
+    fn toast_document(
+        title: &str,
+        body: &str,
+        image_uri: Option<&str>,
+    ) -> core::Result<XmlDocument> {
+        let document = XmlDocument::new()?;
+        document.LoadXml(&hstring(windows_toast_template(image_uri.is_some()))?)?;
+        let text = document.GetElementsByTagName(h!("text"))?;
+        text.Item(0)?.SetInnerText(&hstring(title)?)?;
+        text.Item(1)?.SetInnerText(&hstring(body)?)?;
+        if let Some(uri) = image_uri {
+            let image = document
+                .GetElementsByTagName(h!("image"))?
+                .Item(0)?
+                .cast::<XmlElement>()?;
+            image.SetAttribute(h!("src"), &hstring(uri)?)?;
+        }
+        Ok(document)
+    }
+
+    pub(super) async fn notify(
+        title: String,
+        body: String,
+        attachment: Option<PathBuf>,
+    ) -> Result<(), NotificationError> {
+        with_notifier(NOTIFY_DEADLINE, move |notifier| {
+            match windows_authorization_status(Some(read_setting(notifier)?)) {
+                AuthorizationStatus::Authorized => (),
+                AuthorizationStatus::Denied => return Err(NotificationError::NotAuthorized),
+                _ => return Err(NotificationError::WindowsApi),
+            }
+            let image_uri = attachment.as_deref().and_then(local_attachment_uri);
+            toast_document(&title, &body, image_uri.as_deref())
+                .and_then(|document| ToastNotification::CreateToastNotification(&document))
+                .and_then(|toast| notifier.Show(&toast))
+                .map_err(|_| NotificationError::WindowsApi)
+        })
+        .await
+    }
 }
 
 /// UI-owned sequence gate: at most one request is pending; stale completions are ignored.
@@ -422,6 +661,72 @@ impl AuthorizationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_toast_templates_only_contain_fixed_markup() {
+        for with_image in [false, true] {
+            let template = windows_toast_template(with_image);
+            assert!(template.contains(r#"template="ToastGeneric""#));
+            assert_eq!(template.matches("<text/>").count(), 2);
+            assert_eq!(template.contains("<image"), with_image);
+            if with_image {
+                assert!(template.contains(r#"placement="appLogoOverride" hint-crop="circle""#));
+            }
+            for forbidden in ["action", "protocol", "src=", "http"] {
+                assert!(!template.contains(forbidden));
+            }
+        }
+    }
+
+    #[test]
+    fn windows_toast_avatar_uri_encodes_existing_absolute_file() {
+        let dir = crate::data_dir::PrivateTempDir::new("zalo-toast-avatar").unwrap();
+        let path = dir.path().join("avatar #100%.png");
+        std::fs::write(&path, b"avatar fixture").unwrap();
+
+        let uri = local_attachment_uri(&path).unwrap();
+        assert!(uri.starts_with("file:///"));
+        assert!(uri.ends_with("/avatar%20%23100%25.png"));
+    }
+
+    #[test]
+    fn windows_toast_avatar_uri_rejects_relative_non_file_and_remote_paths() {
+        let dir = crate::data_dir::PrivateTempDir::new("zalo-toast-avatar").unwrap();
+        for path in [
+            Path::new("avatar.png"),
+            dir.path(),
+            &dir.path().join("missing.png"),
+            Path::new("http://example.invalid/avatar.png"),
+            Path::new("https://example.invalid/avatar.png"),
+        ] {
+            assert_eq!(local_attachment_uri(path), None);
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            local_attachment_uri(Path::new(r"\\example.invalid\share\avatar.png")),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_toast_setting_maps_enabled_disabled_and_unavailable() {
+        assert_eq!(
+            windows_authorization_status(Some(0)),
+            AuthorizationStatus::Authorized
+        );
+        for setting in 1..=4 {
+            assert_eq!(
+                windows_authorization_status(Some(setting)),
+                AuthorizationStatus::Denied
+            );
+        }
+        for setting in [None, Some(5)] {
+            assert_eq!(
+                windows_authorization_status(setting),
+                AuthorizationStatus::Unavailable
+            );
+        }
+    }
 
     #[test]
     fn parser_accepts_all_statuses_and_rejects_unknown() {
@@ -527,6 +832,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn permission_requires_explicit_action_before_spawn() {
         assert_eq!(
@@ -658,7 +964,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     #[tokio::test]
     async fn unsupported_platform_does_not_launch_helper() {
         assert_eq!(status().await, Err(NotificationError::HelperUnavailable));

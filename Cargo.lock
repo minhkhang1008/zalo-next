@@ -5506,6 +5506,7 @@ dependencies = [
  "tokio-tungstenite",
  "tray-icon",
  "wasmtime",
+ "windows",
  "zip",
  "zstd",
 ]
