@@ -1252,6 +1252,15 @@ pub(super) fn render_ai_bubble(
             );
             ui.add_space(4.0);
         }
+        // The right-click target must be registered before the text: egui gives a click to the
+        // widget registered last, so a menu target added after the bubble's labels (as
+        // `Response::context_menu` does) swallowed clicks on links in the answer. Last frame's
+        // rect is used, so the menu is ready from the second frame on.
+        let menu_id = egui::Id::new(("ai_bubble_menu", &msg.id));
+        let menu_target = ui
+            .ctx()
+            .data(|d| d.get_temp::<egui::Rect>(menu_id))
+            .map(|rect| ui.interact(rect, menu_id, Sense::click()));
         let resp = ui
             .vertical(|ui| {
                 ui.set_max_width(max_w);
@@ -1295,10 +1304,11 @@ pub(super) fn render_ai_bubble(
                     .response
             })
             .inner;
-        if !is_error {
+        ui.ctx().data_mut(|d| d.insert_temp(menu_id, resp.rect));
+        if let (false, Some(target)) = (is_error, menu_target) {
             let msg_id = msg.id.clone();
             let text = msg.text.clone();
-            resp.context_menu(|ui| {
+            target.context_menu(|ui| {
                 if ui.button("Sao chép").clicked() {
                     action = Some(AiAction::Copy(text.clone()));
                     ui.close_menu();

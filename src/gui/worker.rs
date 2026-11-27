@@ -1125,7 +1125,26 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             crate::media_resources::MediaError::Cancelled => {
                                                 "Đã dừng tải video.".to_string()
                                             }
-                                            _ => "Không tải được video từ Zalo.".to_string(),
+                                            other => {
+                                                // Host only: the query carries a signed token.
+                                                let host = reqwest::Url::parse(&url)
+                                                    .ok()
+                                                    .and_then(|u| u.host_str().map(str::to_string))
+                                                    .unwrap_or_default();
+                                                crate::logger::log_error(
+                                                    "video download",
+                                                    &format!("{other:?} host={host}"),
+                                                );
+                                                match other {
+                                                    crate::media_resources::MediaError::Http(code) => {
+                                                        format!("Không tải được video từ Zalo (HTTP {code}).")
+                                                    }
+                                                    crate::media_resources::MediaError::Timeout => {
+                                                        "Hết thời gian tải video từ Zalo.".to_string()
+                                                    }
+                                                    _ => "Không tải được video từ Zalo.".to_string(),
+                                                }
+                                            }
                                         })?;
                                         let _ = cache.prune();
                                     }

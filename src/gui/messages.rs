@@ -1292,6 +1292,22 @@ fn bare_url_len(s: &str) -> usize {
         .len()
 }
 
+/// The first http(s) URL anywhere in `text`, without surrounding markdown or punctuation.
+fn embedded_url(text: &str) -> Option<String> {
+    let start = text.find("https://").or_else(|| text.find("http://"))?;
+    let rest = &text[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || matches!(c, '`' | '*' | '<' | '>' | '"' | '|'))
+        .unwrap_or(rest.len());
+    let url = rest[..end].trim_end_matches(|c: char| {
+        matches!(
+            c,
+            ')' | ']' | ',' | ';' | '.' | '!' | '?' | '\'' | '_' | '~'
+        )
+    });
+    (url.len() > "https://".len()).then(|| url.to_string())
+}
+
 /// Add an `https://` scheme to scheme-less URLs such as `docs.google.com/...`.
 fn normalize_bare_url(u: &str) -> String {
     if u.starts_with("http://") || u.starts_with("https://") {
@@ -2121,6 +2137,11 @@ fn render_markdown_inline_rich(
         }
     }
 
+    if first_link.is_none() {
+        // A URL inside `code`, **bold** or right after punctuation ("Link:https://…") is not
+        // styled as a link, but clicking the line should still open it.
+        first_link = embedded_url(text);
+    }
     let (job, emoji_marks) = split_emoji_sections(job, textures, loading);
     let add_label = |ui: &mut egui::Ui, label: egui::Label| {
         if first_link.is_some() {

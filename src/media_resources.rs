@@ -16,15 +16,35 @@ pub const HTML_LIMIT: usize = 128 * 1024;
 pub const TEXTURE_BUDGET: u64 = 128 * 1024 * 1024;
 pub const DISK_BUDGET: u64 = 512 * 1024 * 1024;
 
-/// Build a redirect-free client with no cookie jar for observed Zalo media CDN downloads.
+/// Most redirect hops a media download follows.
+const MAX_MEDIA_REDIRECTS: usize = 5;
+
+/// Whether a media download may follow a redirect to `url`: only https Zalo hosts and Zalo media
+/// CDNs. Zalo video CDNs (`*.dlmd.me`) answer the URL in a message with a redirect to the node
+/// that holds the file; without following it every uncached video failed to load.
+pub fn media_redirect_allowed(url: &str, hops: usize) -> bool {
+    hops < MAX_MEDIA_REDIRECTS && crate::session::is_trusted_zalo_media_url(url)
+}
+
+/// Build a client with no cookie jar for observed Zalo media CDN downloads. It follows redirects
+/// only to Zalo media hosts ([`media_redirect_allowed`]).
 ///
 /// # Errors
 /// Returns an error when the TLS client cannot be constructed.
 pub fn credential_free_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if media_redirect_allowed(attempt.url().as_str(), attempt.previous().len()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
         .connect_timeout(std::time::Duration::from_secs(15))
-        .user_agent("zalo-next-media/0.2")
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
+        )
         .build()
 }
 pub const ACTIVE_JOBS: usize = 4;
@@ -443,6 +463,17 @@ impl MediaJobQueue {
 #[cfg(test)]
 mod admission_and_drop_tests {
     use super::*;
+    #[test]
+    fn media_redirects_stay_on_zalo_media_hosts() {
+        assert!(media_redirect_allowed(
+            "https://f20-zvc.dlmd.me/v/a.mp4?sig=x",
+            0
+        ));
+        assert!(media_redirect_allowed("https://f1.zdn.vn/a.jpg", 4));
+        assert!(!media_redirect_allowed("https://f1.zdn.vn/a.jpg", 5));
+        assert!(!media_redirect_allowed("http://f20-zvc.dlmd.me/a.mp4", 0));
+        assert!(!media_redirect_allowed("https://example.org/a.mp4", 0));
+    }
     #[test]
     fn admission_is_bounded_before_any_task_is_spawned() {
         let queue = MediaJobQueue::default();
