@@ -1797,7 +1797,7 @@ impl ZaloGuiApp {
 
         if show_info_drawer {
             if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count)) = thread_meta {
-                let shared_photos: Vec<(String, String, String, String)> = self
+                let shared_photos: Vec<(MessageThumbnail, String, String)> = self
                     .threads
                     .get(self.selected_thread_index)
                     .map(|t| {
@@ -1824,12 +1824,7 @@ impl ZaloGuiApp {
                                     .link_title
                                     .clone()
                                     .unwrap_or_else(|| "Hình ảnh đã chia sẻ".into());
-                                Some((
-                                    format!("thumb_{}", crate::crypto::md5_hex(thumb)),
-                                    thumb.to_string(),
-                                    full,
-                                    title,
-                                ))
+                                Some((MessageThumbnail::new(m, thumb, "thumb_"), full, title))
                             })
                             .take(9)
                             .collect()
@@ -2219,27 +2214,29 @@ impl ZaloGuiApp {
                                 } else {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                        for (tkey, thumb_u, full_u, ptitle) in &shared_photos {
-                                            if !self.sticker_textures.contains_key(tkey)
-                                                && self.loading_stickers.insert(tkey.clone())
-                                            {
-                                                if let Some(tx) = WORKER_TX.get() {
-                                                    let _ = tx.send(WorkerCmd::FetchStickerImage {
-                                                        key: tkey.clone(),
-                                                        url: thumb_u.clone(),
-                                                    });
-                                                }
-                                            }
+                                        for (thumbnail, full_u, ptitle) in &shared_photos {
                                             let (cell_r, cell_resp) = ui.allocate_exact_size(
                                                 Vec2::splat(74.0),
                                                 Sense::click(),
+                                            );
+                                            let texture =
+                                                thumbnail.texture(ui.ctx(), &self.sticker_textures);
+                                            let needs_click = texture.is_none()
+                                                && thumbnail
+                                                    .needs_click(&self.failed_message_thumbnails);
+                                            thumbnail.request(
+                                                ui.ctx(),
+                                                &self.sticker_textures,
+                                                &mut self.loading_stickers,
+                                                &self.failed_message_thumbnails,
+                                                needs_click && cell_resp.clicked(),
                                             );
                                             ui.painter().rect_filled(
                                                 cell_r,
                                                 Rounding::same(8.0),
                                                 pal.bg_elevated,
                                             );
-                                            if let Some(tex) = self.sticker_textures.get(tkey) {
+                                            if let Some(tex) = texture {
                                                 ui.painter().image(
                                                     tex.id(),
                                                     cell_r,
@@ -2248,6 +2245,14 @@ impl ZaloGuiApp {
                                                         Pos2::new(1.0, 1.0),
                                                     ),
                                                     Color32::WHITE,
+                                                );
+                                            } else if needs_click {
+                                                ui.painter().text(
+                                                    cell_r.center(),
+                                                    egui::Align2::CENTER_CENTER,
+                                                    "Hiện ảnh",
+                                                    FontId::proportional(11.0),
+                                                    pal.text_secondary,
                                                 );
                                             } else {
                                                 draw_icon_image(
@@ -2269,13 +2274,16 @@ impl ZaloGuiApp {
                                                     },
                                                 ),
                                             );
-                                            if cell_resp
+                                            let cell_resp = cell_resp
                                                 .on_hover_cursor(CursorIcon::PointingHand)
-                                                .on_hover_text("Xem ảnh phóng to")
-                                                .clicked()
-                                            {
+                                                .on_hover_text(if needs_click {
+                                                    "Hiện ảnh"
+                                                } else {
+                                                    "Xem ảnh phóng to"
+                                                });
+                                            if cell_resp.clicked() && !needs_click {
                                                 self.image_viewer = Some(ImageViewerModal {
-                                                    tex_key: tkey.clone(),
+                                                    tex_key: thumbnail.key.clone(),
                                                     hd_tex_key: self.request_hd_texture(full_u),
                                                     full_url: full_u.clone(),
                                                     title: ptitle.clone(),
@@ -3985,6 +3993,7 @@ impl ZaloGuiApp {
                                                         pal,
                                                         &self.sticker_textures,
                                                         &mut self.loading_stickers,
+                                                        &self.failed_message_thumbnails,
                                                         &self.emoji_textures,
                                                         idx,
                                                         &reactor_name,

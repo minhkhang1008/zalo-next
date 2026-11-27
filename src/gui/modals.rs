@@ -6754,19 +6754,26 @@ impl ZaloGuiApp {
                                     ui.set_width(ui.available_width());
                                     ui.horizontal(|ui| {
                                         if let Some(url) = thumb_url.as_deref().filter(|u| !u.is_empty()) {
-                                            let key = format!("thumb_{}", crate::crypto::md5_hex(url));
-                                            match self.sticker_textures.get(&key) {
+                                            let thumbnail = MessageThumbnail::new(&fwd, url, "thumb_");
+                                            match thumbnail.texture(ui.ctx(), &self.sticker_textures) {
                                                 Some(tex) => {
                                                     ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::splat(44.0)).rounding(Rounding::same(4.0)));
                                                 }
                                                 None => {
-                                                    if self.loading_stickers.insert(key.clone()) {
-                                                        if let Some(tx) = WORKER_TX.get() {
-                                                            let _ = tx.send(WorkerCmd::FetchStickerImage { key, url: url.to_string() });
-                                                        }
-                                                    }
-                                                    let (r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
-                                                    ui.painter().rect_filled(r, Rounding::same(4.0), pal.bg_hover);
+                                                    let clicked = if thumbnail.needs_click(&self.failed_message_thumbnails) {
+                                                        thumbnail.load_button(ui, &self.loading_stickers, "Hiện ảnh xem trước")
+                                                    } else {
+                                                        let (r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                                                        ui.painter().rect_filled(r, Rounding::same(4.0), pal.bg_hover);
+                                                        false
+                                                    };
+                                                    thumbnail.request(
+                                                        ui.ctx(),
+                                                        &self.sticker_textures,
+                                                        &mut self.loading_stickers,
+                                                        &self.failed_message_thumbnails,
+                                                        clicked,
+                                                    );
                                                 }
                                             }
                                             ui.add_space(10.0);

@@ -940,6 +940,7 @@ pub struct ZaloGuiApp {
     sticker_tab: StickerTab,
     sticker_textures: HashMap<String, TextureHandle>,
     loading_stickers: HashSet<String>,
+    failed_message_thumbnails: HashSet<String>,
     emoji_textures: HashMap<String, TextureHandle>,
     app_logo_texture: Option<TextureHandle>,
     sticker_store_packs: Vec<crate::chat::StickerPackInfo>,
@@ -1315,6 +1316,7 @@ impl ZaloGuiApp {
             sticker_tab: StickerTab::Popular,
             sticker_textures: HashMap::new(),
             loading_stickers: HashSet::new(),
+            failed_message_thumbnails: HashSet::new(),
             emoji_textures: load_default_emoji_textures(&cc.egui_ctx),
             app_logo_texture: load_app_logo_texture(&cc.egui_ctx),
             sticker_store_packs: Vec::new(),
@@ -1941,6 +1943,7 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Đã chuyển sang tài khoản {name}");
                     self.show_toast(format!("Đã chuyển sang tài khoản {name}"));
                     self.history_reached_start.clear();
+                    self.failed_message_thumbnails.clear();
                 }
                 GuiEvent::MessageSent {
                     client_message_id,
@@ -2264,6 +2267,9 @@ impl ZaloGuiApp {
                     // falls back to the monochrome glyph.
                     if !key.starts_with("emoji_") {
                         self.loading_stickers.remove(&key);
+                    }
+                    if key.starts_with("thumb_") || key.starts_with("video_thumb_") {
+                        self.failed_message_thumbnails.insert(key);
                     }
                 }
                 GuiEvent::VideoLoadProgress {

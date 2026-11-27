@@ -2454,10 +2454,105 @@ fn is_voice_message(msg: &ChatMessage) -> bool {
         || msg.link_src.as_deref() == Some("Thoại Zalo")
 }
 
-fn should_auto_load_link_thumbnail(url: &str) -> bool {
-    url.starts_with("https://")
-        && crate::session::is_trusted_zalo_media_url(url)
-        && crate::session::is_trusted_zalo_media_url(&crate::store::jxl_to_jpg_url(url))
+fn should_auto_load_message_thumbnail(url: &str) -> bool {
+    let trusted_https = |url: &str| {
+        url.starts_with("https://") && crate::session::is_trusted_zalo_media_url(url)
+    };
+    trusted_https(url) && trusted_https(&crate::store::jxl_to_jpg_url(url))
+}
+
+fn should_request_message_thumbnail(
+    auto_load: bool,
+    failed: bool,
+    loading: bool,
+    clicked: bool,
+) -> bool {
+    !loading && (clicked || (auto_load && !failed))
+}
+
+pub(super) struct MessageThumbnail {
+    pub(super) key: String,
+    url: String,
+    request_id: Id,
+    auto_load: bool,
+    can_load_on_click: bool,
+}
+
+impl MessageThumbnail {
+    pub(super) fn new(msg: &ChatMessage, url: &str, key_prefix: &str) -> Self {
+        Self {
+            key: format!("{key_prefix}{}", crate::crypto::md5_hex(url)),
+            url: url.to_owned(),
+            request_id: Id::new(("message_thumbnail_requested", &msg.id, msg.ts, &msg.sender, url)),
+            // The user's own just-sent image is read from disk, not fetched from the network.
+            auto_load: should_auto_load_message_thumbnail(url)
+                || (msg.is_outgoing && url.starts_with("local://")),
+            can_load_on_click: url.starts_with("https://")
+                || url.starts_with("http://")
+                || (msg.is_outgoing && url.starts_with("local://")),
+        }
+    }
+
+    pub(super) fn texture<'a>(
+        &self,
+        ctx: &egui::Context,
+        textures: &'a HashMap<String, TextureHandle>,
+    ) -> Option<&'a TextureHandle> {
+        textures.get(&self.key).filter(|_| {
+            self.auto_load
+                || ctx.data(|data| data.get_temp::<bool>(self.request_id).unwrap_or(false))
+        })
+    }
+
+    pub(super) fn needs_click(&self, failed: &HashSet<String>) -> bool {
+        !self.auto_load || failed.contains(&self.key)
+    }
+
+    pub(super) fn load_button(
+        &self,
+        ui: &mut egui::Ui,
+        loading: &HashSet<String>,
+        label: &str,
+    ) -> bool {
+        ui.add_enabled(
+            self.can_load_on_click && !loading.contains(&self.key),
+            egui::Button::new(label).small(),
+        )
+        .clicked()
+    }
+
+    pub(super) fn request(
+        &self,
+        ctx: &egui::Context,
+        textures: &HashMap<String, TextureHandle>,
+        loading: &mut HashSet<String>,
+        failed: &HashSet<String>,
+        clicked: bool,
+    ) {
+        let clicked = clicked && self.can_load_on_click;
+        if clicked {
+            ctx.data_mut(|data| data.insert_temp(self.request_id, true));
+        }
+        if textures.contains_key(&self.key)
+            || !should_request_message_thumbnail(
+                self.auto_load,
+                failed.contains(&self.key),
+                loading.contains(&self.key),
+                clicked,
+            )
+        {
+            return;
+        }
+        if let Some(tx) = WORKER_TX.get() {
+            let command = WorkerCmd::FetchStickerImage {
+                key: self.key.clone(),
+                url: self.url.clone(),
+            };
+            if tx.send(command).is_ok() {
+                loading.insert(self.key.clone());
+            }
+        }
+    }
 }
 
 pub(super) fn render_message_body(
@@ -2469,6 +2564,7 @@ pub(super) fn render_message_body(
     max_text_width: f32,
     sticker_textures: &HashMap<String, TextureHandle>,
     loading_stickers: &mut HashSet<String>,
+    failed_message_thumbnails: &HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
     album: Option<&[&ChatMessage]>,
 ) -> Option<BubbleAction> {
@@ -2521,7 +2617,7 @@ pub(super) fn render_message_body(
                 members,
                 super::album::album_width(max_text_width),
                 pal,
-                sticker_textures,
+                (sticker_textures, failed_message_thumbnails),
                 loading_stickers,
                 &sender_label,
             );
@@ -2540,15 +2636,8 @@ pub(super) fn render_message_body(
             return act;
         }
         if let Some(thumb_url) = photo_primary_url(msg) {
-            let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
-            if !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
-                if let Some(tx) = WORKER_TX.get() {
-                    let _ = tx.send(WorkerCmd::FetchStickerImage {
-                        key: key.clone(),
-                        url: thumb_url.to_string(),
-                    });
-                }
-            }
+            let thumbnail = MessageThumbnail::new(msg, thumb_url, "thumb_");
+            let texture = thumbnail.texture(ui.ctx(), sticker_textures);
             let open_target = msg
                 .link_url
                 .as_deref()
@@ -2574,7 +2663,7 @@ pub(super) fn render_message_body(
                 .unwrap_or("Hình ảnh")
                 .to_string();
 
-            if let Some(tex) = sticker_textures.get(&key) {
+            if let Some(tex) = texture {
                 let [tw, th] = tex.size();
                 if tw <= 2 || th <= 2 {
                     // Expired or empty tombstone image on Zalo CDN (e.g. 1x1 jpeg)
@@ -2666,7 +2755,7 @@ pub(super) fn render_message_body(
                     }
                     if resp.clicked() {
                         body_action = Some(BubbleAction::OpenImagePopup {
-                            tex_key: key,
+                            tex_key: thumbnail.key,
                             full_url: open_target,
                             title: title_label,
                             sender: sender_label,
@@ -2674,7 +2763,23 @@ pub(super) fn render_message_body(
                         });
                     }
                 }
+            } else if thumbnail.needs_click(failed_message_thumbnails) {
+                let clicked = thumbnail.load_button(ui, loading_stickers, "Hiện ảnh");
+                thumbnail.request(
+                    ui.ctx(),
+                    sticker_textures,
+                    loading_stickers,
+                    failed_message_thumbnails,
+                    clicked,
+                );
             } else {
+                thumbnail.request(
+                    ui.ctx(),
+                    sticker_textures,
+                    loading_stickers,
+                    failed_message_thumbnails,
+                    false,
+                );
                 // Loading / Placeholder frame with visual image icon and loading feedback
                 let disp_w = max_text_width.clamp(200.0, 280.0);
                 let disp_h = 150.0_f32;
@@ -2720,7 +2825,7 @@ pub(super) fn render_message_body(
                     .clicked()
                 {
                     body_action = Some(BubbleAction::OpenImagePopup {
-                        tex_key: key,
+                        tex_key: thumbnail.key,
                         full_url: open_target,
                         title: title_label,
                         sender: sender_label,
@@ -2863,25 +2968,14 @@ pub(super) fn render_message_body(
             let poster = msg
                 .link_thumb
                 .as_deref()
-                .filter(|url| crate::session::is_trusted_zalo_url(url));
-            let poster_key =
-                poster.map(|url| format!("video_thumb_{}", crate::crypto::md5_hex(url)));
-            if let (Some(url), Some(key)) = (poster, poster_key.as_ref()) {
-                if !sticker_textures.contains_key(key) && loading_stickers.insert(key.clone()) {
-                    if let Some(tx) = WORKER_TX.get() {
-                        let _ = tx.send(WorkerCmd::FetchStickerImage {
-                            key: key.clone(),
-                            url: url.to_string(),
-                        });
-                    }
-                }
-            }
+                .filter(|url| !url.is_empty())
+                .map(|url| MessageThumbnail::new(msg, url, "video_thumb_"));
 
             // Must equal the width `message_bubble` reserved (`video_card_width`), or the poster
             // overflows its frame and outgoing bubbles drift right.
-            let texture = poster_key
-                .as_deref()
-                .and_then(|key| sticker_textures.get(key));
+            let texture = poster
+                .as_ref()
+                .and_then(|poster| poster.texture(ui.ctx(), sticker_textures));
             let card_size = video_card_size(max_text_width, texture.map(|texture| texture.size()));
             let (rect, response) = ui.allocate_exact_size(card_size, Sense::click());
             ui.painter()
@@ -2928,6 +3022,17 @@ pub(super) fn render_message_body(
                     format_media_clock(duration),
                     FontId::proportional(11.0),
                     Color32::WHITE,
+                );
+            }
+            if let Some(poster) = poster.filter(|_| texture.is_none()) {
+                let clicked = poster.needs_click(failed_message_thumbnails)
+                    && poster.load_button(ui, loading_stickers, "Hiện ảnh xem trước");
+                poster.request(
+                    ui.ctx(),
+                    sticker_textures,
+                    loading_stickers,
+                    failed_message_thumbnails,
+                    clicked,
                 );
             }
             if response
@@ -3059,21 +3164,8 @@ pub(super) fn render_message_body(
 
     // 2. Optional compact thumbnail directly inside the bubble (no nested card box)
     if let Some(thumb_url) = msg.link_thumb.as_deref().filter(|u| !u.is_empty()) {
-        let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
-        let auto_load = should_auto_load_link_thumbnail(thumb_url);
-        let request_id = Id::new((
-            "link_thumbnail_requested",
-            &msg.id,
-            msg.ts,
-            &msg.sender,
-            thumb_url,
-        ));
-        let requested = ui
-            .ctx()
-            .data(|d| d.get_temp::<bool>(request_id))
-            .unwrap_or(false);
-        let texture = sticker_textures.get(&key);
-        if let Some(tex) = texture.filter(|_| auto_load || requested) {
+        let thumbnail = MessageThumbnail::new(msg, thumb_url, "thumb_");
+        if let Some(tex) = thumbnail.texture(ui.ctx(), sticker_textures) {
             let [tw, th] = tex.size();
             let aspect = if tw > 0 && th > 0 {
                 (th as f32 / tw as f32).clamp(0.45, 0.85)
@@ -3095,27 +3187,16 @@ pub(super) fn render_message_body(
                 open_external_url(&url);
             }
             ui.add_space(5.0);
-        } else if thumb_url.starts_with("http://") || thumb_url.starts_with("https://") {
-            let loading = loading_stickers.contains(&key);
-            let clicked = !auto_load
-                && ui
-                    .add_enabled(!loading, egui::Button::new("Hiện ảnh xem trước").small())
-                    .clicked();
-            if clicked {
-                ui.ctx().data_mut(|d| d.insert_temp(request_id, true));
-            }
-            // Require a fresh click to retry a third-party URL after a failed request.
-            if (auto_load || clicked) && texture.is_none() && !loading {
-                if let Some(tx) = WORKER_TX.get() {
-                    let command = WorkerCmd::FetchStickerImage {
-                        key: key.clone(),
-                        url: thumb_url.to_string(),
-                    };
-                    if tx.send(command).is_ok() {
-                        loading_stickers.insert(key);
-                    }
-                }
-            }
+        } else if thumbnail.can_load_on_click {
+            let clicked = thumbnail.needs_click(failed_message_thumbnails)
+                && thumbnail.load_button(ui, loading_stickers, "Hiện ảnh xem trước");
+            thumbnail.request(
+                ui.ctx(),
+                sticker_textures,
+                loading_stickers,
+                failed_message_thumbnails,
+                clicked,
+            );
         }
     }
 
@@ -3395,6 +3476,7 @@ pub(super) fn render_chat_bubble(
     pal: &ThemePalette,
     sticker_textures: &HashMap<String, TextureHandle>,
     loading_stickers: &mut HashSet<String>,
+    failed_message_thumbnails: &HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
     idx: usize,
     reactor_name: &dyn Fn(&str) -> String,
@@ -3448,9 +3530,11 @@ pub(super) fn render_chat_bubble(
     } else if is_photo_card && album.is_some_and(|members| members.len() > 1) {
         super::album::album_width(max_text_width)
     } else if is_photo_card {
-        let thumb_u = photo_primary_url(msg).unwrap_or("");
-        let tkey = format!("thumb_{}", crate::crypto::md5_hex(thumb_u));
-        let photo_w = if let Some(tex) = sticker_textures.get(&tkey) {
+        let thumbnail = photo_primary_url(msg).map(|url| MessageThumbnail::new(msg, url, "thumb_"));
+        let texture = thumbnail
+            .as_ref()
+            .and_then(|thumb| thumb.texture(ui.ctx(), sticker_textures));
+        let photo_w = if let Some(tex) = texture {
             let [tw, th] = tex.size();
             if tw <= 2 || th <= 2 {
                 max_text_width.clamp(180.0, 260.0)
@@ -3484,11 +3568,11 @@ pub(super) fn render_chat_bubble(
         let poster = msg
             .link_thumb
             .as_deref()
-            .filter(|url| crate::session::is_trusted_zalo_url(url));
+            .filter(|url| !url.is_empty())
+            .map(|url| MessageThumbnail::new(msg, url, "video_thumb_"));
         let texture_size = poster
-            .map(|url| format!("video_thumb_{}", crate::crypto::md5_hex(url)))
-            .as_deref()
-            .and_then(|key| sticker_textures.get(key))
+            .as_ref()
+            .and_then(|poster| poster.texture(ui.ctx(), sticker_textures))
             .map(|texture| texture.size());
         video_card_size(max_text_width, texture_size).x
     } else if is_file_card || has_link_card {
@@ -3496,8 +3580,11 @@ pub(super) fn render_chat_bubble(
             .link_thumb
             .as_deref()
             .filter(|u| !u.is_empty())
-            .map(|u| sticker_textures.contains_key(&format!("thumb_{}", crate::crypto::md5_hex(u))))
-            .unwrap_or(false);
+            .is_some_and(|url| {
+                MessageThumbnail::new(msg, url, "thumb_")
+                    .texture(ui.ctx(), sticker_textures)
+                    .is_some()
+            });
         if has_loaded_thumb {
             max_text_width.min(260.0)
         } else {
@@ -3710,6 +3797,7 @@ pub(super) fn render_chat_bubble(
                                     content_width,
                                     sticker_textures,
                                     loading_stickers,
+                                    failed_message_thumbnails,
                                     emoji_textures,
                                     album,
                                 );
@@ -3871,6 +3959,7 @@ pub(super) fn render_chat_bubble(
                                     content_width,
                                     sticker_textures,
                                     loading_stickers,
+                                    failed_message_thumbnails,
                                     emoji_textures,
                                     album,
                                 );
@@ -4874,22 +4963,70 @@ pub(super) fn render_reactions(
 
 #[cfg(test)]
 #[test]
-fn privacy_regression_link_thumbnails_auto_load_only_from_zalo_media_hosts() {
+fn message_thumbnails_auto_load_only_from_https_zalo_media_hosts() {
     for url in [
         "https://stc-chat.zdn.vn/preview.jpg",
         "https://dlmd.me/preview.jpg",
         "https://media.dlfl.vn/preview.jpg",
+        "https://photo-stal.zdn.vn/no/jxl/photo.jxl?jxlstatus=1",
     ] {
-        assert!(should_auto_load_link_thumbnail(url), "{url}");
+        assert!(should_auto_load_message_thumbnail(url), "{url}");
     }
     for url in [
-        "https://images.example.test/preview.jpg",
+        "https://images.example.test/preview.png",
+        "https://127.0.0.1/preview.png",
         "https://dlmd.me.attacker.test/preview.jpg",
+        "https://fakezdn.vn/preview.jpg",
         "http://dlmd.me/preview.jpg",
         "http://stc-chat.zdn.vn/preview.jpg",
+        "wss://stc-chat.zdn.vn/preview.jpg",
+        "https://photo-stal.zdn.vn.jxl/no/jxl/photo.jxl",
     ] {
-        assert!(!should_auto_load_link_thumbnail(url), "{url}");
+        assert!(!should_auto_load_message_thumbnail(url), "{url}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn failed_message_thumbnails_require_a_fresh_click_and_no_in_flight_request() {
+    for auto_load in [true, false] {
+        assert!(!should_request_message_thumbnail(auto_load, true, false, false));
+        assert!(should_request_message_thumbnail(auto_load, true, false, true));
+        assert!(!should_request_message_thumbnail(auto_load, true, true, true));
+    }
+    assert!(should_request_message_thumbnail(true, false, false, false));
+    assert!(!should_request_message_thumbnail(false, false, false, false));
+    assert!(!should_request_message_thumbnail(true, false, true, false));
+}
+
+#[cfg(test)]
+#[test]
+fn cached_external_thumbnail_requires_a_click_for_each_message() {
+    let ctx = egui::Context::default();
+    let url = "https://images.example.test/preview.png";
+    let first = ChatMessage {
+        id: "message-1".into(),
+        ..Default::default()
+    };
+    let second = ChatMessage {
+        id: "message-2".into(),
+        ..Default::default()
+    };
+    let first_preview = MessageThumbnail::new(&first, url, "thumb_");
+    let texture = ctx.load_texture(
+        "test-thumbnail",
+        egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 255]),
+        TextureOptions::LINEAR,
+    );
+    let textures = HashMap::from([(first_preview.key.clone(), texture)]);
+    assert!(first_preview.texture(&ctx, &textures).is_none());
+    first_preview.request(&ctx, &textures, &mut HashSet::new(), &HashSet::new(), true);
+    assert!(MessageThumbnail::new(&first, url, "thumb_")
+        .texture(&ctx, &textures)
+        .is_some());
+    assert!(MessageThumbnail::new(&second, url, "thumb_")
+        .texture(&ctx, &textures)
+        .is_none());
 }
 
 #[cfg(test)]
@@ -5005,6 +5142,7 @@ mod quote_navigation_tests {
                                 &ThemePalette::light(),
                                 &HashMap::new(),
                                 &mut HashSet::new(),
+                                &HashSet::new(),
                                 &HashMap::new(),
                                 0,
                                 &|id: &str| id.to_string(),

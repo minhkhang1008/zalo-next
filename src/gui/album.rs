@@ -177,12 +177,13 @@ pub(super) fn render_album_grid(
     members: &[&ChatMessage],
     width: f32,
     pal: &ThemePalette,
-    sticker_textures: &HashMap<String, TextureHandle>,
+    thumbnail_cache: (&HashMap<String, TextureHandle>, &HashSet<String>),
     loading_stickers: &mut HashSet<String>,
     sender_label: &str,
 ) -> Option<BubbleAction> {
+    let (sticker_textures, failed_message_thumbnails) = thumbnail_cache;
     struct Cell {
-        key: String,
+        thumbnail: MessageThumbnail,
         open_target: String,
         aspect: f32,
         loaded: bool,
@@ -194,23 +195,15 @@ pub(super) fn render_album_grid(
         let Some(thumb_url) = photo_primary_url(msg) else {
             continue;
         };
-        let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
-        if !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::FetchStickerImage {
-                    key: key.clone(),
-                    url: thumb_url.to_string(),
-                });
-            }
-        }
+        let thumbnail = MessageThumbnail::new(msg, thumb_url, "thumb_");
         let open_target = msg
             .link_url
             .as_deref()
             .filter(|u| !u.is_empty() && crate::chat::is_zalo_photo_cdn_url(u))
             .unwrap_or(thumb_url)
             .to_string();
-        let tex_size = sticker_textures
-            .get(&key)
+        let tex_size = thumbnail
+            .texture(ui.ctx(), sticker_textures)
             .map(|t| t.size())
             .filter(|[w, h]| *w > 2 && *h > 2);
         let aspect = match tex_size {
@@ -221,7 +214,7 @@ pub(super) fn render_album_grid(
                 .unwrap_or(1.0),
         };
         cells.push(Cell {
-            key,
+            thumbnail,
             open_target,
             aspect,
             loaded: tex_size.is_some(),
@@ -290,11 +283,21 @@ pub(super) fn render_album_grid(
             let resp = ui
                 .interact(
                     cell_rect,
-                    Id::new(("album_cell", &cell.key, cell_idx)),
+                    ui.id().with(("album_cell", &cell.thumbnail.key, cell_idx)),
                     Sense::click(),
                 )
                 .on_hover_cursor(CursorIcon::PointingHand);
-            if let Some(tex) = sticker_textures.get(&cell.key).filter(|_| cell.loaded) {
+            let texture = cell.thumbnail.texture(ui.ctx(), sticker_textures);
+            let needs_click =
+                texture.is_none() && cell.thumbnail.needs_click(failed_message_thumbnails);
+            cell.thumbnail.request(
+                ui.ctx(),
+                sticker_textures,
+                loading_stickers,
+                failed_message_thumbnails,
+                needs_click && resp.clicked(),
+            );
+            if let Some(tex) = texture.filter(|_| cell.loaded) {
                 egui::Image::new(tex)
                     .rounding(rounding)
                     .paint_at(ui, cell_rect);
@@ -315,15 +318,25 @@ pub(super) fn render_album_grid(
                 );
             } else {
                 ui.painter().rect_filled(cell_rect, rounding, pal.bg_hover);
-                draw_icon_image(ui.painter(), cell_rect.center(), 22.0, pal.text_muted);
+                if needs_click {
+                    ui.painter_at(cell_rect).text(
+                        cell_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Hiện ảnh",
+                        FontId::proportional(11.0),
+                        pal.text_secondary,
+                    );
+                } else {
+                    draw_icon_image(ui.painter(), cell_rect.center(), 22.0, pal.text_muted);
+                }
             }
             if resp.hovered() {
                 ui.painter()
                     .rect_filled(cell_rect, rounding, Color32::from_black_alpha(40));
             }
-            if resp.clicked() {
+            if resp.clicked() && !needs_click {
                 action = Some(BubbleAction::OpenImagePopup {
-                    tex_key: cell.key.clone(),
+                    tex_key: cell.thumbnail.key.clone(),
                     full_url: cell.open_target.clone(),
                     title: cell.title.clone(),
                     sender: sender_label.to_string(),

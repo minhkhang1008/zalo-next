@@ -73,24 +73,29 @@ pub(crate) fn is_github_release_asset_url(url: &str, repo_slug: &str) -> bool {
         && reqwest::Url::parse(url).is_ok_and(|parsed| parsed.as_str().starts_with(&prefix))
 }
 
-fn is_github_redirect_url(url: &reqwest::Url) -> bool {
+fn is_github_redirect_url(url: &reqwest::Url, repo_slug: &str) -> bool {
     url.scheme() == "https"
-        && url
-            .host_str()
-            .is_some_and(|host| host == "github.com" || host.ends_with(".githubusercontent.com"))
+        && url.host_str().is_some_and(|host| {
+            if host == "github.com" {
+                url.path().starts_with(&format!("/{repo_slug}/"))
+            } else {
+                host.ends_with(".githubusercontent.com")
+            }
+        })
 }
 
-pub(crate) fn github_update_client() -> reqwest::ClientBuilder {
+pub(crate) fn github_update_client(repo_slug: &str) -> reqwest::ClientBuilder {
     const MAX_REDIRECTS: usize = 3;
+    let repo_slug = repo_slug.to_owned();
 
     reqwest::Client::builder()
         .https_only(true)
         .cookie_store(false)
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() > MAX_REDIRECTS {
                 attempt.error("Quá nhiều lần chuyển hướng khi tải bản cập nhật")
-            } else if !is_github_redirect_url(attempt.url()) {
-                attempt.error("Đích chuyển hướng cập nhật nằm ngoài GitHub")
+            } else if !is_github_redirect_url(attempt.url(), &repo_slug) {
+                attempt.error("Đích chuyển hướng cập nhật không được phép")
             } else {
                 attempt.follow()
             }
@@ -919,17 +924,24 @@ mod github_api_tests {
     }
 
     #[test]
-    fn redirect_targets_require_https_and_an_allowed_github_host() {
+    fn redirect_targets_require_https_and_the_repository_or_an_allowed_cdn() {
         for url in [
             "https://github.com/minhkhang1008/zalo-next/releases/latest",
             "https://objects.githubusercontent.com/asset",
             "https://release-assets.githubusercontent.com/asset",
             "https://another.cdn.githubusercontent.com/asset",
         ] {
-            assert!(is_github_redirect_url(&reqwest::Url::parse(url).unwrap()));
+            assert!(is_github_redirect_url(
+                &reqwest::Url::parse(url).unwrap(),
+                REPO
+            ));
         }
         for url in [
-            "http://github.com/release",
+            "http://github.com/minhkhang1008/zalo-next/releases/latest",
+            "https://github.com/another-owner/zalo-next/releases/latest",
+            "https://github.com/minhkhang1008/another-repo/releases/latest",
+            "https://github.com/minhkhang1008/zalo-next-evil/releases/latest",
+            "https://github.com/minhkhang1008/zalo-next/%2e%2e/another-repo/releases/latest",
             "http://objects.githubusercontent.com/asset",
             "https://api.github.com/release",
             "https://githubusercontent.com/asset",
@@ -939,7 +951,7 @@ mod github_api_tests {
             "https://127.0.0.1/asset",
         ] {
             assert!(
-                !is_github_redirect_url(&reqwest::Url::parse(url).unwrap()),
+                !is_github_redirect_url(&reqwest::Url::parse(url).unwrap(), REPO),
                 "accepted {url}"
             );
         }

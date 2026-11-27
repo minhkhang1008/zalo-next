@@ -747,7 +747,7 @@ impl Session {
                 continue;
             }
             if let Ok(url) = reqwest::Url::parse(host) {
-                let cookie = format!("zpw_sek={v}; Path=/");
+                let cookie = format!("zpw_sek={v}; Path=/; Secure");
                 self.jar.add_cookie_str(&cookie, &url);
             }
         }
@@ -1604,11 +1604,17 @@ mod tests {
 
     #[test]
     fn session_set_zpw_sek_updates_fields() {
+        use reqwest::cookie::CookieStore;
+
         let mut s = Session::new(false, false, false).unwrap();
         s.login = Some(LoginInfo::default());
         s.set_zpw_sek("test_sek_value".into());
         assert_eq!(s.zpw_sek.as_deref(), Some("test_sek_value"));
         assert_eq!(s.login.as_ref().unwrap().zpw_sek, "test_sek_value");
+        let https = reqwest::Url::parse("https://chat.zalo.me/").unwrap();
+        let http = reqwest::Url::parse("http://chat.zalo.me/").unwrap();
+        assert_eq!(s.jar.cookies(&https).unwrap(), "zpw_sek=test_sek_value");
+        assert!(s.jar.cookies(&http).is_none());
     }
 
     #[test]

@@ -4364,7 +4364,7 @@ const GITHUB_REPO: &str = "minhkhang1008/zalo-next";
 
 pub(crate) async fn fetch_github_latest_release() -> Result<UpdateCheckResult, String> {
     let current_ver = env!("CARGO_PKG_VERSION").to_string();
-    let client = crate::updater::github_update_client()
+    let client = crate::updater::github_update_client(GITHUB_REPO)
         .user_agent(format!("zalo-next/{current_ver}"))
         .timeout(Duration::from_secs(12))
         .build()
@@ -4489,7 +4489,7 @@ async fn apply_github_release_update(
         );
     }
 
-    let client = crate::updater::github_update_client()
+    let client = crate::updater::github_update_client(GITHUB_REPO)
         .user_agent(format!("zalo-next/{target_version}"))
         .timeout(Duration::from_secs(240))
         .build()

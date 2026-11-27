@@ -1266,12 +1266,23 @@ pub fn save_threads_cache(threads: &[Thread]) {
 }
 
 fn write_thread_snapshots(data_dir: &std::path::Path, uin: Option<&str>, contents: &[u8]) {
-    let _ = crate::data_dir::write_private_atomic(&data_dir.join("threads_cache.json"), contents);
+    if crate::data_dir::write_private_atomic(&data_dir.join("threads_cache.json"), contents)
+        .is_err()
+    {
+        crate::logger::log_error("threads_cache", "Could not write thread snapshot");
+    }
     if let Some(uin) = uin {
         let accounts_dir = data_dir.join("accounts");
-        if crate::data_dir::ensure_private_dir(&accounts_dir).is_ok() {
-            let path = accounts_dir.join(format!("{uin}_threads.json"));
-            let _ = crate::data_dir::write_private_atomic(&path, contents);
+        if crate::data_dir::ensure_private_dir(&accounts_dir).is_err() {
+            crate::logger::log_error(
+                "threads_cache",
+                "Could not prepare account snapshot directory",
+            );
+            return;
+        }
+        let path = accounts_dir.join(format!("{uin}_threads.json"));
+        if crate::data_dir::write_private_atomic(&path, contents).is_err() {
+            crate::logger::log_error("threads_cache", "Could not write account thread snapshot");
         }
     }
 }
