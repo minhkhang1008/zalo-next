@@ -16,6 +16,7 @@ use eframe::egui::{
     Rounding, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
 };
 
+use crate::app_lock;
 use crate::chat::{ChatMessage, Thread};
 use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
@@ -24,6 +25,7 @@ use crate::storage_usage::{ClearReport, ClearTarget, Usage};
 
 mod ai_ui;
 mod album;
+mod app_lock_ui;
 mod appearance;
 mod background;
 mod clipboard_write;
@@ -64,6 +66,16 @@ fn merge_sent_message(thread: &mut Thread, message: ChatMessage) {
 }
 
 pub enum GuiEvent {
+    AppLockAttempt {
+        config: app_lock::Config,
+        attempt: app_lock::Attempt,
+        save_error: Option<String>,
+    },
+    AppLockAttemptFailed,
+    AppLockSaved {
+        config: Option<app_lock::Config>,
+        error: Option<String>,
+    },
     VoiceProgress {
         account: String,
         generation: u64,
@@ -913,6 +925,7 @@ impl GuiTx {
 }
 
 pub struct ZaloGuiApp {
+    app_lock: app_lock_ui::State,
     productivity: productivity::State,
     doc_preview: doc_preview_ui::State,
     voice: voice_ui::State,
@@ -1282,6 +1295,11 @@ impl ZaloGuiApp {
         initial_threads: Vec<Thread>,
     ) -> Self {
         let mut loaded_settings = AppSettings::load();
+        let (lock_config, lock_load_status) = match app_lock::load(std::path::Path::new(".")) {
+            Ok(config) => (config, None),
+            Err(_) => (app_lock::Config::default(), Some(app_lock_ui::LOAD_ERROR)),
+        };
+        app_lock::set_locked(lock_config.usable());
         setup_custom_fonts_with_choice(&cc.egui_ctx, &loaded_settings.font_family);
         if session.proxy_url.is_none() && !loaded_settings.proxy_url.trim().is_empty() {
             let _ = session.set_proxy(Some(&loaded_settings.proxy_url));
@@ -1368,6 +1386,7 @@ impl ZaloGuiApp {
             .unwrap_or(0);
 
         let app = Self {
+            app_lock: app_lock_ui::State::new(lock_config, lock_load_status),
             productivity: Default::default(),
             doc_preview: Default::default(),
             voice: Default::default(),
@@ -1426,11 +1445,11 @@ impl ZaloGuiApp {
             image_viewer: None,
             discard_textures: HashSet::new(),
             video_player: None,
-            status_msg: "Trực tuyến · Sẵn sàng".into(),
+            status_msg: lock_load_status.unwrap_or("Trực tuyến · Sẵn sàng").into(),
             info_drawer_open: loaded_settings.info_drawer_open,
             profile_menu_open: false,
             wipe_confirm_open: false,
-            toast_notice: None,
+            toast_notice: lock_load_status.map(|text| (text.into(), std::time::Instant::now())),
             phone_modal_open: false,
             phone_modal_input: String::new(),
             phone_lookup_loading: false,
@@ -1663,6 +1682,13 @@ impl ZaloGuiApp {
                 eprintln!("[call] check_events dequeued IncomingCall");
             }
             match event {
+                GuiEvent::AppLockAttempt { config, attempt, save_error } => {
+                    self.finish_app_lock_attempt(config, attempt, save_error);
+                }
+                GuiEvent::AppLockAttemptFailed => self.fail_app_lock_attempt(),
+                GuiEvent::AppLockSaved { config, error } => {
+                    self.finish_app_lock_save(config, error);
+                }
                 GuiEvent::AiThreadLoaded { thread_id, messages } => {
                     self.ai_on_thread_loaded(thread_id, messages);
                 }
@@ -3282,12 +3308,6 @@ impl eframe::App for ZaloGuiApp {
             }
             std::process::exit(0);
         }
-        if ctx.input(|i| {
-            (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::P)
-        }) {
-            self.settings_modal_open = true;
-            self.settings_tab = SettingsTab::Privacy;
-        }
         // "Hệ thống" follows the OS appearance live; light/dark are fixed.
         let want_dark = resolve_dark_mode(
             &self.settings.theme_mode,
@@ -3319,6 +3339,21 @@ impl eframe::App for ZaloGuiApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(heartbeat_ms));
         self.check_events(ctx);
 
+        self.tick_app_lock(ctx);
+        let pal = self.palette();
+        self.request_notification_permission_at_startup();
+        Self::handle_frameless_resize(ctx);
+        self.render_custom_title_bar(ctx, &pal);
+        if self.render_app_lock(ctx, &pal) {
+            return;
+        }
+
+        if ctx.input(|i| {
+            (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::P)
+        }) {
+            self.settings_modal_open = true;
+            self.settings_tab = SettingsTab::Privacy;
+        }
         self.ai_handle_pending_action(ctx);
 
         self.ime_just_committed = false;
@@ -3440,13 +3475,6 @@ impl eframe::App for ZaloGuiApp {
             }
         });
 
-        // No timer repaint: the worker owns the poll timer and every GuiTx send wakes the UI.
-
-        let pal = self.palette();
-
-        self.request_notification_permission_at_startup();
-        Self::handle_frameless_resize(ctx);
-        self.render_custom_title_bar(ctx, &pal);
         // Dev Inspector Panel
         if self.dev_mode && self.dev_panel_open {
             egui::TopBottomPanel::bottom("dev_inspector")
@@ -3594,7 +3622,8 @@ impl ZaloGuiApp {
 
     fn render_custom_title_bar(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        let total_unread: usize = self.unread_counts.values().sum();
+        let locked = app_lock::is_locked();
+        let total_unread: usize = if locked { 0 } else { self.unread_counts.values().sum() };
         if self.last_synced_icon_unread != Some(total_unread) {
             self.last_synced_icon_unread = Some(total_unread);
             if let Some(icon) = crate::gui::theme::load_app_icon_with_badge(total_unread) {
@@ -3820,7 +3849,7 @@ impl ZaloGuiApp {
 
                         buttons_left_x = th_rect.left();
 
-                        if let Some(ref upd) = self.update_info {
+                        if let Some(upd) = self.update_info.as_ref().filter(|_| !locked) {
                             if upd.has_update {
                                 ui.add_space(6.0);
                                 let badge_txt = if self.update_downloading {
@@ -3857,7 +3886,7 @@ impl ZaloGuiApp {
                             }
                         }
 
-                        if !self.is_logged_in && !self.threads.is_empty() {
+                        if !locked && !self.is_logged_in && !self.threads.is_empty() {
                             ui.add_space(8.0);
                             let hist_btn = egui::Button::new(
                                 RichText::new("Xem lịch sử đã lưu")
@@ -3901,6 +3930,9 @@ impl ZaloGuiApp {
         ui.vertical_centered(|ui| {
             let avail_h = ui.available_height();
             ui.add_space((avail_h * 0.08).max(20.0));
+            if self.app_lock.settings_error.as_deref() == Some(app_lock_ui::LOAD_ERROR) {
+                ui.label(RichText::new(app_lock_ui::LOAD_ERROR).color(pal.danger));
+            }
             if let Some(tex) = &self.app_logo_texture {
                 ui.image((tex.id(), Vec2::new(64.0, 64.0)));
                 ui.add_space(10.0);
