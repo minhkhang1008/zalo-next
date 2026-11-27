@@ -17,7 +17,11 @@ pub const LOCK_FILE: &str = "ctdozlite.lock";
 #[cfg(unix)]
 pub const SOCKET_FILE: &str = "ctdozlite.sock";
 
+#[cfg(unix)]
 const SHOW_REQUEST: &[u8] = b"show\n";
+/// `sun_path` holds 104 bytes on macOS (108 on Linux), including the terminating NUL.
+#[cfg(unix)]
+const MAX_SOCKET_PATH: usize = 103;
 
 static SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -32,6 +36,22 @@ pub enum Instance {
     Primary(#[allow(dead_code)] Option<File>),
     /// Another process already holds the lock.
     AlreadyRunning,
+}
+
+/// Take the directory's GUI lock, retrying for up to `wait` while another process holds it.
+///
+/// A relaunch by the updater passes a wait so it does not lose the race against the instance
+/// that is quitting; a normal launch passes zero.
+pub fn acquire_waiting(dir: &Path, wait: std::time::Duration) -> Instance {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match acquire(dir) {
+            Instance::AlreadyRunning if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Take the directory's GUI lock without blocking.
@@ -71,7 +91,10 @@ pub fn notify_running(dir: &Path) -> bool {
     {
         use std::io::Write;
         use std::os::unix::net::UnixStream;
-        let Ok(mut stream) = UnixStream::connect(dir.join(SOCKET_FILE)) else {
+        let Some(path) = socket_path(dir) else {
+            return false;
+        };
+        let Ok(mut stream) = UnixStream::connect(path) else {
             return false;
         };
         let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
@@ -90,17 +113,23 @@ pub fn notify_running(dir: &Path) -> bool {
 pub fn serve_show_requests(dir: &Path, wake: impl Fn() + Send + 'static) {
     #[cfg(unix)]
     {
-        let listener = match bind_private_socket(&dir.join(SOCKET_FILE)) {
-            Ok(listener) => listener,
-            Err(error) => {
-                eprintln!("! Không mở được kênh mở lại cửa sổ: {error:#}");
-                return;
-            }
-        };
+        let path = socket_path(dir);
+        // Binding touches the filesystem: keep it off the caller (the GUI thread).
         let spawned = std::thread::Builder::new()
             .name("single-instance".into())
             .spawn(move || {
                 use std::io::Read;
+                let listener = match path.as_deref().map(bind_private_socket) {
+                    Some(Ok(listener)) => listener,
+                    Some(Err(error)) => {
+                        eprintln!("! Không mở được kênh mở lại cửa sổ: {error:#}");
+                        return;
+                    }
+                    None => {
+                        eprintln!("! Đường dẫn thư mục dữ liệu quá dài cho kênh mở lại cửa sổ.");
+                        return;
+                    }
+                };
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { continue };
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
@@ -120,6 +149,23 @@ pub fn serve_show_requests(dir: &Path, wake: impl Fn() + Send + 'static) {
     {
         let _ = (dir, wake);
     }
+}
+
+/// Socket address for `dir`: the full path, or the bare file name when the full path is too long
+/// for a Unix socket address and `dir` is the working directory (the data directory always is,
+/// see `data_dir::initialize`).
+#[cfg(unix)]
+fn socket_path(dir: &Path) -> Option<std::path::PathBuf> {
+    let full = dir.join(SOCKET_FILE);
+    if full.as_os_str().len() <= MAX_SOCKET_PATH {
+        return Some(full);
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    same(dir, &cwd).then(|| std::path::PathBuf::from(SOCKET_FILE))
 }
 
 /// Bind `path` as an owner-only socket, replacing a stale socket file (never another file type).
@@ -167,7 +213,15 @@ mod tests {
         serve_show_requests(dir.path(), move || {
             let _ = tx.send(());
         });
-        assert!(notify_running(dir.path()));
+        // The listener binds on its own thread; retry until it is up.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !notify_running(dir.path()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "listener never came up"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(take_show_request());
         use std::os::unix::fs::PermissionsExt;
@@ -176,6 +230,16 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_long_data_directory_falls_back_to_a_relative_socket_or_none() {
+        let long = std::path::PathBuf::from("/").join("d".repeat(200));
+        // Not the working directory: no usable address rather than a bind that always fails.
+        assert_eq!(socket_path(&long), None);
+        let short = std::path::Path::new("/tmp/x");
+        assert_eq!(socket_path(short), Some(short.join(SOCKET_FILE)));
     }
 
     #[cfg(unix)]

@@ -163,7 +163,13 @@ fn main() -> Result<()> {
     // One GUI per data directory; checked before `--logout` so a second launch can never delete
     // the running GUI's session.
     let _instance_lock = if gui_mode {
-        match single_instance::acquire(&data_path) {
+        // An updater relaunch may start before the old instance has released the lock.
+        let wait = if wait_pid.is_some() {
+            std::time::Duration::from_secs(60)
+        } else {
+            std::time::Duration::ZERO
+        };
+        match single_instance::acquire_waiting(&data_path, wait) {
             single_instance::Instance::Primary(lock) => Some(lock),
             single_instance::Instance::AlreadyRunning => {
                 if single_instance::notify_running(&data_path) {
