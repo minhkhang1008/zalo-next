@@ -2454,6 +2454,12 @@ fn is_voice_message(msg: &ChatMessage) -> bool {
         || msg.link_src.as_deref() == Some("Thoại Zalo")
 }
 
+fn should_auto_load_link_thumbnail(url: &str) -> bool {
+    url.starts_with("https://")
+        && crate::session::is_trusted_zalo_media_url(url)
+        && crate::session::is_trusted_zalo_media_url(&crate::store::jxl_to_jpg_url(url))
+}
+
 pub(super) fn render_message_body(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
@@ -3054,18 +3060,20 @@ pub(super) fn render_message_body(
     // 2. Optional compact thumbnail directly inside the bubble (no nested card box)
     if let Some(thumb_url) = msg.link_thumb.as_deref().filter(|u| !u.is_empty()) {
         let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
-        if !sticker_textures.contains_key(&key)
-            && (thumb_url.starts_with("http://") || thumb_url.starts_with("https://"))
-            && loading_stickers.insert(key.clone())
-        {
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::FetchStickerImage {
-                    key: key.clone(),
-                    url: thumb_url.to_string(),
-                });
-            }
-        }
-        if let Some(tex) = sticker_textures.get(&key) {
+        let auto_load = should_auto_load_link_thumbnail(thumb_url);
+        let request_id = Id::new((
+            "link_thumbnail_requested",
+            &msg.id,
+            msg.ts,
+            &msg.sender,
+            thumb_url,
+        ));
+        let requested = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(request_id))
+            .unwrap_or(false);
+        let texture = sticker_textures.get(&key);
+        if let Some(tex) = texture.filter(|_| auto_load || requested) {
             let [tw, th] = tex.size();
             let aspect = if tw > 0 && th > 0 {
                 (th as f32 / tw as f32).clamp(0.45, 0.85)
@@ -3087,6 +3095,27 @@ pub(super) fn render_message_body(
                 open_external_url(&url);
             }
             ui.add_space(5.0);
+        } else if thumb_url.starts_with("http://") || thumb_url.starts_with("https://") {
+            let loading = loading_stickers.contains(&key);
+            let clicked = !auto_load
+                && ui
+                    .add_enabled(!loading, egui::Button::new("Hiện ảnh xem trước").small())
+                    .clicked();
+            if clicked {
+                ui.ctx().data_mut(|d| d.insert_temp(request_id, true));
+            }
+            // Require a fresh click to retry a third-party URL after a failed request.
+            if (auto_load || clicked) && texture.is_none() && !loading {
+                if let Some(tx) = WORKER_TX.get() {
+                    let command = WorkerCmd::FetchStickerImage {
+                        key: key.clone(),
+                        url: thumb_url.to_string(),
+                    };
+                    if tx.send(command).is_ok() {
+                        loading_stickers.insert(key);
+                    }
+                }
+            }
         }
     }
 
@@ -4841,6 +4870,26 @@ pub(super) fn render_reactions(
     });
 
     action
+}
+
+#[cfg(test)]
+#[test]
+fn privacy_regression_link_thumbnails_auto_load_only_from_zalo_media_hosts() {
+    for url in [
+        "https://stc-chat.zdn.vn/preview.jpg",
+        "https://dlmd.me/preview.jpg",
+        "https://media.dlfl.vn/preview.jpg",
+    ] {
+        assert!(should_auto_load_link_thumbnail(url), "{url}");
+    }
+    for url in [
+        "https://images.example.test/preview.jpg",
+        "https://dlmd.me.attacker.test/preview.jpg",
+        "http://dlmd.me/preview.jpg",
+        "http://stc-chat.zdn.vn/preview.jpg",
+    ] {
+        assert!(!should_auto_load_link_thumbnail(url), "{url}");
+    }
 }
 
 #[cfg(test)]

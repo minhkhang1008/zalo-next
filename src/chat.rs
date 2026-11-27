@@ -1256,11 +1256,22 @@ pub fn save_threads_cache(threads: &[Thread]) {
             messages: t.messages[t.messages.len().saturating_sub(keep)..].to_vec(),
         })
         .collect();
-    if let Ok(text) = serde_json::to_string(&slim) {
-        let _ = std::fs::write("threads_cache.json", &text);
-        if let Some(uin) = active_uin_from_session() {
-            let _ = std::fs::create_dir_all("accounts");
-            let _ = std::fs::write(format!("accounts/{uin}_threads.json"), text);
+    if let Ok(contents) = serde_json::to_vec(&slim) {
+        write_thread_snapshots(
+            std::path::Path::new("."),
+            active_uin_from_session().as_deref(),
+            &contents,
+        );
+    }
+}
+
+fn write_thread_snapshots(data_dir: &std::path::Path, uin: Option<&str>, contents: &[u8]) {
+    let _ = crate::data_dir::write_private_atomic(&data_dir.join("threads_cache.json"), contents);
+    if let Some(uin) = uin {
+        let accounts_dir = data_dir.join("accounts");
+        if crate::data_dir::ensure_private_dir(&accounts_dir).is_ok() {
+            let path = accounts_dir.join(format!("{uin}_threads.json"));
+            let _ = crate::data_dir::write_private_atomic(&path, contents);
         }
     }
 }
@@ -8622,6 +8633,40 @@ pub async fn delete_conversation(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn privacy_regression_thread_snapshots_have_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = crate::data_dir::PrivateTempDir::new("thread-snapshots").unwrap();
+        let live_path = dir.path().join("threads_cache.json");
+        std::fs::write(&live_path, b"legacy snapshot").unwrap();
+        std::fs::set_permissions(&live_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let contents = b"[]";
+        super::write_thread_snapshots(dir.path(), Some("user-1"), contents);
+
+        let accounts_dir = dir.path().join("accounts");
+        let account_path = accounts_dir.join("user-1_threads.json");
+        for path in [live_path, account_path] {
+            assert_eq!(std::fs::read(&path).unwrap(), contents);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(accounts_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
     /// Live capture: `cliMsgId` 1794398852870 vs `ts` 1794398854583 for one photo. Reactions and
     /// quotes must key on the client id, not the server timestamp.
     #[test]

@@ -603,6 +603,10 @@ async fn handle_sync_v2_batch(
     }
 }
 
+fn use_session_for_sticker_image(fetch_url: &str) -> bool {
+    crate::session::is_trusted_zalo_url(fetch_url)
+}
+
 pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: egui::Context) {
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let _ = WORKER_TX.set(cmd_tx);
@@ -3274,30 +3278,34 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         let file_path = url.strip_prefix("local://").unwrap_or(&url);
                                         (std::fs::read(file_path).ok(), false)
                                     } else {
-                                        let client = { session_clone.lock().await.clone().http };
                                         let fetch_url = crate::store::jxl_to_jpg_url(&url);
-                                        let body = match client
-                                            .get(&fetch_url)
-                                            .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-                                            .send()
-                                            .await
-                                        {
-                                            Ok(resp) if resp.status().is_success() => {
-                                                if bounded_video_poster {
+                                        let client = if use_session_for_sticker_image(&fetch_url) {
+                                            Ok(session_clone.lock().await.http.clone())
+                                        } else {
+                                            crate::media_resources::credential_free_client()
+                                        };
+                                        let body = if let Ok(client) = client {
+                                            match client
+                                                .get(&fetch_url)
+                                                .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                                                .timeout(std::time::Duration::from_secs(35))
+                                                .send()
+                                                .await
+                                            {
+                                                Ok(resp) => {
                                                     crate::media_resources::read_bounded_response(
                                                         resp,
                                                         crate::media_resources::PREVIEW_LIMIT,
                                                     )
                                                     .await
                                                     .ok()
-                                                    .map(Into::into)
-                                                } else {
-                                                    resp.bytes().await.ok()
                                                 }
+                                                Err(_) => None,
                                             }
-                                            _ => None,
+                                        } else {
+                                            None
                                         };
-                                        (body.map(|b| b.to_vec()), true)
+                                        (body, true)
                                     };
                                 let Some(bytes) = bytes_opt else {
                                     let _ = gui_tx_clone.send(GuiEvent::StickerImageFailed { key });
@@ -4853,6 +4861,20 @@ async fn run_ai_ask(req: crate::ai::AskRequest, tx: GuiTx, db_path: String) {
 mod tests {
     use super::prepare_avatar_texture;
     use image::{DynamicImage, Rgba, RgbaImage};
+
+    #[test]
+    fn privacy_regression_sticker_images_use_session_only_for_trusted_hosts() {
+        assert!(super::use_session_for_sticker_image(
+            "https://stc-chat.zdn.vn/sticker.png"
+        ));
+        for url in [
+            "https://images.example.test/sticker.png",
+            "https://dlmd.me/sticker.png",
+            "http://stc-chat.zdn.vn/sticker.png",
+        ] {
+            assert!(!super::use_session_for_sticker_image(url), "{url}");
+        }
+    }
 
     #[test]
     fn saved_theme_survives_reopening_settings() {
