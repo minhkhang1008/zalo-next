@@ -1377,3 +1377,30 @@ Entry template:
 - NOT verified: anything visual (storage page, photo/video layout, font), second launch bringing the window up,
   updater relaunch on Linux/Windows, Windows log removal, live media sizes from real chats.
 - Status: done; next: group polls (`feature/group-polls` worktree) and App Lock (`feature/app-lock` worktree).
+
+## 2026-11-28 — Upstream port, package 4: group polls and App Lock on branches (not merged)  (agent: Claude Code, claude-opus-5-5 (orchestrator, wrote app_lock core + macOS FFI + notification gate + fixes) + Codex (worker: poll API, poll card, lock UI))
+- Branches (worktrees, nothing merged, nothing pushed):
+  - `feature/group-polls` (`../zalo-next-polls`): d45eaed protocol + worker, d59019c poll cards. Evidence
+    re-notes/50 (Zalo Web lazy chunk 2: `getPollDetail`/`vote` use `encodeAES` = zpw_enk, NOT ParamCipher v2 as
+    upstream wrote; host `getGroupPollDomain` = service map `group_poll`). Votes: no redirects, no retries, no
+    failover except HTTP 404; untrusted hosts dropped from candidates and re-checked per URL. Claude fix: poll
+    commands ran inline in the worker loop (blocked every command during the request) → spawned FIFO tasks.
+  - `feature/app-lock` (`../zalo-next-applock`): d4e2c64 core (`app_lock.rs`, pbkdf2 0.12 crate added, PBKDF2-SHA256
+    600k, constant-time compare, cooldown 30 s doubling to 15 min after 5 tries, sleep = wall vs monotonic jump),
+    `gui/macos_auth.rs` (LAContext deviceOwnerAuthentication via objc2 0.5, context kept alive until reply);
+    0ce566d all OS notifications go through `notify_with_attachment`, which posts fixed text with no avatar while
+    locked (Codex found the incoming-call notification in call.rs bypassed the worker); 45dbba4 lock screen gate
+    in `update()` before any content, Cmd/Ctrl+L, idle/sleep auto-lock, ringing-call banner without caller,
+    settings in Quyền riêng tư. Claude fix: passcode hashing awaited inline in the worker loop → spawned.
+- Review: Codex hit its usage limit (until 05:52) during the poll adversarial review and before an App Lock
+  review, so the MANDATORY adversarial reviews for both branches are still pending. Claude did a focused
+  security-audit pass instead (guidance mode): no confirmed issue. Notes: the window title still shows the unread
+  count while locked (count only, no content); `evaluatePolicy:localizedReason:reply:` argument encoding is only
+  checked at runtime in debug builds (the `canEvaluatePolicy` call is covered by a test); App Lock is a UI lock,
+  anyone who can read the data dir can read or edit `app_lock.json` and the DB (documented in the UI).
+- Verification: polls branch `cargo test --locked` 540 → (+UI) passing; app-lock branch 538 passing; the
+  non-macOS lock UI branch was compile-checked on this Mac by temporarily renaming its cfg; not built for
+  Windows/Linux.
+- NOT verified: any live poll detail/vote (owner must vote on a real group), Touch ID/password prompt, lock
+  screen, auto-lock after sleep, ringing call while locked, passcode flow on Windows/Linux.
+- Status: waiting for Codex adversarial reviews and the owner's live checks before merging either branch.
