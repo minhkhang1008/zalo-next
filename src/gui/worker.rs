@@ -4662,12 +4662,16 @@ async fn apply_github_release_update(
     #[cfg(target_os = "linux")]
     if name_low.ends_with(".appimage") {
         if let Ok(exe_path) = std::env::current_exe() {
-            let args: Vec<String> = std::env::args().skip(1).collect();
+            let (_, args) =
+                crate::updater::take_wait_for_pid(std::env::args().skip(1).collect());
             if crate::updater::install_release(
                 &release,
                 &crate::updater::InstallTarget::Portable(exe_path),
                 |installed_path| {
+                    // The new process waits for this one's GUI lock (single_instance).
                     std::process::Command::new(installed_path)
+                        .arg("--wait-for-pid")
+                        .arg(std::process::id().to_string())
                         .args(&args)
                         .spawn()
                         .map(|_| ())
