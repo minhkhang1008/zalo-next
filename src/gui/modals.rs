@@ -423,7 +423,14 @@ impl ZaloGuiApp {
         let mut do_wipe = false;
         let area_resp = egui::Area::new(Id::new("left_rail_profile_popover"))
             .order(egui::Order::Foreground)
-            .fixed_pos(Pos2::new(68.0, 44.0))
+            .fixed_pos(if self.profile_avatar_rect.is_positive() {
+                Pos2::new(
+                    self.profile_avatar_rect.right() + 12.0,
+                    self.profile_avatar_rect.top(),
+                )
+            } else {
+                Pos2::new(68.0, 44.0)
+            })
             .show(ctx, |ui| {
                 egui::Frame::none()
                     .fill(pal.bg_elevated)
@@ -667,12 +674,15 @@ impl ZaloGuiApp {
                     });
             });
 
+        // The avatar sits below the custom title bar, so test its real rect: a fixed "top-left
+        // corner" guess treated most clicks on the avatar as outside clicks, and the click that
+        // opened the menu closed it again in the same frame.
+        let avatar_rect = self.profile_avatar_rect;
         if ctx.input(|i| i.pointer.any_click())
             && !area_resp.response.hovered()
             && ctx
                 .input(|i| i.pointer.interact_pos())
-                .map(|p| p.x > 64.0 || p.y > 60.0)
-                .unwrap_or(false)
+                .is_some_and(|p| !avatar_rect.contains(p))
         {
             close_menu = true;
         }

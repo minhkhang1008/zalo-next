@@ -339,6 +339,7 @@ impl ZaloGuiApp {
                     // User Avatar Button with Cutout Online Status Dot
                     let (av_rect, av_resp) =
                         ui.allocate_exact_size(Vec2::new(48.0, 48.0), Sense::click());
+                    self.profile_avatar_rect = av_rect;
                     let user_disp = if self.user_name.is_empty() {
                         "Người dùng Zalo"
                     } else {

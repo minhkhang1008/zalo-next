@@ -1108,6 +1108,9 @@ pub struct ZaloGuiApp {
 
     info_drawer_open: bool,
     profile_menu_open: bool,
+    /// Where the own avatar was drawn this frame: the account menu opens beside it, and a click
+    /// on it must not count as a click outside the menu.
+    profile_avatar_rect: egui::Rect,
     /// "Xoá dữ liệu tin nhắn cục bộ" is pending confirmation (#21).
     wipe_confirm_open: bool,
     toast_notice: Option<(String, std::time::Instant)>,
@@ -1554,6 +1557,7 @@ impl ZaloGuiApp {
             status_msg: lock_load_status.unwrap_or("Trực tuyến · Sẵn sàng").into(),
             info_drawer_open: loaded_settings.info_drawer_open,
             profile_menu_open: false,
+            profile_avatar_rect: egui::Rect::NOTHING,
             wipe_confirm_open: false,
             toast_notice: lock_load_status.map(|text| (text.into(), std::time::Instant::now())),
             phone_modal_open: false,
