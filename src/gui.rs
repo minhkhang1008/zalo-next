@@ -31,6 +31,7 @@ mod appearance;
 mod background;
 mod bank_cards_ui;
 mod call_popup;
+mod changelog_ui;
 mod clipboard_write;
 mod contact_card;
 mod doc_preview_ui;
@@ -341,12 +342,6 @@ pub enum GuiEvent {
     ForwardFinished {
         target_name: String,
         error: Option<String>,
-    },
-    ScreenshotCaptured {
-        path: std::path::PathBuf,
-        width: u32,
-        height: u32,
-        image: egui::ColorImage,
     },
     TypingEventsReceived(Vec<crate::chat::TypingEvent>),
     SeenEventsReceived(Vec<crate::chat::SeenEvent>),
@@ -795,6 +790,8 @@ struct AppSettings {
     double_click_to_reply: bool,
     show_typing_indicator: bool,
     send_message_key: String, // "enter" | "cmd_enter"
+    /// Send photos at original quality (HD). On by default; changed only in Settings → Tin nhắn.
+    send_hd_original: bool,
     // 6. Tiện ích
     suggest_stickers_while_typing: bool,
     suggest_mentions: bool,
@@ -887,6 +884,7 @@ impl Default for AppSettings {
             double_click_to_reply: true,
             show_typing_indicator: true,
             send_message_key: "enter".into(),
+            send_hd_original: true,
             suggest_stickers_while_typing: true,
             suggest_mentions: true,
             enable_gif_search: true,
@@ -1099,7 +1097,6 @@ pub struct ZaloGuiApp {
     /// Selected reaction type tab in that dialog (None = all).
     reactions_tab: Option<i32>,
     filter_starred_only: bool,
-    pub(crate) send_hd_original: bool,
     pub(crate) typing_map: HashMap<String, (String, std::time::Instant)>,
     pub(crate) last_typing_ping_at: std::time::Instant,
     active_call: Option<ActiveCallOverlay>,
@@ -1548,7 +1545,6 @@ impl ZaloGuiApp {
             reactions_dialog: None,
             reactions_tab: None,
             filter_starred_only: false,
-            send_hd_original: true,
             typing_map: HashMap::new(),
             last_typing_ping_at: std::time::Instant::now(),
             active_call: None,
@@ -2548,24 +2544,6 @@ impl ZaloGuiApp {
                         self.status_msg = format!("Chuyển tiếp thất bại: {err}");
                     }
                 },
-                GuiEvent::ScreenshotCaptured {
-                    path,
-                    width,
-                    height,
-                    image,
-                } => {
-                    let tex = ctx.load_texture(
-                        format!("clip_preview_{}", crate::login::unix_now()),
-                        image,
-                        TextureOptions::LINEAR,
-                    );
-                    self.pending_clipboard_image = Some((path, width, height, tex));
-                    self.composer_focus_pending = true;
-                    self.show_toast(format!(
-                        "Đã chụp ảnh màn hình ({width}×{height} px) — nhấn Enter để gửi"
-                    ));
-                    self.status_msg = format!("Đã chụp ảnh màn hình ({width}×{height} px)");
-                }
                 GuiEvent::TypingEventsReceived(evs) => {
                     for ev in evs {
                         if ev.is_typing {

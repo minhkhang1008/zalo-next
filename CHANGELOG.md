@@ -9,6 +9,8 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 ## [Unreleased]
 
 ### Changed (Thay đổi)
+- **Gửi ảnh HD giờ là cài đặt** (Cài đặt → Tin nhắn → Gửi ảnh chất lượng gốc), mặc định bật; nút **HD** trên khung soạn tin đã bỏ.
+- **Ghi chú phát hành trong Cài đặt → Cập nhật** chia theo nhóm (Tính năng mới, Sửa lỗi, Thay đổi, Bảo mật) có biểu tượng và số mục, bỏ mục trùng; mỗi nhóm hiện 5 mục đầu, cửa sổ cập nhật hiện đủ.
 - **Linux lưu dữ liệu ở `~/.local/share/ctdozlite`** (hoặc `$XDG_DATA_HOME/ctdozlite`) thay vì thư mục khởi chạy; lần mở đầu tiên tự sao chép dữ liệu cũ sang, giữ bản gốc `*.bak`. Chưa kiểm thử trên máy Linux thật.
 - **Windows dùng một thư mục dữ liệu cố định `%LOCALAPPDATA%\ctdozlite`** (trước đây là thư mục khởi chạy, nên mở từ Start menu, từ file `.exe` hay từ terminal có thể thấy phiên đăng nhập khác nhau). Lần mở đầu tiên tự chuyển dữ liệu cũ sang, giữ bản gốc `*.bak`. Chưa kiểm thử trên máy thật.
 
@@ -44,11 +46,13 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - Gõ `@AI …` khi đang có ảnh dán hoặc tệp kéo vào khung soạn tin không còn **gửi ảnh/tệp lên Zalo** kèm câu hỏi làm chú thích; trả lời một tin Zalo bằng `@AI` không còn làm mất tin đó.
 - **Emoji màu trên Windows:** emoji trong tin nhắn và bảng Emoji giờ hiện màu từ phông Segoe UI Emoji (trước đây chỉ macOS có, Windows vẫn hiện emoji trắng đen). Chưa kiểm thử trên máy Windows thật; cờ quốc gia trên Windows vẫn là chữ như mặc định của Segoe UI Emoji. Linux cũng hiện màu với bản Noto Color Emoji dạng vector (COLRv1).
 - **Kéo-thả tệp trên Windows/Linux** (chưa kiểm thử trên máy thật): trước đây vùng thả dựa vào vị trí chuột cũ (trước khi kéo) nên có thể **gửi ngay** dù bạn thả vào ô soạn tin. Windows giờ đọc vị trí chuột thật trong lúc kéo và chỉ gửi ngay khi cả lúc kéo lẫn lúc thả đều ở vùng tin nhắn; Linux luôn đính kèm để xem trước khi gửi.
-- **Chụp màn hình trên Windows** (chưa kiểm thử trên máy thật): mở Snipping Tool mà không còn nháy cửa sổ PowerShell, và báo lỗi khi không mở được công cụ chụp.
 - **Tự cập nhật trên Windows:** bản mới chỉ mở sau khi bản cũ đã thoát (trước đây hai bản chạy cùng lúc trên cùng dữ liệu), thay file có hoàn tác khi lỗi, và khi không thay được bản cài (ví dụ cài cho mọi người dùng trong Program Files) thì báo tải bộ cài thay vì mở bản portable trong Downloads. Chưa kiểm thử trên máy thật.
 - Chuyển dữ liệu cũ sang thư mục dữ liệu mới (macOS, Windows) giờ làm trọn một lượt: lỗi giữa chừng không còn để lại lịch sử thiếu.
 - Tệp nhận về có tên trùng tên thiết bị của Windows (`CON`, `NUL.txt`, `COM1.log`…) được đổi thành `_CON`… để lưu được.
 - Phông chữ hệ thống trên Windows được tìm theo thư mục Windows thật (`%WINDIR%`), không mặc định `C:\Windows`. Trên macOS, gợi ý phím tắt dán ảnh/tìm kiếm ghi `Cmd+V`/`Cmd+F` thay vì `Ctrl`.
+
+### Removed (Gỡ bỏ)
+- **Chụp ảnh màn hình** (nút máy ảnh và phím tắt `Alt+A`, `Cmd/Ctrl+Shift+A`, `Cmd/Ctrl+Shift+X`) đã bỏ. Vẫn dán được ảnh chụp từ bộ nhớ tạm (`⌘V`/`Ctrl+V`). `Cmd/Ctrl+Shift+X` giờ chỉ dùng cho Định dạng tin nhắn.
 
 ### Security (Bảo mật)
 - Vì `@AI` giờ có thể gửi liên kết, ảnh và tệp, các nhóm đã đồng ý chia sẻ (khi trước chỉ gửi văn bản) và tính năng Đọc trước sẽ **hỏi lại một lần**.

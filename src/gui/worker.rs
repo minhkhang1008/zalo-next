@@ -600,7 +600,6 @@ pub enum WorkerCmd {
         /// The user's download folder: never cleared even when it sits in the data directory.
         protected: Vec<std::path::PathBuf>,
     },
-    TriggerScreenshot,
     SendTyping {
         thread_id: String,
         is_group: bool,
@@ -4263,13 +4262,6 @@ pub(super) fn spawn_session_worker(
                                 let _ = tx.send(event);
                             });
                         }
-                        WorkerCmd::TriggerScreenshot => {
-                            let gui_tx_clone = gui_tx.clone();
-                            let ctx_clone = egui_ctx.clone();
-                            tokio::task::spawn_blocking(move || {
-                                capture_screen_interactive(gui_tx_clone, ctx_clone);
-                            });
-                        }
                         WorkerCmd::StartCall {
                             partner_id,
                             partner_name,
@@ -5360,89 +5352,6 @@ async fn download_attachment_with_original_name(
     })
     .await
     .map_err(|e| format!("Lỗi tác vụ lưu file: {e}"))?
-}
-
-pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::Context) {
-    #[cfg(target_os = "windows")]
-    {
-        // Shell launch instead of `powershell`, which flashed a console window. Snipping Tool
-        // leaves the snip on the clipboard; Windows cannot tell us which copy came from it, so the
-        // user pastes it into the conversation they mean (no automatic attach).
-        let text = if crate::gui::messages::windows_shell_open("ms-screenclip:") {
-            "Đã mở công cụ chụp ảnh màn hình — sau khi chụp hãy nhấn Ctrl+V để dán"
-        } else {
-            "Không mở được công cụ chụp màn hình của Windows (Snipping Tool)"
-        };
-        let _ = gui_tx.send(crate::gui::GuiEvent::StatusUpdate(text.into()));
-        ctx.request_repaint();
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let now = crate::login::unix_now();
-        let temp_path = std::env::temp_dir().join(format!("ctdozlite_screenshot_{now}.png"));
-
-        #[cfg(target_os = "macos")]
-        let status = std::process::Command::new("/usr/sbin/screencapture")
-            .args(["-i", "-x", temp_path.to_str().unwrap_or("")])
-            .status();
-
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let status = {
-            let temp_str = temp_path.to_str().unwrap_or("");
-            std::process::Command::new("flameshot")
-                .args(["gui", "-r", "-p", temp_str])
-                .status()
-                .or_else(|_| {
-                    std::process::Command::new("gnome-screenshot")
-                        .args(["-a", "-f", temp_str])
-                        .status()
-                })
-                .or_else(|_| {
-                    std::process::Command::new("spectacle")
-                        .args(["-b", "-r", "-o", temp_str])
-                        .status()
-                })
-                .or_else(|_| {
-                    std::process::Command::new("scrot")
-                        .args(["-s", temp_str])
-                        .status()
-                })
-        };
-
-        if let Ok(st) = status {
-            if st.success() && temp_path.exists() {
-                if let Ok(meta) = std::fs::metadata(&temp_path) {
-                    if meta.len() > 0 {
-                        if let Ok(bytes) = std::fs::read(&temp_path) {
-                            if let Ok(dyn_img) = image::load_from_memory(&bytes) {
-                                if let Some((final_path, w, h, col_img)) =
-                                    crate::gui::messages::finalize_clipboard_rgba_image(
-                                        dyn_img.to_rgba8(),
-                                    )
-                                {
-                                    let _ = std::fs::remove_file(&temp_path);
-                                    let _ = gui_tx.send(crate::gui::GuiEvent::ScreenshotCaptured {
-                                        path: final_path,
-                                        width: w,
-                                        height: h,
-                                        image: col_img,
-                                    });
-                                    ctx.request_repaint();
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let _ = std::fs::remove_file(&temp_path);
-        let _ = gui_tx.send(crate::gui::GuiEvent::StatusUpdate(
-            "Đã huỷ chụp màn hình".into(),
-        ));
-        ctx.request_repaint();
-    }
 }
 
 /// Persist the question, ask the Assistant and report the answer. Runs on the worker. Nothing is

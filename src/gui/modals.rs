@@ -3186,6 +3186,20 @@ impl ZaloGuiApp {
                                                             render_toggle_switch(ui, &mut self.settings.show_typing_indicator, pal);
                                                         });
                                                     });
+                                                    ui.add_space(8.0);
+                                                    ui.horizontal(|ui| {
+                                                        ui.vertical(|ui| {
+                                                            ui.label(RichText::new("Gửi ảnh chất lượng gốc (HD)").color(pal.text_primary).size(13.2));
+                                                            ui.label(RichText::new("Bật: gửi ảnh gốc, không nén. Tắt: gửi ảnh ở chất lượng tiêu chuẩn.").color(pal.text_muted).size(11.8));
+                                                        });
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            let before = self.settings.send_hd_original;
+                                                            render_toggle_switch(ui, &mut self.settings.send_hd_original, pal);
+                                                            if before != self.settings.send_hd_original {
+                                                                self.settings.save();
+                                                            }
+                                                        });
+                                                    });
                                                 });
                                             }
                                         }
@@ -3594,12 +3608,12 @@ impl ZaloGuiApp {
                                                         );
                                                     }
 
-                                                    // 3) Concise Changelog Summary (bullet items only, no images/tables)
+                                                    // 3) Release notes grouped by section (Tính năng mới, Sửa lỗi, …)
                                                     if let Some(ref info) = info_opt {
-                                                        let bullets = extract_concise_changelog(
+                                                        let sections = super::changelog_ui::parse_release_notes(
                                                             &info.release_notes,
                                                         );
-                                                        if !bullets.is_empty() {
+                                                        if !sections.is_empty() {
                                                             ui.add_space(12.0);
                                                             egui::Frame::none()
                                                                 .fill(pal.bg_input)
@@ -3608,7 +3622,7 @@ impl ZaloGuiApp {
                                                                 ))
                                                                 .rounding(Rounding::same(8.0))
                                                                 .inner_margin(Margin::symmetric(
-                                                                    14.0, 10.0,
+                                                                    14.0, 12.0,
                                                                 ))
                                                                 .show(ui, |ui| {
                                                                     ui.set_min_width(
@@ -3619,34 +3633,28 @@ impl ZaloGuiApp {
                                                                     );
                                                                     let hdr = if info.has_update {
                                                                         format!(
-                                                                            "Điểm mới trong phiên bản v{}:",
+                                                                            "Điểm mới trong phiên bản v{}",
                                                                             info.latest_version
                                                                         )
                                                                     } else {
                                                                         format!(
-                                                                            "Có gì mới ở phiên bản v{}:",
+                                                                            "Có gì mới ở phiên bản v{}",
                                                                             info.latest_version
                                                                         )
                                                                     };
                                                                     ui.label(
                                                                         RichText::new(hdr)
-                                                                            .size(12.2)
+                                                                            .size(13.0)
                                                                             .color(pal.text_primary)
                                                                             .strong(),
                                                                     );
-                                                                    ui.add_space(4.0);
-                                                                    for b in bullets.iter().take(16)
-                                                                    {
-                                                                        render_markdown_bullet_line(
-                                                                            ui,
-                                                                            b,
-                                                                            11.8,
-                                                                            pal.primary_hover,
-                                                                            pal.text_secondary,
-                                                                            pal,
-                                                                        );
-                                                                        ui.add_space(3.0);
-                                                                    }
+                                                                    ui.add_space(8.0);
+                                                                    super::changelog_ui::render_release_notes(
+                                                                        ui,
+                                                                        &sections,
+                                                                        pal,
+                                                                        Some(5),
+                                                                    );
                                                                 });
                                                         }
 
@@ -4116,8 +4124,8 @@ impl ZaloGuiApp {
                         });
 
                         // 3. Scrollable Release Notes Box (padded top & bottom so text is never clipped)
-                        let bullets = extract_concise_changelog(&info.release_notes);
-                        if !bullets.is_empty() {
+                        let sections = super::changelog_ui::parse_release_notes(&info.release_notes);
+                        if !sections.is_empty() {
                             ui.add_space(12.0);
                             egui::Frame::none()
                                 .fill(pal.bg_input)
@@ -4128,7 +4136,7 @@ impl ZaloGuiApp {
                                     ui.set_width(inner_w - 28.0);
                                     ui.label(
                                         RichText::new(format!(
-                                            "Chi tiết cập nhật & sửa lỗi trong v{} (từ GitHub Releases API):",
+                                            "Có gì mới trong v{}",
                                             info.latest_version
                                         ))
                                         .size(12.2)
@@ -4142,17 +4150,9 @@ impl ZaloGuiApp {
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
                                             ui.add_space(2.0);
-                                            for b in bullets.iter().take(20) {
-                                                render_markdown_bullet_line(
-                                                    ui,
-                                                    b,
-                                                    12.2,
-                                                    pal.accent_online,
-                                                    pal.text_secondary,
-                                                    pal,
-                                                );
-                                                ui.add_space(6.0);
-                                            }
+                                            super::changelog_ui::render_release_notes(
+                                                ui, &sections, pal, None,
+                                            );
                                             ui.add_space(2.0);
                                         });
                                 });
@@ -9614,85 +9614,9 @@ fn build_blurred_backdrop_image(src: &egui::ColorImage, is_dark: bool) -> egui::
     }
 }
 
-/// Extract up to 6 concise changelog bullet lines from a GitHub Release body,
-/// skipping images (`![...]`), tables (`|...|`), code blocks (` ``` `), and OS install instructions.
-/// "**Title (`src/x.rs`):** long text" → "Title"; other bullets are kept as written.
-fn short_changelog_title(bullet: &str) -> String {
-    let Some(rest) = bullet.strip_prefix("**") else {
-        return bullet.to_string();
-    };
-    let Some(end) = rest.find("**") else {
-        return bullet.to_string();
-    };
-    let mut title = rest[..end].trim().trim_end_matches(':').trim().to_string();
-    // Drop a trailing file-reference group such as "(`src/chat.rs`, `src/gui/x.rs`)".
-    if let Some(open) = title.rfind(" (`") {
-        if title.ends_with(')') {
-            title.truncate(open);
-        }
-    }
-    title
-}
-
-fn extract_concise_changelog(markdown: &str) -> Vec<String> {
-    let mut bullets: Vec<String> = Vec::new();
-    let mut in_code = false;
-    let mut in_install_section = false;
-
-    for line in markdown.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code = !in_code;
-            continue;
-        }
-        if in_code || trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            let h_low = trimmed.to_lowercase();
-            in_install_section = h_low.contains("bản cài đặt")
-                || h_low.contains("hướng dẫn cài")
-                || h_low.contains("installation");
-            continue;
-        }
-        if in_install_section {
-            continue;
-        }
-        if let Some(b) = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-        {
-            let b_clean = b.trim();
-            let b_low = b_clean.to_lowercase();
-            if b_clean.is_empty()
-                || b_low.starts_with("bộ cài đặt:")
-                || b_low.starts_with("bản chạy ngay")
-                || b_low.contains("sudo apt")
-                || b_low.contains("sudo dnf")
-                || b_low.contains(".deb")
-                || b_low.contains(".rpm")
-                || b_low.contains(".dmg")
-                || b_low.contains(".appimage")
-            {
-                continue;
-            }
-            // Link-only pointers ("Có gì mới: [CHANGELOG.md](…)") and GitHub's auto commit
-            // lines ("… by @user in https://…") are not changes worth listing.
-            if b_low.starts_with("có gì mới:")
-                || b_low.starts_with("cài đặt:")
-                || (b_low.contains(" by @") && b_low.contains(" in https://"))
-            {
-                continue;
-            }
-            bullets.push(short_changelog_title(b_clean));
-        }
-    }
-    bullets
-}
-
 /// Render a single bullet item containing `**bold**`, `` `code` ``, and `[label](url)` links
 /// into one unified wrapped `LayoutJob` so the bullet `• ` and text never collide or clip.
-fn render_markdown_bullet_line(
+pub(super) fn render_markdown_bullet_line(
     ui: &mut egui::Ui,
     text: &str,
     size: f32,
@@ -10215,28 +10139,6 @@ impl ZaloGuiApp {
         } else if save && self.commit_quick_message_editor().is_ok() {
             self.show_toast("Đã lưu tin nhắn nhanh");
         }
-    }
-}
-
-#[cfg(test)]
-mod changelog_bullet_tests {
-    use super::*;
-
-    #[test]
-    fn concise_changelog_keeps_short_titles_and_skips_links() {
-        let md = "## ctdozlite-next v0.2.1\n\n### Tính năng mới\n\
-- **Tìm và gửi GIF bằng lệnh `@gif` (`src/chat.rs`, `src/gui/workspace.rs`):** `@gif` hiện GIF…\n\
-- Chọn nhiều tin nhắn\n\
-- Có gì mới: [CHANGELOG.md](https://x)\n\
-* feat(ui): stuff by @someone in https://github.com/x/pull/1\n\
-Chi tiết: [CHANGELOG.md](https://x)\n";
-        assert_eq!(
-            extract_concise_changelog(md),
-            vec![
-                "Tìm và gửi GIF bằng lệnh `@gif`".to_string(),
-                "Chọn nhiều tin nhắn".to_string()
-            ]
-        );
     }
 }
 

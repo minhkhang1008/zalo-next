@@ -4938,17 +4938,6 @@ impl ZaloGuiApp {
                         .stroke(Stroke::new(1.0_f32, pal.border))
                         .show(ui, |ui| {
                             let is_ime_busy = self.ime_active || self.ime_just_committed;
-                            let trigger_screenshot_hotkey = ui.input(|i| {
-                                (i.modifiers.alt && i.key_pressed(Key::A))
-                                    || ((i.modifiers.command || i.modifiers.ctrl) && i.modifiers.shift && i.key_pressed(Key::A))
-                                    || ((i.modifiers.command || i.modifiers.ctrl) && i.modifiers.shift && i.key_pressed(Key::X))
-                            });
-                            if trigger_screenshot_hotkey {
-                                if let Some(tx) = WORKER_TX.get() {
-                                    let _ = tx.send(WorkerCmd::TriggerScreenshot);
-                                    self.show_toast("Đang bật chế độ chụp màn hình… Kéo chuột để chọn vùng cần chụp");
-                                }
-                            }
                             // @ popover keyboard navigation. Keys are consumed BEFORE the
                             // TextEdit runs so ↑/↓ don't move the caret, Tab doesn't move focus,
                             // and Enter neither sends nor inserts a newline.
@@ -5217,69 +5206,9 @@ impl ZaloGuiApp {
                                                             images_only: true,
                                                             caption: cap,
                                                             preset_path: None,
-                                                            original_hd: self.send_hd_original,
+                                                            original_hd: self.settings.send_hd_original,
                                                         });
                                                 }
-                                            }
-
-                                            // HD Original Quality Toggle Button
-                                            let hd_active = self.send_hd_original;
-                                            let (hd_rect, hd_resp) = ui.allocate_exact_size(
-                                                Vec2::new(32.0, 24.0),
-                                                Sense::click(),
-                                            );
-                                            let hd_bg = if hd_active {
-                                                if hd_resp.hovered() {
-                                                    pal.primary_hover
-                                                } else {
-                                                    pal.primary
-                                                }
-                                            } else if hd_resp.hovered() {
-                                                pal.bg_hover
-                                            } else {
-                                                pal.bg_input
-                                            };
-                                            let hd_text_col = if hd_active {
-                                                Color32::WHITE
-                                            } else {
-                                                pal.text_secondary
-                                            };
-                                            ui.painter().rect_filled(
-                                                hd_rect,
-                                                Rounding::same(6.0),
-                                                hd_bg,
-                                            );
-                                            if !hd_active {
-                                                ui.painter().rect_stroke(
-                                                    hd_rect,
-                                                    Rounding::same(6.0),
-                                                    Stroke::new(1.0_f32, pal.border),
-                                                );
-                                            }
-                                            ui.painter().text(
-                                                hd_rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "HD",
-                                                FontId::proportional(11.0),
-                                                hd_text_col,
-                                            );
-                                            let hd_tooltip = if hd_active {
-                                                "Chế độ gửi ảnh gốc Original / HD: ĐANG BẬT (Ảnh không bị nén, giữ nguyên 100% chất lượng)"
-                                            } else {
-                                                "Chế độ gửi ảnh gốc Original / HD: Đang TẮT (Bấm để bật gửi ảnh chất lượng cao không nén)"
-                                            };
-                                            if hd_resp
-                                                .on_hover_cursor(CursorIcon::PointingHand)
-                                                .on_hover_text(hd_tooltip)
-                                                .clicked()
-                                            {
-                                                self.send_hd_original = !self.send_hd_original;
-                                                let msg = if self.send_hd_original {
-                                                    "Đã BẬT gửi ảnh gốc Original / HD (không nén)"
-                                                } else {
-                                                    "Đã TẮT gửi ảnh gốc Original (chế độ thường)"
-                                                };
-                                                self.show_toast(msg.to_string());
                                             }
 
                                             // 3) Compact File Upload Icon Button
@@ -5319,41 +5248,8 @@ impl ZaloGuiApp {
                                                             images_only: false,
                                                             caption: cap,
                                                             preset_path: None,
-                                                            original_hd: self.send_hd_original,
+                                                            original_hd: self.settings.send_hd_original,
                                                         });
-                                                }
-                                            }
-
-                                            // 4) Screenshot Icon Button (Chụp ảnh màn hình)
-                                            let (cam_rect, cam_resp) = ui.allocate_exact_size(
-                                                Vec2::new(34.0, 34.0),
-                                                Sense::click(),
-                                            );
-                                            if cam_resp.hovered() {
-                                                ui.painter().rect_filled(
-                                                    cam_rect,
-                                                    Rounding::same(8.0),
-                                                    pal.bg_hover,
-                                                );
-                                            }
-                                            draw_icon_camera(
-                                                ui.painter(),
-                                                cam_rect.center(),
-                                                18.0,
-                                                if cam_resp.hovered() {
-                                                    pal.primary_hover
-                                                } else {
-                                                    pal.text_secondary
-                                                },
-                                            );
-                                            if cam_resp
-                                                .on_hover_cursor(CursorIcon::PointingHand)
-                                                .on_hover_text("Chụp ảnh màn hình (Alt+A hoặc click)")
-                                                .clicked()
-                                            {
-                                                if let Some(tx) = WORKER_TX.get() {
-                                                    let _ = tx.send(WorkerCmd::TriggerScreenshot);
-                                                    self.show_toast("Đang bật chế độ chụp màn hình… Kéo chuột để chọn vùng cần chụp");
                                                 }
                                             }
 
@@ -5845,7 +5741,7 @@ impl ZaloGuiApp {
                                                     images_only,
                                                     caption: std::mem::take(&mut cap),
                                                     preset_path: Some(path),
-                                                    original_hd: self.send_hd_original,
+                                                    original_hd: self.settings.send_hd_original,
                                                 });
                                             }
                                         }
@@ -6906,7 +6802,7 @@ impl ZaloGuiApp {
                             images_only: false,
                             caption: String::new(),
                             preset_path: Some(path),
-                            original_hd: self.send_hd_original,
+                            original_hd: self.settings.send_hd_original,
                         });
                     }
                 }
