@@ -849,6 +849,7 @@ pub mod lucide {
     pub const SHIELD_CHECK: &str = "\u{e15c}";
     pub const LOCK: &str = "\u{e10b}";
     pub const BELL: &str = "\u{e059}";
+    pub const BELL_OFF: &str = "\u{e05a}";
     pub const PAINTBRUSH: &str = "\u{e2e7}";
     pub const SLIDERS: &str = "\u{e29a}";
     pub const FOLDER_OPEN: &str = "\u{e247}";

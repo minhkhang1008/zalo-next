@@ -92,6 +92,10 @@ Bảng mã lỗi đầy đủ: [`KHAC_PHUC_SU_CO.md`](KHAC_PHUC_SU_CO.md).
 | `39_gif_search_send`, `40_conversation_labels` | GIF, nhãn hội thoại (chỉ đọc) |
 | `42`–`45`, `47_sync_v2_call_logs` | Đồng bộ lịch sử: điểm vào, vòng đời Sync V2, Android, nhật ký cuộc gọi |
 | `46_inline_video_playback` | Phát video đính kèm trong app |
+| `50_group_poll`, `51_zalo_emoticons_and_contact_cards` | Bình chọn nhóm, biểu tượng cảm xúc Zalo, danh thiếp |
+| `52_bank_cards`, `54_received_bank_cards` | Số tài khoản ngân hàng: gửi/quản lý, thẻ nhận được |
+| `53_rich_text_styles` | Định dạng tin nhắn (`textProperties`) |
+| `55_mute_action` | Tắt/mở lại thông báo hội thoại (`setmute`, mã action) |
 | `03_progress_audit` | Đánh giá tiến độ cũ (lịch sử) |
 
-Ghi chú mới lấy số kế tiếp (`49_…`). Không dùng lại số cũ.
+Ghi chú mới lấy số kế tiếp (`56_…`). Không dùng lại số cũ.

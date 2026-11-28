@@ -8338,6 +8338,16 @@ pub async fn set_unread_mark(
 /// Mute or unmute notifications for a conversation (`setMuteConversation` @ `compact-app-pc.js:14304409`, cmd `11288`).
 /// `duration_sec`: `3600` (1h), `14400` (4h), seconds until 8:00 AM, or `-1` (until reopened).
 /// `mute`: `true` -> `action = 1`, `false` -> `action = 2`.
+/// `setmute` action: Zalo Web's `SET_MUTE = 1`, `UNSET_MUTE = 3` (re-notes/55). `2` is not an
+/// unmute; the server ignored it and the next mute snapshot muted the thread again.
+fn mute_action(mute: bool) -> u8 {
+    if mute {
+        1
+    } else {
+        3
+    }
+}
+
 pub async fn set_mute_conversation(
     s: &Session,
     thread_id: &str,
@@ -8356,7 +8366,7 @@ pub async fn set_mute_conversation(
     let body = json!({
         "toid": clean,
         "duration": duration_sec,
-        "action": if mute { 1 } else { 2 },
+        "action": mute_action(mute),
         "startTime": crate::login::unix_now(),
         "muteType": if is_group { 2 } else { 1 },
         "imei": s.imei
@@ -9348,6 +9358,13 @@ pub async fn delete_conversation(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn setmute_uses_zalo_web_action_codes() {
+        // re-notes/55: SET_MUTE = 1, UNSET_MUTE = 3.
+        assert_eq!(super::mute_action(true), 1);
+        assert_eq!(super::mute_action(false), 3);
+    }
+
     #[cfg(unix)]
     #[test]
     fn privacy_regression_thread_snapshots_have_private_permissions() {

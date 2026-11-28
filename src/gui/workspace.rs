@@ -1330,12 +1330,12 @@ impl ZaloGuiApp {
                                         icon_right -= 14.0;
                                     }
                                     if is_muted {
-                                        ui.painter().text(
-                                            Pos2::new(icon_right + 4.0, row_rect.top() + 15.0),
-                                            egui::Align2::RIGHT_TOP,
-                                            "🔕",
-                                            FontId::proportional(10.5),
-                                            pal.text_muted,
+                                        draw_lucide_icon(
+                                            ui.painter(),
+                                            Pos2::new(icon_right - 2.0, row_rect.top() + 22.0),
+                                            lucide::BELL_OFF,
+                                            14.0,
+                                            pal.text_secondary,
                                         );
                                     }
                                 }
@@ -1463,7 +1463,10 @@ impl ZaloGuiApp {
                             row_resp.context_menu(|ui| {
                                 ui.set_min_width(205.0);
                                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
-                                ui.spacing_mut().button_padding = Vec2::new(10.0, 6.5);
+                                // Frameless item buttons get no padding in egui, but the sub-menu
+                                // buttons (Phân loại, Tắt thông báo) do: zero horizontal padding keeps
+                                // every label on the same left edge.
+                                ui.spacing_mut().button_padding = Vec2::new(0.0, 6.5);
 
                                 // 1. Ghim / Bỏ ghim hội thoại
                                 let pin_label = if is_user_pinned {

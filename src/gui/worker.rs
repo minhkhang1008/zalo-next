@@ -2135,14 +2135,20 @@ pub(super) fn spawn_session_worker(
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
-                                let _ = crate::chat::set_mute_conversation(
+                                if let Err(e) = crate::chat::set_mute_conversation(
                                     &s,
                                     &thread_id,
                                     is_group,
                                     duration_sec,
                                     mute,
                                 )
-                                .await;
+                                .await
+                                {
+                                    crate::logger::log_error("gui::mute_thread", &e.to_string());
+                                    let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                        "Không đổi được thông báo của hội thoại trên máy chủ Zalo.".into(),
+                                    ));
+                                }
                                 if let Ok(mute_resp) = crate::chat::get_mute_conversations(&s).await
                                 {
                                     if let Some(mute_map) = crate::unread::extract_mute_map(

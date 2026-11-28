@@ -35,6 +35,10 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Thông báo trên Windows:** tin nhắn mới, nhắc hẹn, bản cập nhật và cuộc gọi đến hiện thông báo của Windows, kèm ảnh đại diện người gửi. Chưa kiểm thử trên máy thật (đặc biệt với bản portable).
 
 ### Fixed (Sửa lỗi)
+- **"Mở lại thông báo" không có tác dụng:** app gửi sai mã thao tác nên máy chủ Zalo bỏ qua và hội thoại bị tắt thông báo lại ngay. Giờ gửi đúng mã như Zalo Web; nếu máy chủ từ chối thì báo lỗi. Chưa kiểm chứng với máy chủ thật.
+- Biểu tượng tắt thông báo trong danh sách hội thoại to và rõ hơn (chuông gạch chéo); các mục trong menu chuột phải của hội thoại thẳng hàng.
+- **Bấm avatar của bạn** giờ luôn mở menu tài khoản (trước đây phần lớn cú bấm bị đóng lại ngay).
+- **Thanh đen ở cạnh danh sách hội thoại** và việc không kéo giãn được danh sách đã được sửa.
 - **Cuộc gọi thoại không còn bị hiện là cuộc gọi video:** loại cuộc gọi giờ chỉ dựa vào trường `callType` của Zalo.
 - **Mở app không còn đổ chuông/thông báo hàng loạt** cho tin cũ tải về lúc khởi động: chỉ tin mới trong 2 phút gần nhất mới thông báo.
 - Tin đã **xóa phía tôi trên thiết bị khác** giờ cũng ẩn ở đây; các dòng tin trống không còn hiện.
