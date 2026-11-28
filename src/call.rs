@@ -1179,6 +1179,9 @@ struct PureRustCallState {
     invite_payload: Value,
     /// Acceptance has claimed this call; also suppresses duplicate answers/timeouts.
     answer_started: bool,
+    /// The user's microphone choice; re-applied whenever a media session (re)starts, so
+    /// "answer with the mic off" survives the media setup that happens after the answer.
+    mic_muted: bool,
 }
 
 fn claim_incoming_answer(is_caller: bool, connected: bool, claimed: &mut bool) -> bool {
@@ -2211,6 +2214,7 @@ enum CallEngineCmd {
     AnswerCall {
         accept: bool,
         cam_start_off: bool,
+        mic_start_off: bool,
     },
     SetMediaState {
         is_on_mic: bool,
@@ -2689,6 +2693,7 @@ impl CallBridge {
                                             extra_legs: Vec::new(),
                                             invite_payload: Value::Null,
                                             answer_started: true,
+                                            mic_muted: false,
                                         });
                                         let _ = gui_tx_clone
                                             .send(GuiEvent::CallStateChanged("calling".into()));
@@ -2963,6 +2968,7 @@ impl CallBridge {
                                 extra_legs: dialed_legs,
                                 invite_payload: Value::Null,
                                 answer_started: true,
+                                mic_muted: false,
                             });
                             let _ = gui_tx_clone.send(GuiEvent::CallStateChanged("calling".into()));
                             let status_txt = if n_ringing > 1 {
@@ -2982,6 +2988,7 @@ impl CallBridge {
                     CallEngineCmd::AnswerCall {
                         accept,
                         cam_start_off,
+                        mic_start_off,
                     } => {
                         // Claim the incoming call before spawning network work so duplicate
                         // answers and the ringing timeout cannot race with relay setup.
@@ -2996,6 +3003,9 @@ impl CallBridge {
                                 )
                             {
                                 continue;
+                            }
+                            if accept {
+                                st.mic_muted = mic_start_off;
                             }
                             st.call_id
                         };
@@ -3237,6 +3247,7 @@ impl CallBridge {
                                             if cam_start_off {
                                                 m.set_cam_enabled(false);
                                             }
+                                            m.set_mic_muted(st.mic_muted);
                                             st.media = Some(m);
                                         }
                                         Err(e) => {
@@ -3323,7 +3334,7 @@ impl CallBridge {
                                             "callId": call_id,
                                             "hostCall": host_val,
                                             "callState": 3,
-                                            "audioState": 1,
+                                            "audioState": if mic_start_off { 0 } else { 1 },
                                             "videoState": if is_video && !cam_start_off { 1 } else { 0 },
                                             "params": ""
                                         });
@@ -3373,6 +3384,7 @@ impl CallBridge {
                         let s_snap = session.lock().await.clone();
                         let mut guard = active_call.lock().await;
                         if let Some(ref mut st) = *guard {
+                            st.mic_muted = !is_on_mic;
                             st.is_video = st.is_video || is_on_cam;
                             if st.media.is_none() && is_on_cam {
                                 st.media = crate::media::MediaHandle::start_with_sockets(
@@ -3934,6 +3946,7 @@ impl CallBridge {
                                             } else {
                                                 // Primary is already connected; connect this additional member leg in parallel!
                                                 let is_vid = st.is_video;
+                                                let mic_muted = st.mic_muted;
                                                 let leg = &mut st.extra_legs[idx];
                                                 leg.is_connected = true;
                                                 let ans_media = event_media_params(&data);
@@ -3979,6 +3992,9 @@ impl CallBridge {
                                                         Some(egui_ctx.clone()),
                                                     )
                                                     .ok();
+                                                if let Some(media) = &leg.media {
+                                                    media.set_mic_muted(mic_muted);
+                                                }
                                                 let l_cid = leg.call_id;
                                                 let l_pid = leg.partner_id.clone();
                                                 let s_cl = s_snap.clone();
@@ -4103,6 +4119,7 @@ impl CallBridge {
                                                 Some(egui_ctx.clone()),
                                             ) {
                                                 Ok(m) => {
+                                                    m.set_mic_muted(st.mic_muted);
                                                     st.media = Some(m);
                                                 }
                                                 Err(e) => {
@@ -4600,6 +4617,7 @@ impl CallBridge {
                                             extra_legs: Vec::new(),
                                             invite_payload: relay_source.clone(),
                                             answer_started: false,
+                                            mic_muted: false,
                                         });
                                     } else if let Some(st) = g.as_mut() {
                                         // Retain the latest payload when the same invite is repeated.
@@ -4701,10 +4719,11 @@ impl CallBridge {
     }
 
     /// Accept (`true`) or decline (`false`) an incoming VoIP call.
-    pub fn answer_call(&self, accept: bool, cam_start_off: bool) {
+    pub fn answer_call(&self, accept: bool, cam_start_off: bool, mic_start_off: bool) {
         let _ = self.cmd_tx.send(CallEngineCmd::AnswerCall {
             accept,
             cam_start_off,
+            mic_start_off,
         });
     }
 

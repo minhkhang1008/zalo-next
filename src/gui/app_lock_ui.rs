@@ -339,6 +339,7 @@ impl ZaloGuiApp {
                                         tx.send(WorkerCmd::AnswerCall {
                                             accept: false,
                                             cam_start_off: false,
+                                            mic_start_off: false,
                                         })
                                         .is_ok()
                                     });

@@ -53,7 +53,7 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 objc2 = "0.5"
 block2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSDictionary", "NSGeometry", "NSProcessInfo", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.2", features = ["block2", "NSEvent", "NSPasteboard", "NSPasteboardItem", "NSBitmapImageRep", "NSImageRep", "NSScreen", "NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-app-kit = { version = "0.2", features = ["block2", "NSEvent", "NSPasteboard", "NSPasteboardItem", "NSBitmapImageRep", "NSImageRep", "NSScreen", "NSApplication", "NSResponder", "NSRunningApplication", "NSWindow"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.54", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_Globalization", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_System_WinRT"] }

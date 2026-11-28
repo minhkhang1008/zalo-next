@@ -2050,6 +2050,27 @@ impl ZaloGuiApp {
                                                 .rounding(Rounding::same(8.0))
                                                 .inner_margin(Margin::symmetric(14.0, 10.0))
                                                 .show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.vertical(|ui| {
+                                                            ui.label(RichText::new(format!("{} Cho phép gọi video", lucide::VIDEO)).color(pal.text_primary).size(13.2));
+                                                            ui.label(RichText::new("Khi tắt: ẩn nút gọi video, cuộc gọi video đến được trả lời bằng thoại.").color(pal.text_muted).size(11.8));
+                                                        });
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            let before = self.settings.video_calls_enabled;
+                                                            render_toggle_switch(ui, &mut self.settings.video_calls_enabled, pal);
+                                                            if before != self.settings.video_calls_enabled {
+                                                                self.settings.save();
+                                                            }
+                                                        });
+                                                    });
+                                                });
+                                            ui.add_space(8.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(8.0))
+                                                .inner_margin(Margin::symmetric(14.0, 10.0))
+                                                .show(ui, |ui| {
                                                     let (mics, cams) = crate::media::cached_media_devices();
                                                     ui.horizontal(|ui| {
                                                         ui.label(RichText::new(format!("{} Đầu vào Mic:", lucide::MIC)).color(pal.text_primary).size(13.0));
@@ -4735,6 +4756,11 @@ impl ZaloGuiApp {
         let Some(mut call) = self.active_call.clone() else {
             return;
         };
+        // A ringing call is shown by the small incoming-call popup (`call_popup.rs`); the call
+        // window opens only once the user answers.
+        if call.is_incoming_ringing {
+            return;
+        }
         // Keep timer and video textures updating smoothly while call window is open
         ctx.request_repaint_after(Duration::from_millis(66));
 
@@ -4861,26 +4887,10 @@ impl ZaloGuiApp {
             }
         }
         let viewport_id = egui::ViewportId::from_hash_of("zalo_dedicated_call_window");
-        let mut builder = egui::ViewportBuilder::default()
+        let builder = egui::ViewportBuilder::default()
             .with_title(win_title)
             .with_inner_size([default_w, default_h])
             .with_min_inner_size([520.0, 460.0]);
-        // An incoming call opens while the main window is being raised and focused (`show_app`);
-        // without this the call window can end up *behind* it and the user never sees the Answer
-        // button. Keep it on top and focused while it rings, then return to a normal window.
-        if call.is_incoming_ringing {
-            builder = builder.with_always_on_top().with_active(true);
-            self.call_window_on_top = true;
-            if elapsed_f < 2.0 {
-                ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Focus);
-            }
-        } else if self.call_window_on_top {
-            self.call_window_on_top = false;
-            ctx.send_viewport_cmd_to(
-                viewport_id,
-                egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal),
-            );
-        }
 
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
             self.handle_app_lock_input(vp_ctx);
@@ -5352,157 +5362,6 @@ impl ZaloGuiApp {
                                     }
                                 });
                             });
-                        } else if call.is_incoming_ringing {
-                            let n_btns = 2 + usize::from(call.is_video);
-                            let dock_w = match n_btns {
-                                4 => 320.0_f32,
-                                3 => 248.0_f32,
-                                _ => 156.0_f32,
-                            };
-                            let (dock_rect, _) =
-                                ui.allocate_exact_size(Vec2::new(dock_w, 74.0), Sense::hover());
-                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(dock_rect), |ui| {
-                                ui.horizontal_centered(|ui| {
-                                    ui.spacing_mut().item_spacing.x = match n_btns {
-                                        4 => 22.0,
-                                        3 => 28.0,
-                                        _ => 44.0,
-                                    };
-                                    // 1) Decline button
-                                    ui.vertical_centered(|ui| {
-                                        let (dec_r, dec_resp) = ui.allocate_exact_size(
-                                            Vec2::splat(52.0),
-                                            Sense::click(),
-                                        );
-                                        ui.painter().circle_filled(
-                                            dec_r.center(),
-                                            25.0,
-                                            pal.danger,
-                                        );
-                                        draw_lucide_icon(
-                                            ui.painter(),
-                                            dec_r.center(),
-                                            lucide::PHONE_OFF,
-                                            20.0,
-                                            Color32::WHITE,
-                                        );
-                                        if dec_resp
-                                            .on_hover_cursor(CursorIcon::PointingHand)
-                                            .on_hover_text("Từ chối cuộc gọi (Esc)")
-                                            .clicked()
-                                            || vp_ctx.input(|i| i.key_pressed(Key::Escape))
-                                        {
-                                            if let Some(tx) = WORKER_TX.get() {
-                                                let _ = tx.send(WorkerCmd::AnswerCall {
-                                                    accept: false,
-                                                    cam_start_off: false,
-                                                });
-                                            }
-                                            self.active_call = None;
-                                        }
-                                        ui.label(
-                                            RichText::new("Từ chối")
-                                                .size(11.0)
-                                                .color(pal.text_secondary),
-                                        );
-                                    });
-
-                                    // 2) Answer Video Call with Camera Off (`camStartOff`)
-                                    if call.is_video {
-                                        ui.vertical_centered(|ui| {
-                                            let (nc_r, nc_resp) = ui.allocate_exact_size(
-                                                Vec2::splat(52.0),
-                                                Sense::click(),
-                                            );
-                                            ui.painter().circle_filled(
-                                                nc_r.center(),
-                                                25.0,
-                                                Color32::from_rgb(51, 65, 85),
-                                            );
-                                            ui.painter().circle_stroke(
-                                                nc_r.center(),
-                                                25.0,
-                                                Stroke::new(1.2_f32, pal.primary_hover),
-                                            );
-                                            draw_lucide_icon(
-                                                ui.painter(),
-                                                nc_r.center(),
-                                                lucide::VIDEO_OFF,
-                                                19.5,
-                                                Color32::WHITE,
-                                            );
-                                            if nc_resp
-                                                .on_hover_cursor(CursorIcon::PointingHand)
-                                                .on_hover_text("Trả lời không mở camera")
-                                                .clicked()
-                                            {
-                                                call.is_incoming_ringing = false;
-                                                call.cam_enabled = false;
-                                                call.state_label = "Đang kết nối cuộc gọi…".into();
-                                                if let Some(tx) = WORKER_TX.get() {
-                                                    let _ = tx.send(WorkerCmd::AnswerCall {
-                                                        accept: true,
-                                                        cam_start_off: true,
-                                                    });
-                                                }
-                                            }
-                                            ui.label(
-                                                RichText::new("Tắt sẵn cam")
-                                                    .size(11.0)
-                                                    .color(pal.text_primary),
-                                            );
-                                        });
-                                    }
-
-                                    // 3) Accept Call (with camera on if video call)
-                                    ui.vertical_centered(|ui| {
-                                        let (acc_r, acc_resp) = ui.allocate_exact_size(
-                                            Vec2::splat(52.0),
-                                            Sense::click(),
-                                        );
-                                        ui.painter().circle_filled(
-                                            acc_r.center(),
-                                            25.0,
-                                            pal.accent_online,
-                                        );
-                                        draw_lucide_icon(
-                                            ui.painter(),
-                                            acc_r.center(),
-                                            if call.is_video {
-                                                lucide::VIDEO
-                                            } else {
-                                                lucide::PHONE_CALL
-                                            },
-                                            20.0,
-                                            Color32::WHITE,
-                                        );
-                                        if acc_resp
-                                            .on_hover_cursor(CursorIcon::PointingHand)
-                                            .on_hover_text("Nghe máy (Enter)")
-                                            .clicked()
-                                            || vp_ctx.input(|i| i.key_pressed(Key::Enter))
-                                        {
-                                            call.is_incoming_ringing = false;
-                                            call.state_label = "Đang kết nối cuộc gọi…".into();
-                                            if let Some(tx) = WORKER_TX.get() {
-                                                let _ = tx.send(WorkerCmd::AnswerCall {
-                                                    accept: true,
-                                                    cam_start_off: false,
-                                                });
-                                            }
-                                        }
-                                        ui.label(
-                                            RichText::new(if call.is_video {
-                                                "Bật cam"
-                                            } else {
-                                                "Nghe máy"
-                                            })
-                                            .size(11.0)
-                                            .color(pal.accent_online),
-                                        );
-                                    });
-                                });
-                            });
                         } else {
                             let is_multi_dock = call.is_group
                                 || self.sticker_textures.contains_key("call_remote_video_1");
@@ -5602,7 +5461,9 @@ impl ZaloGuiApp {
                                         hangup_clicked = true;
                                     }
 
-                                    // 3) Circular Camera Button
+                                    // 3) Circular Camera Button (hidden while video calls are disabled,
+                                    // unless the camera is already on)
+                                    if self.settings.video_calls_enabled || call.cam_enabled {
                                     let (cam_r, cam_resp) =
                                         ui.allocate_exact_size(Vec2::splat(48.0), Sense::click());
                                     let cam_bg = if call.cam_enabled {
@@ -5666,6 +5527,7 @@ impl ZaloGuiApp {
                                                 is_on_cam: call.cam_enabled,
                                             });
                                         }
+                                    }
                                     }
                                     // 4) Layout Switcher (Gallery <-> Speaker View)
                                     if is_multi_dock {
@@ -6504,6 +6366,11 @@ impl ZaloGuiApp {
             call.error_code = None;
             call.error_reason = None;
             call.started_at = std::time::Instant::now();
+            // Video calls are opt-in: a retry after the setting was turned off is a voice call.
+            if !self.settings.video_calls_enabled {
+                call.is_video = false;
+                call.cam_enabled = false;
+            }
             call.state_label = if call.is_video {
                 "Đang kết nối cuộc gọi video…".into()
             } else {
