@@ -256,6 +256,7 @@ impl BankCatalogue {
 
 async fn run_bank_command(
     session: &Session,
+    active_session: &Mutex<Session>,
     banks: &OnceCell<Arc<[Bank]>>,
     command: WorkerCmd,
 ) -> anyhow::Result<BankCardsUpdate> {
@@ -280,13 +281,24 @@ async fn run_bank_command(
             client.update_account(&account).await?;
             Ok(BankCardsUpdate::Saved)
         }
-        WorkerCmd::DeleteBankAccount { account, .. } => {
+        WorkerCmd::DeleteBankAccount { request, account } => {
             // The phone can change which account is default while this dialog is open.
             let saved = client.list_all_accounts().await?;
             let current = saved.accounts.iter().find(|row| row.account_id == account.account_id)
                 .ok_or_else(|| anyhow::anyhow!("Số tài khoản này không còn trong danh sách."))?;
             if current.is_default && saved.has_multiple {
                 anyhow::bail!("{DEFAULT_DELETE_ERROR}");
+            }
+            {
+                let active = active_session.lock().await;
+                if !active
+                    .login
+                    .as_ref()
+                    .is_some_and(|login| login.uin == request.uin)
+                    || !Arc::ptr_eq(&active.jar, &session.jar)
+                {
+                    anyhow::bail!("Tài khoản Zalo đã thay đổi.");
+                }
             }
             client.delete_account(current).await?;
             Ok(BankCardsUpdate::Deleted)
@@ -1491,10 +1503,13 @@ pub(super) fn spawn_session_worker(
                             let request_id = request.id;
                             let s = session.lock().await.clone();
                             let banks = bank_catalogue.for_session(&s);
+                            let active_session = session.clone();
                             let tx = gui_tx.clone();
                             tokio::spawn(async move {
                                 let result = if s.login.as_ref().is_some_and(|login| login.uin == uin) {
-                                    run_bank_command(&s, &banks, command).await.map_err(|err| err.to_string())
+                                    run_bank_command(&s, &active_session, &banks, command)
+                                        .await
+                                        .map_err(|err| err.to_string())
                                 } else {
                                     Err("Tài khoản Zalo đã thay đổi.".into())
                                 };

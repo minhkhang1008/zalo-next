@@ -12,10 +12,17 @@ use crate::session::{is_trusted_zalo_url, Session};
 const SERVICE: &str = "zinstant_msg";
 const PAGE_SIZE: u32 = 10;
 const MAX_PAGES: u32 = 10;
+const MAX_PAGE_ROWS: usize = 50;
+const MAX_SAVED_ACCOUNTS: usize = 200;
+const MAX_BANKS: usize = 500;
+const MAX_NAME_CHARS: usize = 200;
+const MAX_LOGO_BYTES: usize = 1024;
 const RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 const RECEIVED_CARD_LIMIT: usize = 256 * 1024;
 pub(crate) const DEFAULT_DELETE_ERROR: &str =
     "Không thể xóa số tài khoản mặc định khi còn số tài khoản khác.";
+pub(crate) const SEND_UNCONFIRMED: &str =
+    "Có thể thẻ đã được gửi. Kiểm tra cuộc trò chuyện trước khi gửi lại.";
 
 #[derive(Clone, Default)]
 pub struct Bank {
@@ -194,6 +201,17 @@ pub(crate) struct SavedBankAccounts {
     pub has_multiple: bool,
 }
 
+impl SavedBankAccounts {
+    /// Return whether pagination can continue within the local row budget.
+    fn append_page(&mut self, page: AccountPage) -> bool {
+        let remaining = MAX_SAVED_ACCOUNTS - self.accounts.len();
+        self.accounts
+            .extend(page.accounts.into_iter().take(remaining));
+        self.has_multiple |= page.total > 1 || self.accounts.len() > 1;
+        page.has_more && self.accounts.len() < MAX_SAVED_ACCOUNTS
+    }
+}
+
 fn wire_u64(value: &Value) -> Option<u64> {
     value.as_u64().or_else(|| value.as_str()?.parse().ok())
 }
@@ -209,6 +227,10 @@ fn wire_bin(value: &Value) -> u32 {
     wire_u64(&value["bin"])
         .and_then(|bin| u32::try_from(bin).ok())
         .unwrap_or_default()
+}
+
+fn valid_name_length(value: &str) -> bool {
+    value.chars().nth(MAX_NAME_CHARS).is_none()
 }
 
 impl Bank {
@@ -243,7 +265,18 @@ fn parse_banks(value: &Value) -> Result<Vec<Bank>> {
     let banks = value["banks"]
         .as_array()
         .ok_or_else(|| anyhow!("Zalo trả về danh sách ngân hàng không hợp lệ."))?;
-    Ok(banks.iter().map(Bank::from_wire).collect())
+    Ok(banks
+        .iter()
+        .take(MAX_BANKS)
+        .filter(|row| row["name_eng"].as_str().is_none_or(valid_name_length))
+        .map(Bank::from_wire)
+        .filter(|bank| {
+            valid_name_length(&bank.name)
+                && valid_name_length(&bank.short_name)
+                && valid_name_length(&bank.search_keyword)
+                && bank.logo.len() <= MAX_LOGO_BYTES
+        })
+        .collect())
 }
 
 fn parse_account_page(value: &Value) -> Result<AccountPage> {
@@ -251,8 +284,21 @@ fn parse_account_page(value: &Value) -> Result<AccountPage> {
         .as_array()
         .ok_or_else(|| anyhow!("Zalo trả về danh sách số tài khoản không hợp lệ."))?;
     Ok(AccountPage {
-        accounts: accounts.iter().map(BankAccount::from_wire).collect(),
-        total: wire_u64(&value["total"]).unwrap_or(accounts.len() as u64),
+        accounts: accounts
+            .iter()
+            .take(MAX_PAGE_ROWS)
+            .map(BankAccount::from_wire)
+            .filter(|account| {
+                valid_bank_number(&account.bank_number)
+                    && valid_name_length(&account.holder_name)
+                    && valid_name_length(&account.bank_name)
+                    && account.bank_logo.len() <= MAX_LOGO_BYTES
+                    && account.account_id.len() <= 20
+            })
+            .collect(),
+        total: wire_u64(&value["total"])
+            .unwrap_or_default()
+            .max(accounts.len() as u64),
         has_more: wire_bool(&value["hasMore"]).unwrap_or_default(),
     })
 }
@@ -366,6 +412,17 @@ fn card_params(
     }))
 }
 
+#[derive(Debug)]
+struct ZaloRejection(i64);
+
+impl std::fmt::Display for ZaloRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Zalo từ chối yêu cầu (mã lỗi {}).", self.0)
+    }
+}
+
+impl std::error::Error for ZaloRejection {}
+
 fn response_code(value: &Value) -> Result<Option<i64>> {
     value
         .get("error_code")
@@ -375,11 +432,19 @@ fn response_code(value: &Value) -> Result<Option<i64>> {
                 .or_else(|| code.as_str()?.parse().ok())
                 .ok_or_else(|| anyhow!("Mã phản hồi từ Zalo không hợp lệ."))?;
             if code != 0 {
-                bail!("Zalo từ chối yêu cầu (mã lỗi {code}).");
+                return Err(ZaloRejection(code).into());
             }
             Ok(code)
         })
         .transpose()
+}
+
+fn card_ack_error(path: &str, error: anyhow::Error) -> anyhow::Error {
+    if path == "card" && !error.is::<ZaloRejection>() {
+        anyhow!(SEND_UNCONFIRMED)
+    } else {
+        error
+    }
 }
 
 fn response_payload(response: Value, key: &[u8], require_success_code: bool) -> Result<Value> {
@@ -457,10 +522,12 @@ impl<'a> BankCards<'a> {
                     .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .body(format!("params={params}"));
             }
-            let response = request
-                .send()
-                .await
-                .map_err(|_| anyhow!("Không nhận được phản hồi từ dịch vụ số tài khoản."))?;
+            let response = request.send().await.map_err(|_| {
+                card_ack_error(
+                    path,
+                    anyhow!("Không nhận được phản hồi từ dịch vụ số tài khoản."),
+                )
+            })?;
             let status = response.status();
             // A 404 identifies a host that does not serve this path. Any other failure can
             // occur after the server processed a POST, so never try another host in that case.
@@ -469,19 +536,24 @@ impl<'a> BankCards<'a> {
                 continue;
             }
             if status != StatusCode::OK {
-                bail!("Dịch vụ số tài khoản trả về lỗi HTTP {}.", status.as_u16());
+                let error = anyhow!("Dịch vụ số tài khoản trả về lỗi HTTP {}.", status.as_u16());
+                if status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT {
+                    return Err(error);
+                }
+                return Err(card_ack_error(path, error));
             }
 
             let bytes = crate::media_resources::read_bounded_response(response, RESPONSE_LIMIT)
                 .await
-                .map_err(|_| anyhow!("Không đọc được phản hồi từ Zalo."))?;
+                .map_err(|_| card_ack_error(path, anyhow!("Không đọc được phản hồi từ Zalo.")))?;
             let response = serde_json::from_slice(&bytes)
-                .map_err(|_| anyhow!("Phản hồi từ Zalo không hợp lệ."))?;
+                .map_err(|_| card_ack_error(path, anyhow!("Phản hồi từ Zalo không hợp lệ.")))?;
             let payload = response_payload(
                 response,
                 session.session_key_bytes(),
                 method == Method::POST,
-            )?;
+            )
+            .map_err(|error| card_ack_error(path, error))?;
             session.domains.remember_winner(SERVICE, &host);
             return Ok(payload);
         }
@@ -503,10 +575,7 @@ impl<'a> BankCards<'a> {
     pub(crate) async fn list_all_accounts(&self) -> Result<SavedBankAccounts> {
         let mut saved = SavedBankAccounts::default();
         for page in 0..MAX_PAGES {
-            let result = self.list_accounts(page).await?;
-            saved.accounts.extend(result.accounts);
-            saved.has_multiple |= result.total > 1 || saved.accounts.len() > 1;
-            if !result.has_more {
+            if !saved.append_page(self.list_accounts(page).await?) {
                 break;
             }
             if page == MAX_PAGES - 1 {
@@ -682,8 +751,98 @@ mod tests {
         assert_eq!(page.accounts[1].bank_number, "100");
         assert_eq!(page.accounts[1].holder_name, "12345");
         assert!(page.accounts[1].is_default);
-        assert!(page.accounts[2].account_id.is_empty());
-        assert!(!page.accounts[2].is_default);
+        assert_eq!(page.accounts.len(), 2);
+    }
+
+    #[test]
+    fn caps_bank_catalogue_rows() {
+        let banks: Vec<_> = (1..=501).map(|bin| json!({"bin": bin})).collect();
+        let parsed = parse_banks(&json!({"banks": banks})).unwrap();
+        assert_eq!(parsed.len(), 500);
+        assert_eq!(parsed.last().unwrap().bin, 500);
+    }
+
+    #[test]
+    fn caps_bank_account_page_rows() {
+        let accounts: Vec<_> = (1..=51)
+            .map(|id| json!({"id": id, "bank_number": "00001"}))
+            .collect();
+        let parsed = parse_account_page(&json!({"myBanks": accounts, "hasMore": true})).unwrap();
+        assert_eq!(parsed.accounts.len(), 50);
+        assert_eq!(parsed.accounts.last().unwrap().account_id, "50");
+        assert_eq!(parsed.total, 51);
+        assert!(parsed.has_more);
+    }
+
+    #[test]
+    fn caps_saved_bank_accounts_across_pages() {
+        let mut saved = SavedBankAccounts::default();
+        let mut next_id = 1;
+        for (page, count) in [7, 50, 50, 50, 50].into_iter().enumerate() {
+            let accounts: Vec<_> = (next_id..next_id + count)
+                .map(|id| json!({"id": id, "bank_number": "00001"}))
+                .collect();
+            next_id += count;
+            let parsed =
+                parse_account_page(&json!({"myBanks": accounts, "hasMore": true})).unwrap();
+            assert_eq!(saved.append_page(parsed), page < 4);
+        }
+        assert_eq!(saved.accounts.len(), 200);
+        assert_eq!(saved.accounts.last().unwrap().account_id, "200");
+        assert!(saved.has_multiple);
+    }
+
+    #[test]
+    fn marks_unreadable_bank_card_acknowledgements_but_keeps_explicit_rejections() {
+        for response in [
+            json!({}),
+            json!({"error_code": "invalid"}),
+            json!({"error_code": 0, "data": "invalid"}),
+        ] {
+            let error = response_payload(response, &[0; 32], true).unwrap_err();
+            assert_eq!(card_ack_error("card", error).to_string(), SEND_UNCONFIRMED);
+        }
+        for response in [
+            json!({"error_code": 2}),
+            json!({"error_code": 0, "data": {"error_code": 2}}),
+        ] {
+            let error = response_payload(response, &[], true).unwrap_err();
+            assert_eq!(
+                card_ack_error("card", error).to_string(),
+                "Zalo từ chối yêu cầu (mã lỗi 2)."
+            );
+        }
+    }
+
+    #[test]
+    fn drops_oversized_bank_catalogue_fields() {
+        let parsed = parse_banks(&json!({"banks": [
+            {"bin": 1, "name": "Á".repeat(200), "logo": "a".repeat(1024)},
+            {"bin": 2, "name": "Á".repeat(201)},
+            {"bin": 3, "short_name": "a".repeat(201)},
+            {"bin": 4, "search_key_word": "a".repeat(201)},
+            {"bin": 5, "logo": "a".repeat(1025)}
+        ]}))
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].bin, 1);
+    }
+
+    #[test]
+    fn drops_oversized_or_invalid_bank_account_fields() {
+        let parsed = parse_account_page(&json!({"myBanks": [
+            {"id": 1, "bank_number": "00001", "holder_name": "Á".repeat(200),
+             "bank_name": "Á".repeat(200), "bank_logo": "a".repeat(1024)},
+            {"id": 2, "bank_number": "00001", "holder_name": "Á".repeat(201)},
+            {"id": 3, "bank_number": "00001", "bank_name": "Á".repeat(201)},
+            {"id": 4, "bank_number": "00001", "bank_logo": "a".repeat(1025)},
+            {"id": 5, "bank_number": "a".repeat(20)},
+            {"id": 6, "bank_number": "01 23"}
+        ]}))
+        .unwrap();
+        assert_eq!(parsed.accounts.len(), 1);
+        assert_eq!(parsed.accounts[0].account_id, "1");
+        assert_eq!(parsed.total, 6);
     }
 
     #[test]
