@@ -29,7 +29,7 @@ pub(super) fn render_contact_card(
     textures: &HashMap<String, TextureHandle>,
     loading: &mut HashSet<String>,
     threads: &[Thread],
-    current_uid: &str,
+    _current_uid: &str,
 ) -> Option<BubbleAction> {
     let phone = card.phone.as_deref();
     ui.horizontal(|ui| {
@@ -75,20 +75,16 @@ pub(super) fn render_contact_card(
 
     let has_uid = !card.uid.is_empty();
     let can_message = has_uid && threads.iter().any(|thread| thread.id == card.uid);
-    let can_call = has_uid && card.uid != current_uid;
     ui.scope(|ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         ui.horizontal_wrapped(|ui| {
             let message = ui
                 .add_enabled(can_message, Button::new("Nhắn tin"))
                 .on_disabled_hover_text("Chưa có cuộc trò chuyện với người này");
-            let call = ui.add_enabled(can_call, Button::new("Gọi điện"));
             let copy_clicked = phone.is_some() && ui.button("Sao chép số").clicked();
 
             if message.clicked() {
                 Some(BubbleAction::MessageContact)
-            } else if call.clicked() {
-                Some(BubbleAction::CallContact)
             } else if copy_clicked {
                 Some(BubbleAction::CopyContactPhone)
             } else {

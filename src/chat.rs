@@ -93,6 +93,10 @@ pub struct ChatMessage {
     pub poll_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_card: Option<ContactCard>,
+    /// For a `chat.delete` event ("delete for me" made on another device): the ids of the messages
+    /// it hides. Such an event is never shown itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deletes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_source: Option<Value>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -6233,8 +6237,75 @@ fn extract_contact_card(content: &Value) -> Option<ContactCard> {
     })
 }
 
+/// `chat.delete`: `content` lists `{globalDelMsgId, clientDelMsgId, uidFrom, uidTo, type}` for the
+/// messages the user deleted for themselves on another device.
+fn parse_delete_event(it: &Value) -> Option<ChatMessage> {
+    let content = it.get("content")?;
+    let parsed;
+    let items = match content {
+        Value::Array(items) => items,
+        Value::String(text) => {
+            parsed = serde_json::from_str::<Value>(text).ok()?;
+            parsed.as_array()?
+        }
+        _ => return None,
+    };
+    let deletes: Vec<String> = items
+        .iter()
+        .take(500)
+        .flat_map(|item| ["globalDelMsgId", "clientDelMsgId"].map(|key| wire_identity(item.get(key))))
+        .flatten()
+        .filter(|id| !id.is_empty() && id != "0")
+        .collect();
+    if deletes.is_empty() {
+        return None;
+    }
+    let id = ["msgId", "cliMsgId", "globalMsgId"]
+        .iter()
+        .find_map(|key| wire_identity(it.get(*key)))
+        .unwrap_or_default();
+    let ts = it
+        .get("ts")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+        .unwrap_or(0);
+    Some(ChatMessage {
+        id,
+        ts,
+        is_outgoing: true,
+        deletes,
+        ..Default::default()
+    })
+}
+
+/// Ids hidden by the thread's `chat.delete` events.
+pub fn deleted_message_ids(messages: &[ChatMessage]) -> std::collections::HashSet<&str> {
+    messages
+        .iter()
+        .flat_map(|m| m.deletes.iter().map(String::as_str))
+        .collect()
+}
+
+/// Whether a message is shown: neither a delete event nor hidden by one.
+pub fn is_visible_message(m: &ChatMessage, deleted: &std::collections::HashSet<&str>) -> bool {
+    // A row with nothing to draw (e.g. a `chat.delete` event stored before it was understood)
+    // would show as an empty bubble.
+    let blank = m.text.trim().is_empty()
+        && m.sticker_id.is_none()
+        && m.link_url.is_none()
+        && m.link_thumb.is_none()
+        && m.contact_card.is_none()
+        && m.poll_id.is_none();
+    !blank
+        && m.deletes.is_empty()
+        && !(!m.id.is_empty() && deleted.contains(m.id.as_str()))
+        && !(!m.client_message_id.is_empty() && deleted.contains(m.client_message_id.as_str()))
+}
+
 fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let msg_type = normalize_msg_type(it);
+    if msg_type == "chat.delete" {
+        return parse_delete_event(it);
+    }
     let is_poll = msg_type == "group.poll";
 
     let raw_content_val = it
@@ -10298,6 +10369,37 @@ mod send_identity_tests {
                 settings_until: None,
             }
         );
+    }
+
+    #[test]
+    fn delete_events_hide_their_targets_and_themselves() {
+        let raw = json!({
+            "msgId": "900",
+            "msgType": "chat.delete",
+            "ts": "1700000000000",
+            "uidFrom": "0",
+            "content": [{"globalDelMsgId": 111, "clientDelMsgId": 222, "uidFrom": 1, "uidTo": 2, "type": 1}]
+        });
+        let event = parse_chat_message(&raw).unwrap();
+        assert_eq!(event.deletes, vec!["111".to_string(), "222".to_string()]);
+        let target = ChatMessage { id: "111".into(), text: "hi".into(), ..Default::default() };
+        let by_client = ChatMessage {
+            id: "333".into(),
+            client_message_id: "222".into(),
+            text: "yo".into(),
+            ..Default::default()
+        };
+        let other = ChatMessage { id: "444".into(), text: "keep".into(), ..Default::default() };
+        let messages = vec![target, by_client, other, event];
+        let deleted = deleted_message_ids(&messages);
+        let shown: Vec<&str> = messages
+            .iter()
+            .filter(|m| is_visible_message(m, &deleted))
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(shown, ["444"]);
+        let blank = ChatMessage { id: "555".into(), ..Default::default() };
+        assert!(!is_visible_message(&blank, &deleted));
     }
 
     #[test]

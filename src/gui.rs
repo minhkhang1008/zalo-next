@@ -76,6 +76,16 @@ pub enum BankCardsUpdate {
     Sent,
 }
 
+/// Seconds within which an incoming message is "new" enough for a sound or OS notification.
+const FRESH_ALERT_SECS: i64 = 120;
+
+/// Whether a message timestamp (seconds or milliseconds) is recent enough to alert on, so the
+/// backlog fetched at launch or after a reconnect does not flood the notification centre.
+fn message_is_fresh(ts: i64, now_secs: i64) -> bool {
+    let secs = if ts > 100_000_000_000 { ts / 1000 } else { ts };
+    secs > 0 && now_secs - secs <= FRESH_ALERT_SECS
+}
+
 fn merge_sent_message(thread: &mut Thread, message: ChatMessage) {
     crate::chat::merge_sent_message(thread, message);
 }
@@ -2019,8 +2029,16 @@ impl ZaloGuiApp {
                                             )
                                         })
                                         .count();
+                                    // Messages caught up after launch or a reconnect still count as
+                                    // unread, but only fresh ones ring or post a notification.
+                                    let has_fresh = existing
+                                        .messages
+                                        .iter()
+                                        .rev()
+                                        .take(added)
+                                        .any(|m| !m.is_outgoing && message_is_fresh(m.ts, now_ts));
                                     if inc_cnt > 0 {
-                                        if !is_thread_muted {
+                                        if !is_thread_muted && has_fresh {
                                             new_incoming_alert = true;
                                         }
                                         if existing.id != active_tid || !is_focused {
@@ -2028,7 +2046,7 @@ impl ZaloGuiApp {
                                                 .unread_counts
                                                 .entry(existing.id.clone())
                                                 .or_insert(0) += inc_cnt;
-                                            if !is_thread_muted {
+                                            if !is_thread_muted && has_fresh {
                                                 if let Some(last_inc) = existing
                                                     .messages
                                                     .iter()
