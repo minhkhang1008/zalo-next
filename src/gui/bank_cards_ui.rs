@@ -1,16 +1,18 @@
-//! Composer dialog for Zalo's saved bank accounts.
+//! Saved bank accounts and native rendering for bank cards in chat.
 
 use super::*;
 use crate::bank_cards::{
     upper_no_diacritics, valid_bank_number, valid_holder_name, vietqr_payload, Bank, BankAccount,
-    DEFAULT_DELETE_ERROR,
+    ReceivedBankCard, DEFAULT_DELETE_ERROR,
 };
+use crate::chat::BANK_CARD_PREVIEW;
 use crate::session::is_trusted_zalo_url;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 const TITLE: &str = "Gửi số tài khoản";
-const COPY_NUMBER: &str = "Sao chép số tài khoản";
+pub(super) const COPY_NUMBER: &str = "Sao chép số tài khoản";
+pub(super) const SHOW_QR: &str = "Hiện mã VietQR";
 const ROW_HEIGHT: f32 = 62.0;
 // The credit-card glyph in the bundled Lucide font.
 const CREDIT_CARD: &str = "\u{e0aa}";
@@ -26,6 +28,25 @@ pub(super) struct BankCardsState {
     has_multiple: bool,
     logos: HashMap<String, Option<TextureHandle>>,
     qr_textures: HashMap<(u32, String), TextureHandle>,
+    received: HashMap<String, ReceivedCard>,
+}
+
+enum ReceivedCard {
+    Loading,
+    Ready {
+        card: ReceivedBankCard,
+        qr: Option<TextureHandle>,
+    },
+    Failed(String),
+}
+
+struct QrView {
+    bank_name: String,
+    number: String,
+    holder_name: Option<String>,
+    texture: Option<TextureHandle>,
+    enlarged: bool,
+    from_message: bool,
 }
 
 #[derive(Default)]
@@ -34,10 +55,19 @@ enum View {
     List,
     Edit(Form),
     Delete(BankAccount),
-    Qr {
-        account: BankAccount,
-        enlarged: bool,
-    },
+    Qr(QrView),
+}
+
+impl View {
+    fn is_message_qr(&self) -> bool {
+        matches!(
+            self,
+            Self::Qr(QrView {
+                from_message: true,
+                ..
+            })
+        )
+    }
 }
 
 struct Form {
@@ -115,6 +145,102 @@ impl BankCardsState {
         if let Some(texture) = self.logos.get_mut(&url) {
             *texture =
                 image.map(|image| ctx.load_texture("bank_logo", image, TextureOptions::LINEAR));
+        }
+    }
+
+    pub(super) fn on_received_card(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+        result: Result<ReceivedBankCard, String>,
+    ) {
+        if let Some(entry @ ReceivedCard::Loading) = self.received.get_mut(key) {
+            *entry = match result {
+                Ok(card) => ReceivedCard::Ready {
+                    qr: qr_texture(ctx, &card.qr_payload),
+                    card,
+                },
+                Err(error) => ReceivedCard::Failed(error),
+            };
+        }
+    }
+
+    pub(super) fn received_card(&self, key: &str) -> Option<&ReceivedBankCard> {
+        match self.received.get(key)? {
+            ReceivedCard::Ready { card, .. } => Some(card),
+            _ => None,
+        }
+    }
+
+    fn load_received_card(&mut self, uin: &str, key: &str, url: &str) {
+        let sent = WORKER_TX.get().is_some_and(|tx| {
+            tx.send(WorkerCmd::LoadReceivedBankCard {
+                uin: uin.into(),
+                key: key.into(),
+                url: url.into(),
+            })
+            .is_ok()
+        });
+        let entry = if sent {
+            ReceivedCard::Loading
+        } else {
+            ReceivedCard::Failed("Không tải được thẻ ngân hàng.".into())
+        };
+        self.received.insert(key.into(), entry);
+    }
+
+    pub(super) fn render_received_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        pal: &ThemePalette,
+        uin: &str,
+        key: &str,
+        url: &str,
+    ) -> Option<messages::BubbleAction> {
+        let retry = match self.received.get(key) {
+            Some(ReceivedCard::Ready { card, qr }) => {
+                let bounds = Rect::from_min_size(
+                    ui.next_widget_position(),
+                    Vec2::new(ui.available_width(), 94.0),
+                );
+                let logo = card
+                    .logo
+                    .as_deref()
+                    .filter(|_| ui.is_rect_visible(bounds))
+                    .and_then(|url| bank_logo_texture(&mut self.logos, uin, url));
+                return render_received_details(ui, pal, card, logo, qr.as_ref());
+            }
+            Some(ReceivedCard::Failed(error)) => {
+                ui.label(BANK_CARD_PREVIEW);
+                ui.small(error);
+                ui.button("Thử lại").clicked()
+            }
+            entry => {
+                let row = ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Đang tải thẻ ngân hàng…");
+                });
+                entry.is_none() && ui.is_rect_visible(row.response.rect)
+            }
+        };
+        if retry {
+            self.load_received_card(uin, key, url);
+        }
+        None
+    }
+
+    pub(super) fn show_received_qr(&mut self, thread_id: &str, is_group: bool, key: &str) {
+        if let Some(ReceivedCard::Ready { card, qr }) = self.received.get(key) {
+            self.target = Some((thread_id.into(), is_group));
+            self.view = View::Qr(QrView {
+                bank_name: card.bank_name.clone(),
+                number: card.number.clone(),
+                holder_name: None,
+                texture: qr.clone(),
+                enlarged: false,
+                from_message: true,
+            });
+            self.error = None;
         }
     }
 
@@ -228,6 +354,7 @@ impl ZaloGuiApp {
             return;
         }
         self.bank_cards.pending = None;
+        let manage_open = self.bank_cards.target.is_some() && !self.bank_cards.view.is_message_qr();
         match result {
             Ok(BankCardsUpdate::Loaded {
                 banks,
@@ -244,6 +371,10 @@ impl ZaloGuiApp {
                     accounts
                         .iter()
                         .any(|account| bank_logo(account, bank_for(&banks, account.bin)) == url)
+                        || state.received.values().any(|entry| {
+                            matches!(entry, ReceivedCard::Ready { card, .. }
+                                if card.logo.as_ref() == Some(url))
+                        })
                 });
                 state.banks = banks;
                 state.accounts = accounts;
@@ -254,16 +385,18 @@ impl ZaloGuiApp {
                     BankCardsUpdate::Saved => "Đã lưu số tài khoản",
                     _ => "Đã xóa số tài khoản",
                 });
-                self.bank_cards.view = View::List;
-                if self.bank_cards.target.is_some() {
+                if manage_open {
+                    self.bank_cards.view = View::List;
                     self.bank_cards.load(&self.user_uin);
                 }
             }
             Ok(BankCardsUpdate::Sent) => {
-                self.bank_cards.close();
+                if manage_open {
+                    self.bank_cards.close();
+                }
                 self.show_toast("Đã gửi số tài khoản");
             }
-            Err(error) if self.bank_cards.target.is_some() => {
+            Err(error) if manage_open => {
                 self.bank_cards.error = Some((kind, error));
             }
             Err(error) if kind != RequestKind::Load => self.show_toast(error),
@@ -286,9 +419,8 @@ impl ZaloGuiApp {
         }
 
         let state = &mut self.bank_cards;
-        let writing = state
-            .pending
-            .is_some_and(|(_, kind)| kind != RequestKind::Load);
+        let pending = state.pending.filter(|_| !state.view.is_message_qr());
+        let writing = pending.is_some_and(|(_, kind)| kind != RequestKind::Load);
         let screen = ctx.screen_rect();
         egui::Area::new(Id::new("bank_cards_backdrop"))
             .order(egui::Order::Foreground)
@@ -304,9 +436,9 @@ impl ZaloGuiApp {
             View::Edit(form) if form.editing => "Sửa số tài khoản",
             View::Edit(_) => "Thêm số tài khoản",
             View::Delete(_) => "Xóa số tài khoản",
-            View::Qr { .. } => "Mã VietQR",
+            View::Qr(_) => "Mã VietQR",
         };
-        let width = if matches!(state.view, View::Qr { enlarged: true, .. }) {
+        let width = if matches!(state.view, View::Qr(QrView { enlarged: true, .. })) {
             452.0_f32
         } else {
             402.0
@@ -347,7 +479,7 @@ impl ZaloGuiApp {
                 if let Some((_, error)) = &state.error {
                     ui.colored_label(pal.danger, error);
                 }
-                if let Some((_, kind)) = state.pending {
+                if let Some((_, kind)) = pending {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(match kind {
@@ -363,29 +495,20 @@ impl ZaloGuiApp {
                     View::List => state.render_list(ui, pal, &self.user_uin, height),
                     View::Edit(form) => render_form(ui, pal, form, &state.banks, writing, height),
                     View::Delete(account) => render_delete(ui, pal, account, writing),
-                    View::Qr { account, enlarged } => {
-                        let label = bank_label(account, bank_for(&state.banks, account.bin));
-                        render_qr(
-                            ui,
-                            pal,
-                            label,
-                            account,
-                            enlarged,
-                            &mut state.qr_textures,
-                            screen.height(),
-                        )
-                    }
+                    View::Qr(qr) => render_qr(ui, pal, qr, screen.height()),
                 }
             })
             .and_then(|response| response.inner)
             .flatten();
         if !writing && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape))
         {
-            action = Some(if matches!(state.view, View::List) {
-                Action::Close
-            } else {
-                Action::Back
-            });
+            action = Some(
+                if matches!(state.view, View::List) || state.view.is_message_qr() {
+                    Action::Close
+                } else {
+                    Action::Back
+                },
+            );
         }
 
         match action {
@@ -408,10 +531,24 @@ impl ZaloGuiApp {
                 state.error = None;
             }
             Some(Action::ShowQr(account)) => {
-                state.view = View::Qr {
-                    account,
+                let key = (account.bin, account.bank_number.clone());
+                let texture = state.qr_textures.get(&key).cloned().or_else(|| {
+                    if account.bin == 0 || !valid_bank_number(&account.bank_number) {
+                        return None;
+                    }
+                    let payload = vietqr_payload(account.bin, &account.bank_number);
+                    let texture = qr_texture(ctx, &payload)?;
+                    state.qr_textures.insert(key, texture.clone());
+                    Some(texture)
+                });
+                state.view = View::Qr(QrView {
+                    bank_name: bank_label(&account, bank_for(&state.banks, account.bin)).into(),
+                    number: account.bank_number,
+                    holder_name: Some(account.holder_name),
+                    texture,
                     enlarged: false,
-                };
+                    from_message: false,
+                });
                 state.error = None;
             }
             Some(Action::ConfirmDelete(account)) => {
@@ -496,6 +633,68 @@ fn bank_logo_texture<'a>(
             None
         })
         .as_ref()
+}
+
+fn render_received_details(
+    ui: &mut egui::Ui,
+    pal: &ThemePalette,
+    card: &ReceivedBankCard,
+    logo: Option<&TextureHandle>,
+    qr: Option<&TextureHandle>,
+) -> Option<messages::BubbleAction> {
+    let details = |ui: &mut egui::Ui| {
+        if let Some(logo) = logo {
+            ui.add(egui::Image::new(logo).max_size(Vec2::new(64.0, 28.0)));
+        }
+        ui.label(RichText::new(&card.bank_name).color(pal.text_secondary));
+        ui.label(
+            RichText::new(&card.number)
+                .strong()
+                .size(19.0)
+                .color(pal.text_primary),
+        );
+    };
+    let thumbnail = |ui: &mut egui::Ui, texture: &TextureHandle| {
+        let response = ui.add(
+            egui::Image::new(texture)
+                .fit_to_exact_size(Vec2::splat(88.0))
+                .sense(Sense::click()),
+        );
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, SHOW_QR));
+        response
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(SHOW_QR)
+            .clicked()
+            && !ui.input(|input| input.modifiers.ctrl || input.modifiers.command)
+    };
+
+    let width = ui.available_width();
+    let opened = match qr {
+        Some(qr) if width >= 200.0 => {
+            ui.horizontal(|ui| {
+                let details_width = width - 88.0 - ui.spacing().item_spacing.x;
+                ui.allocate_ui_with_layout(
+                    Vec2::new(details_width, 0.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.set_width(details_width);
+                        details(ui);
+                    },
+                );
+                thumbnail(ui, qr)
+            })
+            .inner
+        }
+        Some(qr) => {
+            details(ui);
+            thumbnail(ui, qr)
+        }
+        None => {
+            details(ui);
+            false
+        }
+    };
+    opened.then_some(messages::BubbleAction::ShowBankCardQr)
 }
 
 fn render_row(
@@ -590,7 +789,7 @@ fn render_row(
                 ui.ctx().copy_text(account.bank_number.clone());
                 ui.close_menu();
             }
-            if ui.button("Hiện mã VietQR").clicked() {
+            if ui.button(SHOW_QR).clicked() {
                 action = Some(Action::ShowQr(account.clone()));
                 ui.close_menu();
             }
@@ -754,25 +953,18 @@ fn render_delete(
 fn render_qr(
     ui: &mut egui::Ui,
     pal: &ThemePalette,
-    label: &str,
-    account: &BankAccount,
-    enlarged: &mut bool,
-    textures: &mut HashMap<(u32, String), TextureHandle>,
+    qr: &mut QrView,
     viewport_height: f32,
 ) -> Option<Action> {
     ui.vertical_centered(|ui| {
-        ui.label(RichText::new(label).strong());
-        ui.label(RichText::new(&account.bank_number).strong().size(19.0));
-        ui.label(RichText::new(&account.holder_name).color(pal.text_secondary));
-        ui.add_space(8.0);
-        let key = (account.bin, account.bank_number.clone());
-        if !textures.contains_key(&key) {
-            if let Some(texture) = qr_texture(ui.ctx(), account) {
-                textures.insert(key.clone(), texture);
-            }
+        ui.label(RichText::new(&qr.bank_name).strong());
+        ui.label(RichText::new(&qr.number).strong().size(19.0));
+        if let Some(holder) = &qr.holder_name {
+            ui.label(RichText::new(holder).color(pal.text_secondary));
         }
-        if let Some(texture) = textures.get(&key) {
-            let side = if *enlarged { 392.0_f32 } else { 240.0 };
+        ui.add_space(8.0);
+        if let Some(texture) = &qr.texture {
+            let side = if qr.enlarged { 392.0_f32 } else { 240.0 };
             let side = side
                 .min(ui.available_width())
                 .min((viewport_height - 220.0).max(80.0));
@@ -782,14 +974,14 @@ fn render_qr(
             if ui
                 .add(image)
                 .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text(if *enlarged {
+                .on_hover_text(if qr.enlarged {
                     "Thu nhỏ mã VietQR"
                 } else {
                     "Phóng to mã VietQR"
                 })
                 .clicked()
             {
-                *enlarged = !*enlarged;
+                qr.enlarged = !qr.enlarged;
             }
         } else {
             ui.colored_label(pal.danger, "Không thể tạo mã VietQR cho số tài khoản này.");
@@ -797,20 +989,21 @@ fn render_qr(
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button(COPY_NUMBER).clicked() {
-                ui.ctx().copy_text(account.bank_number.clone());
+                ui.ctx().copy_text(qr.number.clone());
             }
-            ui.button("Quay lại").clicked().then_some(Action::Back)
+            if qr.from_message {
+                ui.button("Đóng").clicked().then_some(Action::Close)
+            } else {
+                ui.button("Quay lại").clicked().then_some(Action::Back)
+            }
         })
         .inner
     })
     .inner
 }
 
-fn qr_texture(ctx: &egui::Context, account: &BankAccount) -> Option<TextureHandle> {
-    if account.bin == 0 || !valid_bank_number(&account.bank_number) {
-        return None;
-    }
-    let code = qrcode::QrCode::new(vietqr_payload(account.bin, &account.bank_number)).ok()?;
+fn qr_texture(ctx: &egui::Context, payload: &str) -> Option<TextureHandle> {
+    let code = qrcode::QrCode::new(payload).ok()?;
     let width = code.width();
     let quiet_zone = 4;
     let side = width + quiet_zone * 2;

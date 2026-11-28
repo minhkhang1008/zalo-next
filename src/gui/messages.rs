@@ -1121,7 +1121,7 @@ pub(super) fn render_date_divider(ui: &mut egui::Ui, msg: &ChatMessage, pal: &Th
 
 /// Detect whether `msg` is a system/event notification rather than a user speech bubble.
 pub(super) fn is_system_notice_message(msg: &ChatMessage) -> bool {
-    if msg.contact_card.is_some() {
+    if msg.contact_card.is_some() || msg.bank_card_ref.is_some() {
         return false;
     }
     if msg.id.starts_with("sys_") {
@@ -3771,6 +3771,7 @@ pub(super) fn render_chat_bubble(
     reactor_name: &dyn Fn(&str) -> String,
     album: Option<&[&ChatMessage]>,
     poll_card: Option<&super::poll_card::PollCard<'_>>,
+    bank_cards: &mut super::bank_cards_ui::BankCardsState,
     threads: &[Thread],
     current_uid: &str,
 ) -> Option<BubbleAction> {
@@ -3779,23 +3780,25 @@ pub(super) fn render_chat_bubble(
     let max_text_width = (max_bubble_width - 24.0).max(90.0);
     let contact_card = msg.contact_card.as_ref();
     let is_contact_card = contact_card.is_some();
-    let has_sticker = !is_contact_card && is_sticker_message(msg).is_some();
-    let call_card_opt = if is_contact_card {
+    let bank_card = msg.bank_card_ref.as_ref().filter(|_| !msg.id.is_empty());
+    let has_structured_card = is_contact_card || bank_card.is_some();
+    let has_sticker = !has_structured_card && is_sticker_message(msg).is_some();
+    let call_card_opt = if has_structured_card {
         None
     } else {
         extract_call_card_view(msg)
     };
     let is_call_card = call_card_opt.is_some();
-    let is_photo_card = !is_contact_card && !has_sticker && is_zalo_photo_message(msg);
-    let has_voice_card = !is_contact_card && !has_sticker && is_voice_message(msg);
-    let is_file_card = !is_contact_card && !has_sticker && is_zalo_file_or_video_message(msg);
-    let has_link_card = !is_contact_card
+    let is_photo_card = !has_structured_card && !has_sticker && is_zalo_photo_message(msg);
+    let has_voice_card = !has_structured_card && !has_sticker && is_voice_message(msg);
+    let is_file_card = !has_structured_card && !has_sticker && is_zalo_file_or_video_message(msg);
+    let has_link_card = !has_structured_card
         && !has_sticker
         && !is_photo_card
         && !is_file_card
         && extract_message_link_view(msg).is_some();
     let has_interactive_card = poll_card.is_some()
-        || is_contact_card
+        || has_structured_card
         || is_call_card
         || has_link_card
         || is_photo_card
@@ -3829,7 +3832,7 @@ pub(super) fn render_chat_bubble(
     // photo, and call card hugs its content tightly without horizontal overflow or inner/outer frame mismatch.
     let content_width = if poll_card.is_some() {
         max_text_width.min(320.0)
-    } else if is_contact_card {
+    } else if has_structured_card {
         max_text_width.min(300.0)
     } else if has_sticker {
         116.0_f32
@@ -4090,6 +4093,11 @@ pub(super) fn render_chat_bubble(
                             quote_action = render_quote_block(ui, msg, pal, true, content_width);
                             if let Some(card) = poll_card {
                                 card_action = card.render(ui, msg, pal);
+                            } else if let Some(card) = bank_card {
+                                render_recall_marker(ui, &msg.text);
+                                card_action = bank_cards.render_received_card(
+                                    ui, pal, current_uid, &msg.id, &card.data_url,
+                                );
                             } else if let Some(card) = contact_card {
                                 render_recall_marker(ui, &msg.text);
                                 card_action = super::contact_card::render_contact_card(
@@ -4176,7 +4184,7 @@ pub(super) fn render_chat_bubble(
                             idx,
                             pal,
                             emoji_textures,
-                            has_interactive_card,
+                            bank_card.and_then(|_| bank_cards.received_card(&msg.id)),
                             "Bạn",
                         )
                     })
@@ -4268,6 +4276,11 @@ pub(super) fn render_chat_bubble(
                             quote_action = render_quote_block(ui, msg, pal, false, content_width);
                             if let Some(card) = poll_card {
                                 card_action = card.render(ui, msg, pal);
+                            } else if let Some(card) = bank_card {
+                                render_recall_marker(ui, &msg.text);
+                                card_action = bank_cards.render_received_card(
+                                    ui, pal, current_uid, &msg.id, &card.data_url,
+                                );
                             } else if let Some(card) = contact_card {
                                 render_recall_marker(ui, &msg.text);
                                 card_action = super::contact_card::render_contact_card(
@@ -4339,7 +4352,7 @@ pub(super) fn render_chat_bubble(
                             idx,
                             pal,
                             emoji_textures,
-                            has_interactive_card,
+                            bank_card.and_then(|_| bank_cards.received_card(&msg.id)),
                             display_sender,
                         )
                     })
@@ -4383,6 +4396,7 @@ pub(super) enum BubbleAction {
     },
     MessageContact,
     CopyContactPhone,
+    ShowBankCardQr,
     OpenImagePopup {
         /// The photo message, so the viewer opens exactly the clicked one even when two messages
         /// share a thumbnail.
@@ -4728,7 +4742,7 @@ pub(super) fn bubble_context_menu(
     idx: usize,
     pal: &ThemePalette,
     emoji_textures: &HashMap<String, TextureHandle>,
-    _has_interactive_card: bool,
+    bank_card: Option<&crate::bank_cards::ReceivedBankCard>,
     _display_sender: &str,
 ) -> Option<BubbleAction> {
     let ctx_menu_key = Id::new("active_bubble_context_menu");
@@ -4778,7 +4792,10 @@ pub(super) fn bubble_context_menu(
 
     let screen = ui.ctx().screen_rect();
     let menu_w = if compact { 230.0_f32 } else { 220.0_f32 };
-    let menu_h = if compact { 330.0_f32 } else { 440.0_f32 };
+    let mut menu_h = if compact { 330.0_f32 } else { 440.0_f32 };
+    if bank_card.is_some() {
+        menu_h += 72.0;
+    }
     let pos = Pos2::new(
         menu_pos.x.clamp(
             screen.left() + 8.0,
@@ -4835,6 +4852,17 @@ pub(super) fn bubble_context_menu(
                     // 2. Chia sẻ (Forward)
                     if menu_item(ui, lucide::FORWARD, "Chia sẻ", pal.text_primary).clicked() {
                         action = Some(BubbleAction::Forward);
+                        close_menu = true;
+                    }
+                }
+
+                if let Some(card) = bank_card {
+                    if menu_item(ui, lucide::COPY, super::bank_cards_ui::COPY_NUMBER, pal.text_primary).clicked() {
+                        ui.ctx().copy_text(card.number.clone());
+                        close_menu = true;
+                    }
+                    if menu_item(ui, lucide::IMAGE, super::bank_cards_ui::SHOW_QR, pal.text_primary).clicked() {
+                        action = Some(BubbleAction::ShowBankCardQr);
                         close_menu = true;
                     }
                 }
@@ -5611,6 +5639,7 @@ mod quote_navigation_tests {
                                 &|id: &str| id.to_string(),
                                 None,
                                 None,
+                                &mut Default::default(),
                                 &[],
                                 "",
                             );
@@ -5734,7 +5763,7 @@ mod quote_navigation_tests {
                         0,
                         &ThemePalette::light(),
                         &HashMap::new(),
-                        false,
+                        None,
                         "Tester",
                     );
                 });
@@ -5765,7 +5794,7 @@ mod quote_navigation_tests {
                         0,
                         &ThemePalette::light(),
                         &HashMap::new(),
-                        false,
+                        None,
                         "Tester",
                     );
                 });
@@ -5796,7 +5825,7 @@ mod quote_navigation_tests {
                         0,
                         &ThemePalette::light(),
                         &HashMap::new(),
-                        false,
+                        None,
                         "Tester",
                     );
                 });
@@ -5821,7 +5850,7 @@ mod quote_navigation_tests {
                         0,
                         &ThemePalette::light(),
                         &HashMap::new(),
-                        false,
+                        None,
                         "Tester",
                     );
                 });
@@ -5867,7 +5896,7 @@ mod quote_navigation_tests {
                         0,
                         &ThemePalette::light(),
                         &HashMap::new(),
-                        false,
+                        None,
                         "Tester",
                     );
                 });
@@ -5899,7 +5928,7 @@ mod quote_navigation_tests {
                         0,
                         &ThemePalette::light(),
                         &HashMap::new(),
-                        false,
+                        None,
                         "Tester",
                     );
                 });

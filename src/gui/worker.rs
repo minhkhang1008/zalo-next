@@ -359,6 +359,11 @@ pub enum WorkerCmd {
         uin: String,
         url: String,
     },
+    LoadReceivedBankCard {
+        uin: String,
+        key: String,
+        url: String,
+    },
     StartVideo {
         account: String,
         thread: String,
@@ -1506,6 +1511,18 @@ pub(super) fn spawn_session_worker(
                                     None
                                 };
                                 let _ = tx.send(GuiEvent::BankLogo { uin, url, image });
+                            });
+                        }
+                        WorkerCmd::LoadReceivedBankCard { uin, key, url } => {
+                            let active = session.lock().await.login.as_ref().is_some_and(|login| login.uin == uin);
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let result = if active {
+                                    crate::bank_cards::fetch_received_bank_card(&url).await
+                                } else {
+                                    Err("Tài khoản Zalo đã thay đổi.".into())
+                                };
+                                let _ = tx.send(GuiEvent::ReceivedBankCard { uin, key, result });
                             });
                         }
                         WorkerCmd::StartVideo {

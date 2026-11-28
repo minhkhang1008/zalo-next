@@ -4236,6 +4236,7 @@ impl ZaloGuiApp {
                                                         &reactor_name,
                                                         album_members.as_deref(),
                                                         poll_card.as_ref(),
+                                                        &mut self.bank_cards,
                                                         &self.threads,
                                                         &self.user_uin,
                                                     ) {
@@ -4513,6 +4514,9 @@ impl ZaloGuiApp {
                                             self.show_toast("Đã sao chép số điện thoại vào bộ nhớ tạm");
                                         }
                                     }
+                                }
+                                BubbleAction::ShowBankCardQr => {
+                                    self.bank_cards.show_received_qr(&thread_id, is_group, &m.id);
                                 }
                                 BubbleAction::CallAgain { is_video } => {
                                     self.active_call = Some(ActiveCallOverlay {
