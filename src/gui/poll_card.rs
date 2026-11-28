@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use eframe::egui::{self, Id, RichText, Ui};
 
 use super::messages::{normalize_ts_ms, BubbleAction};
-use super::{PollState, ThemePalette};
+use super::{CachedPoll, PollState, ThemePalette};
 use crate::chat::ChatMessage;
 use crate::poll::{PollDetail, PollOption, VoteRules};
 
@@ -73,9 +73,16 @@ fn vote_share(votes: u64, total: u64) -> (f32, String) {
     (fraction, format!("{votes} lượt · {:.0}%", fraction * 100.0))
 }
 
+fn needs_fetch(cached: Option<&CachedPoll>, owner_message_id: &str) -> bool {
+    cached.is_none_or(|cached| {
+        !matches!(cached.state, PollState::Loading { .. })
+            && cached.owner_message_id != owner_message_id
+    })
+}
+
 pub(super) struct PollCard<'a> {
     pub poll_id: &'a str,
-    pub state: Option<&'a PollState>,
+    pub cached: Option<&'a CachedPoll>,
     pub user_uin: &'a str,
     pub voter_name: &'a dyn Fn(&str) -> Option<&'a str>,
     pub selecting_messages: bool,
@@ -89,7 +96,8 @@ impl PollCard<'_> {
         pal: &ThemePalette,
     ) -> Option<BubbleAction> {
         let selection_key = Id::new(("poll_selection", self.user_uin, self.poll_id));
-        let detail = match self.state {
+        let state = self.cached.map(|cached| &cached.state);
+        let detail = match state {
             Some(PollState::Loaded(poll)) => Some(poll),
             _ => None,
         };
@@ -98,14 +106,33 @@ impl PollCard<'_> {
             .filter(|question| !question.trim().is_empty())
             .or_else(|| message.text.strip_prefix("Bình chọn: "));
         let body = ui.scope(|ui| {
-            ui.label(RichText::new("Bình chọn").strong().color(pal.primary_hover));
+            let refresh_clicked = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new("Bình chọn").strong().color(pal.primary_hover));
+                    if matches!(
+                        state,
+                        Some(PollState::Loaded(_) | PollState::Loading { refreshing: true })
+                    ) {
+                        ui.add_enabled(
+                            detail.is_some() && !self.selecting_messages,
+                            egui::Button::new("Làm mới").small(),
+                        )
+                        .clicked()
+                    } else {
+                        false
+                    }
+                })
+                .inner;
             if let Some(question) = question {
                 ui.add(
                     egui::Label::new(RichText::new(question).strong().color(pal.text_primary))
                         .wrap(),
                 );
             }
-            match self.state {
+            if refresh_clicked {
+                return Some(self.fetch_action());
+            }
+            match state {
                 Some(PollState::Loaded(poll)) => self.render_loaded(ui, poll, pal, selection_key),
                 Some(PollState::Error(message)) => {
                     ui.add(
@@ -115,7 +142,7 @@ impl PollCard<'_> {
                         .clicked()
                         .then(|| self.fetch_action())
                 }
-                None | Some(PollState::Loading) => {
+                None | Some(PollState::Loading { .. }) => {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(14.0).color(pal.primary));
                         ui.add(
@@ -130,11 +157,16 @@ impl PollCard<'_> {
             }
         });
         // History rows outside the scroll clip still take up space in the chat layout.
-        if self.state.is_none() && ui.is_rect_visible(body.response.rect) {
+        let action =
+            if needs_fetch(self.cached, &message.id) && ui.is_rect_visible(body.response.rect) {
+                Some(self.fetch_action())
+            } else {
+                body.inner
+            };
+        if matches!(action, Some(BubbleAction::FetchPoll { .. })) {
             ui.data_mut(|data| data.remove::<BTreeSet<String>>(selection_key));
-            return Some(self.fetch_action());
         }
-        body.inner
+        action
     }
 
     fn fetch_action(&self) -> BubbleAction {
@@ -360,18 +392,33 @@ mod tests {
     }
 
     #[test]
-    fn only_a_visible_uncached_poll_requests_a_fetch() {
+    fn visible_poll_fetches_once_per_card_owner() {
         let ctx = egui::Context::default();
-        let msg = message("msg-1", Some("poll-1"), 0);
-        let loading = PollState::Loading;
-        let error = PollState::Error("Không thể tải bình chọn.".into());
-        let loaded = PollState::Loaded(PollDetail::default());
-        for (visible, state) in [
-            (false, None),
-            (true, None),
-            (true, Some(&loading)),
-            (true, Some(&error)),
-            (true, Some(&loaded)),
+        let msg = message("msg-2", Some("poll-1"), 0);
+        let previous = CachedPoll {
+            owner_message_id: "msg-1".into(),
+            state: PollState::Loaded(PollDetail::default()),
+        };
+        let loading = CachedPoll {
+            owner_message_id: "msg-1".into(),
+            state: PollState::Loading { refreshing: true },
+        };
+        let error = CachedPoll {
+            owner_message_id: msg.id.clone(),
+            state: PollState::Error("Không thể tải bình chọn.".into()),
+        };
+        let loaded = CachedPoll {
+            owner_message_id: msg.id.clone(),
+            state: PollState::Loaded(PollDetail::default()),
+        };
+        for (visible, cached, fetches) in [
+            (false, None, false),
+            (true, None, true),
+            (true, Some(&previous), true),
+            (false, Some(&previous), false),
+            (true, Some(&loading), false),
+            (true, Some(&error), false),
+            (true, Some(&loaded), false),
         ] {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -380,13 +427,13 @@ mod tests {
                     }
                     let card = PollCard {
                         poll_id: "poll-1",
-                        state,
+                        cached,
                         user_uin: "user-1",
                         voter_name: &|_| None,
                         selecting_messages: false,
                     };
                     let action = card.render(ui, &msg, &ThemePalette::light());
-                    if visible && state.is_none() {
+                    if fetches {
                         assert!(matches!(action, Some(BubbleAction::FetchPoll { poll_id }) if poll_id == "poll-1"));
                     } else {
                         assert!(action.is_none());

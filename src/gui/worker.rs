@@ -1,4 +1,8 @@
 use super::*;
+use std::future::{poll_fn, Future};
+use std::sync::Arc;
+use std::task::Poll;
+use tokio::sync::{watch, Mutex};
 
 /// Thread (id, name, is_group) list the poll timer maps incoming messages onto; the GUI
 /// republishes it whenever its threads change.
@@ -19,56 +23,140 @@ async fn run_poll_command(
     option_ids: Option<&[String]>,
 ) -> Result<PollDetail, String> {
     if account.is_empty() || session.login.as_ref().map(|login| login.uin.as_str()) != Some(account) {
-        return Err("Tài khoản đã thay đổi. Hãy mở lại bình chọn.".into());
+        return Err(POLL_ACCOUNT_CHANGED.into());
     }
 
-    if let Some(option_ids) = option_ids {
-        let details = crate::chat::vote_poll(session, poll_id, option_ids)
+    let vote = option_ids.map(|option_ids| crate::chat::vote_poll(session, poll_id, option_ids));
+    poll_command_detail(vote, crate::chat::get_poll_detail(session, poll_id)).await
+}
+
+async fn poll_command_detail(
+    vote: Option<impl Future<Output = anyhow::Result<Option<PollDetail>>>>,
+    fetch_detail: impl Future<Output = anyhow::Result<PollDetail>>,
+) -> Result<PollDetail, String> {
+    let fallback = if let Some(vote) = vote {
+        let details = vote
             .await
             .map_err(|error| poll_command_error(error, "Chưa xác nhận được lượt bình chọn."))?;
         if let Some(details) = details {
             return Ok(details);
         }
-    }
-    let fallback = if option_ids.is_some() {
         "Đã gửi bình chọn, nhưng không thể tải lại kết quả."
     } else {
         "Không thể tải bình chọn."
     };
-    crate::chat::get_poll_detail(session, poll_id)
+    fetch_detail
         .await
         .map_err(|error| poll_command_error(error, fallback))
 }
 
-/// Run a poll fetch or vote on its own task, queued behind earlier poll commands. The session
-/// snapshot is taken now, in command order. The thread id is UI context only: the endpoints take
-/// the poll id.
-async fn spawn_poll_command(
-    session: &std::sync::Arc<tokio::sync::Mutex<Session>>,
-    queue: &std::sync::Arc<tokio::sync::Mutex<()>>,
-    gui_tx: &GuiTx,
+const POLL_ACCOUNT_CHANGED: &str = "Tài khoản đã thay đổi.";
+
+fn advance_poll_generation(generation: &watch::Sender<u64>) {
+    generation.send_modify(|value| *value = value.wrapping_add(1));
+}
+
+struct PollCommand {
     account: String,
     poll_id: String,
     option_ids: Option<Vec<String>>,
+    generation: u64,
+}
+
+/// Serialize poll requests and take credentials only when the command reaches the front.
+fn spawn_poll_command(
+    session: &Arc<Mutex<Session>>,
+    queue: &Arc<Mutex<()>>,
+    generation: &watch::Sender<u64>,
+    gui_tx: &GuiTx,
+    command: PollCommand,
 ) {
-    let snapshot = session.lock().await.clone();
+    let mut generation_rx = generation.subscribe();
+    let received_generation = *generation_rx.borrow_and_update();
+    let session = session.clone();
     let queue = queue.clone();
     let gui_tx = gui_tx.clone();
     tokio::spawn(async move {
+        let PollCommand {
+            account,
+            poll_id,
+            option_ids,
+            generation,
+        } = command;
         let _turn = queue.lock().await;
-        let result = run_poll_command(&snapshot, &account, &poll_id, option_ids.as_deref()).await;
-        let event = if option_ids.is_some() {
-            GuiEvent::PollVoted { account, poll_id, result }
-        } else {
-            GuiEvent::PollLoaded { account, poll_id, result }
+        let snapshot = {
+            let current = session.lock().await;
+            (generation == received_generation && generation == *generation_rx.borrow())
+                .then(|| current.clone())
         };
-        let _ = gui_tx.send(event);
+        let result = if let Some(snapshot) = snapshot {
+            let operation = run_poll_command(&snapshot, &account, &poll_id, option_ids.as_deref());
+            run_in_poll_generation(&mut generation_rx, generation, operation)
+                .await
+                .map(PollDetail::bounded)
+        } else {
+            Err(POLL_ACCOUNT_CHANGED.into())
+        };
+        // Hold the generation read guard through the event send. The GUI checks it again when
+        // consuming the event in case the account changed while the event was queued.
+        let current_generation = generation_rx.borrow();
+        let result = if generation == *current_generation {
+            result
+        } else {
+            Err(POLL_ACCOUNT_CHANGED.into())
+        };
+        let event = if option_ids.is_some() {
+            GuiEvent::PollVoted {
+                account,
+                poll_id,
+                generation,
+                result,
+            }
+        } else {
+            GuiEvent::PollLoaded {
+                account,
+                poll_id,
+                generation,
+                result,
+            }
+        };
+        let _ = gui_tx.tx.send(event);
+        drop(current_generation);
+        gui_tx.ctx.request_repaint();
     });
+}
+
+async fn run_in_poll_generation(
+    generation_rx: &mut watch::Receiver<u64>,
+    generation: u64,
+    operation: impl Future<Output = Result<PollDetail, String>>,
+) -> Result<PollDetail, String> {
+    let active_generation = generation_rx.clone();
+    tokio::pin!(operation);
+    let current_operation = poll_fn(|cx| {
+        // Serialize each poll of the request with generation changes without holding a
+        // guard while the request is suspended.
+        let current = active_generation.borrow();
+        if generation == *current {
+            operation.as_mut().poll(cx)
+        } else {
+            Poll::Ready(Err(POLL_ACCOUNT_CHANGED.into()))
+        }
+    });
+    tokio::select! {
+        biased;
+        _ = generation_rx.changed() => Err(POLL_ACCOUNT_CHANGED.into()),
+        result = current_operation => result,
+    }
 }
 
 fn poll_command_error(error: anyhow::Error, fallback: &str) -> String {
     if let Some(unavailable) = error.downcast_ref::<crate::chat::PollUnavailable>() {
         unavailable.to_string()
+    } else if error.downcast_ref::<crate::media_resources::MediaError>()
+        == Some(&crate::media_resources::MediaError::TooLarge)
+    {
+        crate::session::GROUP_POLL_BODY_TOO_LARGE.to_owned()
     } else {
         fallback.to_owned()
     }
@@ -205,11 +293,13 @@ pub enum WorkerCmd {
     },
     FetchPoll {
         account: String,
+        generation: u64,
         thread_id: String,
         poll_id: String,
     },
     VotePoll {
         account: String,
+        generation: u64,
         thread_id: String,
         poll_id: String,
         option_ids: Vec<String>,
@@ -729,7 +819,12 @@ fn sticker_image_body_limit(key: &str) -> usize {
     }
 }
 
-pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: egui::Context) {
+pub(super) fn spawn_session_worker(
+    session: Session,
+    gui_tx: GuiTx,
+    egui_ctx: egui::Context,
+    poll_generation: watch::Sender<u64>,
+) {
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let _ = WORKER_TX.set(cmd_tx);
 
@@ -1605,6 +1700,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             }
                         }
                         WorkerCmd::Logout => {
+                            advance_poll_generation(&poll_generation);
                             if let Some((_,control,cancelled))=voice_control.take(){cancelled.store(true,std::sync::atomic::Ordering::Relaxed);let _=control.send(true);}
                             crate::history_sync::PHONE_SYNC_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                             crate::history_sync::REFRESH_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1635,6 +1731,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             egui_ctx.request_repaint();
                         }
                         WorkerCmd::SwitchAccount { target_uin } => {
+                            advance_poll_generation(&poll_generation);
                             if let Some((_,control,cancelled))=voice_control.take(){cancelled.store(true,std::sync::atomic::Ordering::Relaxed);let _=control.send(true);}
                             crate::history_sync::PHONE_SYNC_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                             crate::history_sync::REFRESH_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1649,7 +1746,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 egui_ctx.request_repaint();
                             } else {
                                 let mut s = session.lock().await;
-                                if s.load_from_file("session.json").is_ok() {
+                                let mut next = s.clone();
+                                next.logout();
+                                if next.load_from_file("session.json").is_ok() {
+                                    *s = next;
                                     let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
                                     let name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_default();
                                     let ava = s.login.as_ref().and_then(|l| if l.avatar.is_empty() { None } else { Some(l.avatar.clone()) });
@@ -1850,12 +1950,14 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             }
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
 
                             let handle = tokio::spawn(async move {
                                 {
                                     let mut s = session_clone.lock().await;
+                                    advance_poll_generation(&poll_generation);
                                     s.logout();
                                 }
                                 {
@@ -1940,6 +2042,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                     }
                                                     if let Ok(resp) = confirm_res {
                                                         let mut s = session_clone.lock().await;
+                                                        advance_poll_generation(&poll_generation);
                                                         if let Some(sek) =
                                                             crate::qr::extract_zpw_sek(&resp)
                                                         {
@@ -2121,6 +2224,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let manual = matches!(cmd, WorkerCmd::RefreshThreadsManual);
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
@@ -2133,6 +2237,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             // readable until a new login replaces the file (#21).
                                             {
                                                 let mut sl = session_clone.lock().await;
+                                                advance_poll_generation(&poll_generation);
                                                 sl.mark_expired();
                                                 let _ = sl.save_to_file("session.json");
                                                 sl.logout();
@@ -2165,6 +2270,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         {
                                             let mut sl = session_clone.lock().await;
                                             if let Some(ref mut li) = sl.login {
+                                                if li.uin != uid {
+                                                    advance_poll_generation(&poll_generation);
+                                                }
                                                 li.uin = uid.clone();
                                                 if !name.is_empty() {
                                                     li.display_name = name.clone();
@@ -2305,6 +2413,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
 
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
@@ -2414,6 +2523,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             {
                                                 {
                                                     let mut sl = session_clone.lock().await;
+                                                    advance_poll_generation(&poll_generation);
                                                     sl.mark_expired();
                                                     let _ = sl.save_to_file("session.json");
                                                     sl.logout();
@@ -2739,6 +2849,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             mentions,
                         } => {
                             let session_clone = session.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
@@ -2865,6 +2976,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         {
                                             {
                                                 let mut sl = session_clone.lock().await;
+                                                advance_poll_generation(&poll_generation);
                                                 sl.mark_expired();
                                                 let _ = sl.save_to_file("session.json");
                                                 sl.logout();
@@ -3282,6 +3394,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             is_group,
                         } => {
                             let session_clone = session.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             if cate_id == AMI_FAT_CAT_CATE_ID {
@@ -3398,6 +3511,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         {
                                             {
                                                 let mut sl = session_clone.lock().await;
+                                                advance_poll_generation(&poll_generation);
                                                 sl.mark_expired();
                                                 let _ = sl.save_to_file("session.json");
                                                 sl.logout();
@@ -4084,6 +4198,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                         WorkerCmd::LoginPassword { phone, pass } => {
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
@@ -4092,11 +4207,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 ));
                                 ctx_clone.request_repaint();
                                 let mut s = session_clone.lock().await;
-                                match crate::login::login_by_password(&mut s, &phone, &pass, "VN")
-                                    .await
-                                {
+                                advance_poll_generation(&poll_generation);
+                                let login = crate::login::login_by_password(&mut s, &phone, &pass, "VN").await;
+                                match login {
                                     Ok(_) => {
-                                        if let Ok(info) = crate::login::get_login_info(&s).await {
+                                        let info = crate::login::get_login_info(&s).await;
+                                        advance_poll_generation(&poll_generation);
+                                        if let Ok(info) = info {
                                             if let Some(cfg) = info.get("data") {
                                                 crate::login::apply_login_config(&mut s, cfg);
                                                 s.apply_server_info(cfg);
@@ -4494,11 +4611,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let _ = gui_tx.send(GuiEvent::Productivity { account, update:result });
                             egui_ctx.request_repaint();
                         }
-                        WorkerCmd::FetchPoll { account, poll_id, .. } => {
-                            spawn_poll_command(&session, &poll_queue, &gui_tx, account, poll_id, None).await;
+                        WorkerCmd::FetchPoll { account, poll_id, generation, .. } => {
+                            let command = PollCommand { account, poll_id, option_ids: None, generation };
+                            spawn_poll_command(&session, &poll_queue, &poll_generation, &gui_tx, command);
                         }
-                        WorkerCmd::VotePoll { account, poll_id, option_ids, .. } => {
-                            spawn_poll_command(&session, &poll_queue, &gui_tx, account, poll_id, Some(option_ids)).await;
+                        WorkerCmd::VotePoll { account, poll_id, option_ids, generation, .. } => {
+                            let command = PollCommand { account, poll_id, option_ids: Some(option_ids), generation };
+                            spawn_poll_command(&session, &poll_queue, &poll_generation, &gui_tx, command);
                         }
                         WorkerCmd::FetchDocPreview { account, generation, url, name } => {
                             let snapshot=session.lock().await.clone();
@@ -5536,6 +5655,21 @@ mod tests {
     use image::{DynamicImage, Rgba, RgbaImage};
 
     #[tokio::test]
+    async fn poll_vote_acknowledgement_fetches_detail() {
+        use super::*;
+
+        let refetched = PollDetail {
+            poll_id: Some("poll-1".into()),
+            joined: Some(true),
+            ..Default::default()
+        };
+        let result = poll_command_detail(Some(async { Ok(None) }), async { Ok(refetched.clone()) })
+            .await
+            .unwrap();
+        assert_eq!(result, refetched);
+    }
+
+    #[tokio::test]
     async fn poll_commands_reject_an_account_that_is_no_longer_active() {
         let mut session = crate::session::Session::new(false, false, false).unwrap();
         session.login = Some(crate::session::LoginInfo {
@@ -5546,9 +5680,65 @@ mod tests {
         for option_ids in [None, Some(options.as_slice())] {
             assert_eq!(
                 super::run_poll_command(&session, "previous-account", "poll-1", option_ids).await,
-                Err("Tài khoản đã thay đổi. Hãy mở lại bình chọn.".into())
+                Err(super::POLL_ACCOUNT_CHANGED.into())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn queued_poll_vote_is_skipped_after_the_same_account_relogs_in() {
+        use super::*;
+
+        let mut session = Session::new(false, false, false).unwrap();
+        // With no key or cookies, even a regression cannot send this synthetic vote.
+        session.login = Some(crate::session::LoginInfo {
+            uin: "user-1".into(),
+            ..Default::default()
+        });
+        let session = Arc::new(Mutex::new(session));
+        let queue = Arc::new(Mutex::new(()));
+        let turn = queue.lock().await;
+        let (generation, _generation_rx) = watch::channel(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_poll_command(
+            &session,
+            &queue,
+            &generation,
+            &GuiTx::new(tx, egui::Context::default()),
+            PollCommand {
+                account: "user-1".into(),
+                poll_id: "poll-1".into(),
+                option_ids: Some(vec!["option-1".into()]),
+                generation: 0,
+            },
+        );
+        advance_poll_generation(&generation);
+        drop(turn);
+
+        let event = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(2)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            GuiEvent::PollVoted { account, poll_id, generation: 0, result: Err(error) }
+                if account == "user-1" && poll_id == "poll-1" && error == POLL_ACCOUNT_CHANGED
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_poll_vote_future_is_never_polled() {
+        use super::*;
+
+        let (generation, mut generation_rx) = watch::channel(0);
+        advance_poll_generation(&generation);
+        // Simulate a change observed immediately before the request gets its first poll.
+        let _ = *generation_rx.borrow_and_update();
+        let result = run_in_poll_generation(&mut generation_rx, 0, async {
+            panic!("stale vote must never start");
+        })
+        .await;
+        assert_eq!(result, Err(POLL_ACCOUNT_CHANGED.into()));
     }
 
     #[test]

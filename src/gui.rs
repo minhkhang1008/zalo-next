@@ -103,11 +103,13 @@ pub enum GuiEvent {
     PollLoaded {
         account: String,
         poll_id: String,
+        generation: u64,
         result: Result<PollDetail, String>,
     },
     PollVoted {
         account: String,
         poll_id: String,
+        generation: u64,
         result: Result<PollDetail, String>,
     },
     Productivity {
@@ -938,16 +940,23 @@ impl GuiTx {
 
 /// In-memory state of a group poll for the current account.
 pub enum PollState {
-    Loading,
+    Loading { refreshing: bool },
     Loaded(PollDetail),
     Error(String),
+}
+
+struct CachedPoll {
+    owner_message_id: String,
+    state: PollState,
 }
 
 pub struct ZaloGuiApp {
     app_lock: app_lock_ui::State,
     productivity: productivity::State,
     doc_preview: doc_preview_ui::State,
-    group_polls: HashMap<String, PollState>,
+    group_polls: HashMap<String, CachedPoll>,
+    poll_generation: tokio::sync::watch::Receiver<u64>,
+    group_poll_generation: u64,
     voice: voice_ui::State,
     video_tools_status: String,
     video_tools_progress: f32,
@@ -1410,11 +1419,14 @@ impl ZaloGuiApp {
             .map(|(idx, _)| idx)
             .unwrap_or(0);
 
+        let (poll_generation_tx, poll_generation) = tokio::sync::watch::channel(0);
         let app = Self {
             app_lock: app_lock_ui::State::new(lock_config, lock_load_status),
             productivity: Default::default(),
             doc_preview: Default::default(),
             group_polls: HashMap::new(),
+            poll_generation,
+            group_poll_generation: 0,
             voice: Default::default(),
             video_tools_status: "Đang kiểm tra công cụ gọi video…".into(),
             video_tools_progress: 0.0,
@@ -1626,6 +1638,7 @@ impl ZaloGuiApp {
                 ctx: cc.egui_ctx.clone(),
             },
             cc.egui_ctx.clone(),
+            poll_generation_tx,
         );
         ensure_cjk_font(&cc.egui_ctx, thread_texts(&app.threads));
 
@@ -1703,6 +1716,11 @@ impl ZaloGuiApp {
     }
 
     fn check_events(&mut self, ctx: &egui::Context) {
+        let poll_generation = *self.poll_generation.borrow();
+        if poll_generation != self.group_poll_generation {
+            self.group_poll_generation = poll_generation;
+            self.group_polls.clear();
+        }
         while let Ok(event) = self.event_rx.try_recv() {
             if matches!(event, GuiEvent::IncomingCall { .. }) {
                 eprintln!("[call] check_events dequeued IncomingCall");
@@ -1780,14 +1798,24 @@ impl ZaloGuiApp {
                     }
                 }
                 GuiEvent::Productivity { account, update } => self.local_update(account, update),
-                GuiEvent::PollLoaded { account, poll_id, result }
-                | GuiEvent::PollVoted { account, poll_id, result } => {
-                    if self.is_logged_in && account == self.user_uin {
-                        let state = match result {
-                            Ok(detail) => PollState::Loaded(detail),
-                            Err(error) => PollState::Error(error),
-                        };
-                        self.group_polls.insert(poll_id, state);
+                GuiEvent::PollLoaded {
+                    account, poll_id, generation, result,
+                }
+                | GuiEvent::PollVoted {
+                    account, poll_id, generation, result,
+                } => {
+                    let current_generation = self.poll_generation.borrow();
+                    if self.is_logged_in
+                        && account == self.user_uin
+                        && generation == *current_generation
+                        && generation == self.group_poll_generation
+                    {
+                        if let Some(cached) = self.group_polls.get_mut(&poll_id) {
+                            cached.state = match result {
+                                Ok(detail) => PollState::Loaded(detail),
+                                Err(error) => PollState::Error(error),
+                            };
+                        }
                     }
                 }
                 GuiEvent::NotificationAuthorization { request_id, result } => {

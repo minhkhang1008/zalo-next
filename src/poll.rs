@@ -36,6 +36,33 @@ pub struct PollOption {
     pub voters: Vec<String>,
 }
 
+impl PollDetail {
+    pub(crate) fn bounded(mut self) -> Self {
+        if self.options.len() > 100 {
+            self.options.truncate(100);
+            self.options.shrink_to_fit();
+        }
+        truncate_poll_text(&mut self.question);
+        for option in &mut self.options {
+            if option.voters.len() > 500 {
+                option.voters.truncate(500);
+                option.voters.shrink_to_fit();
+            }
+            truncate_poll_text(&mut option.content);
+        }
+        self
+    }
+}
+
+fn truncate_poll_text(text: &mut Option<String>) {
+    if let Some(text) = text {
+        if let Some((index, _)) = text.char_indices().nth(1000) {
+            text.truncate(index);
+            text.shrink_to_fit();
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum WireId {
@@ -128,7 +155,8 @@ impl VoteRules {
             },
             show_counts: !poll.is_hide_vote_preview.unwrap_or_default()
                 || poll.joined.unwrap_or_default(),
-            show_voters: !poll.is_anonymous.unwrap_or_default(),
+            show_voters: poll.is_anonymous == Some(false)
+                && poll.is_hide_vote_preview != Some(true),
         }
     }
 }
@@ -189,12 +217,12 @@ mod tests {
                 can_vote: true,
                 max_choices: 1,
                 show_counts: true,
-                show_voters: true,
+                show_voters: false,
             }
         );
         poll.allow_multi_choices = Some(true);
         poll.options = vec![PollOption::default(); 3];
-        poll.is_anonymous = Some(true);
+        poll.is_anonymous = Some(false);
         poll.is_hide_vote_preview = Some(true);
         assert_eq!(
             VoteRules::for_poll(&poll, 0),
@@ -208,6 +236,43 @@ mod tests {
         poll.joined = Some(true);
         assert!(VoteRules::for_poll(&poll, 0).show_counts);
         assert!(!VoteRules::for_poll(&poll, 0).show_voters);
+    }
+
+    #[test]
+    fn poll_voter_names_require_explicitly_non_anonymous_votes() {
+        for (flags, show_voters) in [
+            (json!({}), false),
+            (json!({"is_anonymous": null}), false),
+            (json!({"is_anonymous": true}), false),
+            (json!({"is_anonymous": false}), true),
+        ] {
+            let poll = serde_json::from_value(flags).unwrap();
+            assert_eq!(VoteRules::for_poll(&poll, 0).show_voters, show_voters);
+        }
+    }
+
+    #[test]
+    fn poll_detail_bounds_options_voters_and_unicode_text() {
+        let text = "ế".repeat(1000);
+        let option = PollOption {
+            content: Some(format!("{text}x")),
+            voters: (0..501).map(|index| format!("user-{index}")).collect(),
+            ..Default::default()
+        };
+        let poll = PollDetail {
+            question: Some(format!("{text}x")),
+            options: vec![option; 101],
+            ..Default::default()
+        }
+        .bounded();
+
+        assert_eq!(poll.question.as_deref(), Some(text.as_str()));
+        assert_eq!(poll.options.len(), 100);
+        for option in poll.options {
+            assert_eq!(option.content.as_deref(), Some(text.as_str()));
+            assert_eq!(option.voters.len(), 500);
+            assert_eq!(option.voters[499], "user-499");
+        }
     }
 
     #[test]

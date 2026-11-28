@@ -4,31 +4,40 @@ impl ZaloGuiApp {
     fn request_group_poll(
         &mut self,
         thread_id: &str,
+        owner_message_id: &str,
         poll_id: String,
         option_ids: Option<Vec<String>>,
     ) {
-        let state = self.group_polls.get(&poll_id);
+        let state = self.group_polls.get(&poll_id).map(|cached| &cached.state);
+        let refreshing = matches!(state, Some(PollState::Loaded(_)));
         let command = match option_ids {
-            None if matches!(state, None | Some(PollState::Error(_))) => WorkerCmd::FetchPoll {
+            None if !matches!(state, Some(PollState::Loading { .. })) => WorkerCmd::FetchPoll {
                 account: self.user_uin.clone(),
+                generation: self.group_poll_generation,
                 thread_id: thread_id.to_owned(),
                 poll_id: poll_id.clone(),
             },
-            Some(option_ids) if matches!(state, Some(PollState::Loaded(_))) => WorkerCmd::VotePoll {
+            Some(option_ids) if refreshing => WorkerCmd::VotePoll {
                 account: self.user_uin.clone(),
+                generation: self.group_poll_generation,
                 thread_id: thread_id.to_owned(),
                 poll_id: poll_id.clone(),
                 option_ids,
             },
             _ => return,
         };
-        self.group_polls.insert(poll_id.clone(), PollState::Loading);
-        if !WORKER_TX.get().is_some_and(|tx| tx.send(command).is_ok()) {
-            self.group_polls.insert(
-                poll_id,
-                PollState::Error("Không thể kết nối với tiến trình xử lý bình chọn.".to_owned()),
-            );
-        }
+        let state = if WORKER_TX.get().is_some_and(|tx| tx.send(command).is_ok()) {
+            PollState::Loading { refreshing }
+        } else {
+            PollState::Error("Không thể kết nối với tiến trình xử lý bình chọn.".to_owned())
+        };
+        self.group_polls.insert(
+            poll_id,
+            CachedPoll {
+                owner_message_id: owner_message_id.to_owned(),
+                state,
+            },
+        );
     }
 
     /// Start loading the full-resolution texture the image viewer shows. Message bubbles and
@@ -4147,7 +4156,7 @@ impl ZaloGuiApp {
                                                     };
                                                     let poll_card = poll_id.filter(|_| owns_poll_card).map(|poll_id| poll_card::PollCard {
                                                         poll_id,
-                                                        state: self.group_polls.get(poll_id),
+                                                        cached: self.group_polls.get(poll_id),
                                                         user_uin: &self.user_uin,
                                                         voter_name: &member_name,
                                                         selecting_messages: self.multi_select.is_some(),
@@ -4295,11 +4304,11 @@ impl ZaloGuiApp {
                         if let Some(m) = target {
                             match action {
                                 BubbleAction::FetchPoll { poll_id } => {
-                                    self.request_group_poll(&thread_id, poll_id, None);
+                                    self.request_group_poll(&thread_id, &m.id, poll_id, None);
                                     ctx.request_repaint();
                                 }
                                 BubbleAction::VotePoll { poll_id, option_ids } => {
-                                    self.request_group_poll(&thread_id, poll_id, Some(option_ids));
+                                    self.request_group_poll(&thread_id, &m.id, poll_id, Some(option_ids));
                                     ctx.request_repaint();
                                 }
                                 BubbleAction::Reply => {

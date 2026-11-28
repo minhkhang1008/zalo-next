@@ -42,14 +42,20 @@ Chunk `https://zalo-chat-static.zadn.vn/v1/lazy/2.21dd5856eb8f1d31f964.js` (lazy
 ## What Zalo-next does
 - `session.rs`: `Domains::group_poll` from `zpw_service_map_v3.group_poll`; candidates end with the `group`
   host and drop any untrusted host. `Session::get_group_poll` uses a client with no redirects and no retries;
-  a vote never fails over to another host except on an explicit HTTP 404 (no replayed votes).
+  a vote never fails over to another host except on an explicit HTTP 404 (no replayed votes). The client
+  checks the HTTP status first and caps the streamed response at 1 MiB.
 - `chat.rs`: `get_poll_detail` / `vote_poll` build `{poll_id, imei}` / `{poll_id, option_ids, imei}`,
   encrypt with the session's `zpw_enk` params path, decrypt the reply, map 166 to `PollUnavailable`.
-  Option ids that parse as integers are sent as numbers.
+  Option ids that parse as integers are sent as numbers. The worker fetches detail after a successful vote
+  unless the vote response contains the requested poll ID and a non-empty options list.
 - `parse_chat_message`: `group.poll` shows "Bình chọn: <question>" and keeps `poll_id` (persisted in
   `raw_json`).
-- Worker: `FetchPoll` / `VotePoll` run on spawned tasks in command order, account-checked, one terminal
-  event each; a vote that only acknowledges is followed by a detail fetch.
+- Worker: `FetchPoll` / `VotePoll` run serially on spawned tasks. The worker checks the current session and
+  its generation after entering the queue, cancels stale requests and drops stale results. Details sent
+  to the GUI are limited to 100 options, 500 voter IDs per option and 1,000 characters per question or option.
+- Cards fetch when visible and refresh when the newest message for the poll changes or the user clicks
+  “Làm mới”. Voter names require `is_anonymous == false` and remain hidden when `is_hide_vote_preview`
+  is true. Polls that hide previews show counts after the user joins.
 
 ## Not verified
 Live detail/vote against a real group (owner).
