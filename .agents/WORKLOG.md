@@ -1428,3 +1428,21 @@ Entry template:
 - NOT verified: everything live (owner testing): polls voting, App Lock prompts/sleep/calls, contact card
   actions, emoticon rendering and selection copy, storage clearing, account switching after the cookie-jar
   change, Windows/Linux builds.
+
+## 2026-11-28 — Bank accounts: save and send ("Gửi số tài khoản")  (agent: Claude Code, claude-opus-5-5 (orchestrator, finished it) + Codex (worker, ran out of quota at the end))
+- Request: Zalo's saved bank accounts + send bank card; no transfer button; right-click copy number / show
+  VietQR, click QR to enlarge. Owner chose the Zalo-server list (shared with the phone).
+- Evidence: re-notes/52 (Zalo Web lazy chunks: /api/transfer/{conf,list,create,update,delete,card} on the
+  `zinstant_msg` host, fallback zimsg.chat.zalo.me; params, response fields, validation regexes; VietQR payload
+  built locally).
+- Branch `feature/bank-cards` (2c4de8b): src/bank_cards.rs (client with no redirects/retries, failover only on
+  404, bounded responses, no logging of numbers/names), `zinstant_msg` service-map slot restricted to trusted
+  HTTPS origins, worker commands with account-scoped terminal events, src/gui/bank_cards_ui.rs (composer button,
+  list, add/edit with searchable bank picker, delete with Zalo's default rule, right-click copy / VietQR, QR
+  enlarge). Codex hit its usage limit during the final verification; Claude re-ran check/tests/fmt/clippy and
+  reviewed the diff. Merged into test/upstream-port (31708de; conflicts with polls/app-lock in gui.rs,
+  worker.rs, session.rs resolved by hand: one http_client_builder(proxy) for both).
+- Verification: test branch `cargo test --locked` 595 passed; dmg rebuilt.
+- NOT verified: anything live (list/add/edit/delete/send against Zalo, how the phone shows the card, logos),
+  received bank cards are NOT rendered yet (zinstant layout, no sample; waits for the owner's BrowserSkill).
+- Pending: mandatory adversarial review of feature/bank-cards (Codex quota resets 16:08).
