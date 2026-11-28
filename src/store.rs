@@ -574,6 +574,7 @@ impl MessageStore {
                 let mut link_src = None;
                 let mut media_size = None;
                 let mut text_styles = Vec::new();
+                let mut bank_card_ref = None;
                 let mut wire_fields = std::collections::BTreeMap::new();
                 let mut poll_id = None;
                 let mut contact_card = None;
@@ -663,6 +664,9 @@ impl MessageStore {
                             .get("media_size")
                             .and_then(|value| <(u32, u32)>::deserialize(value).ok())
                             .filter(crate::chat::valid_media_size);
+                        bank_card_ref = val["bank_card_ref"]["data_url"]
+                            .as_str()
+                            .and_then(crate::chat::BankCardRef::from_url);
                         poll_id = val
                             .get("poll_id")
                             .and_then(serde_json::Value::as_str)
@@ -711,6 +715,7 @@ impl MessageStore {
                     link_src,
                     media_size,
                     text_styles,
+                    bank_card_ref,
                     poll_id,
                     wire_ref: crate::message_model::WireMessageRef {
                         fields: wire_fields,
@@ -727,6 +732,8 @@ impl MessageStore {
                             && cm.poll_id.is_none()
                             && existing.contact_card.is_none()
                             && cm.contact_card.is_none()
+                            && existing.bank_card_ref.is_none()
+                            && cm.bank_card_ref.is_none()
                             && existing.text == cm.text
                             && existing.is_outgoing == cm.is_outgoing
                             && (existing.ts == cm.ts
@@ -738,6 +745,9 @@ impl MessageStore {
                         existing.merge_text_styles(&cm);
                         if existing.media_size.is_none() {
                             existing.media_size = cm.media_size;
+                        }
+                        if let (None, Some(card)) = (&existing.bank_card_ref, &cm.bank_card_ref) {
+                            existing.merge_bank_card(card);
                         }
                         if existing.poll_id.is_none() {
                             existing.poll_id = cm.poll_id;
@@ -946,6 +956,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if let Some((width, height)) = m.media_size {
             meta.insert("media_size".into(), serde_json::json!([width, height]));
+        }
+        if let Some(card) = &m.bank_card_ref {
+            meta.insert("bank_card_ref".into(), serde_json::json!(card));
         }
         if let Some(poll_id) = &m.poll_id {
             meta.insert("poll_id".into(), serde_json::json!(poll_id));
@@ -1924,6 +1937,38 @@ fn import_official_zalo_pc_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bank_cards_round_trip_through_stored_message_metadata() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let url = "https://zinst-stc.zadn.vn/static/bankcard?data=html";
+        let card = crate::chat::BankCardRef::from_url(url).unwrap();
+        let thread = Thread {
+            id: "thread-1".into(),
+            messages: ["card-1", "card-2"]
+                .into_iter()
+                .map(|id| ChatMessage {
+                    id: id.into(),
+                    text: crate::chat::BANK_CARD_PREVIEW.into(),
+                    ts: 1000,
+                    bank_card_ref: Some(card.clone()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(persist_threads(&mut store, &[thread]).unwrap(), 2);
+        let rows = store.messages_for("thread-1", 10).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&rows[0].raw_json).unwrap();
+        assert_eq!(raw["bank_card_ref"]["data_url"], url);
+        let mut hydrated = Vec::new();
+        assert_eq!(store.hydrate_threads(&mut hydrated, 10).unwrap(), 2);
+        assert_eq!(hydrated[0].messages.len(), 2);
+        assert!(hydrated[0]
+            .messages
+            .iter()
+            .all(|msg| msg.bank_card_ref.as_ref() == Some(&card)));
+    }
 
     #[test]
     fn contact_card_round_trips_through_stored_message_metadata() {

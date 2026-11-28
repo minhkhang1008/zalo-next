@@ -114,6 +114,11 @@ pub enum GuiEvent {
         url: String,
         image: Option<egui::ColorImage>,
     },
+    ReceivedBankCard {
+        uin: String,
+        key: String,
+        result: Result<crate::bank_cards::ReceivedBankCard, String>,
+    },
     VoiceProgress {
         account: String,
         generation: u64,
@@ -1809,6 +1814,11 @@ impl ZaloGuiApp {
                 GuiEvent::BankLogo { uin, url, image } => {
                     if self.is_logged_in && uin == self.user_uin {
                         self.bank_cards.on_logo(ctx, url, image);
+                    }
+                }
+                GuiEvent::ReceivedBankCard { uin, key, result } => {
+                    if self.is_logged_in && uin == self.user_uin {
+                        self.bank_cards.on_received_card(ctx, &key, result);
                     }
                 }
                 GuiEvent::AiThreadLoaded { thread_id, messages } => {

@@ -89,6 +89,21 @@ pub(crate) fn validate_text_styles(text: &str, styles: &mut Vec<TextStyle>) {
     styles.sort_by_key(|span| span.start);
 }
 
+pub(crate) const BANK_CARD_PREVIEW: &str = "[Tài khoản ngân hàng]";
+
+/// Reference to the HTML that supplies a bank card's display data.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BankCardRef {
+    pub data_url: String,
+}
+
+impl BankCardRef {
+    pub(crate) fn from_url(url: &str) -> Option<Self> {
+        let url = crate::bank_cards::received_card_url(url)?;
+        Some(Self { data_url: url.into() })
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     #[serde(default)]
@@ -160,6 +175,8 @@ pub struct ChatMessage {
     pub poll_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_card: Option<ContactCard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bank_card_ref: Option<BankCardRef>,
     /// For a `chat.delete` event ("delete for me" made on another device): the ids of the messages
     /// it hides. Such an event is never shown itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -244,6 +261,10 @@ impl ChatMessage {
         if poll_changed {
             self.poll_id.clone_from(&incoming.poll_id);
         }
+        let bank_card_changed = incoming
+            .bank_card_ref
+            .as_ref()
+            .is_some_and(|card| self.merge_bank_card(card));
         let mut contact_changed = false;
         if let Some(card) = &incoming.contact_card {
             if self.contact_card.as_ref() != Some(card) {
@@ -258,6 +279,7 @@ impl ChatMessage {
         self.delivery = self.delivery.merge(incoming.delivery);
         styles_changed
             || poll_changed
+            || bank_card_changed
             || contact_changed
             || previous_mentions != self.resolved_mention_uids
             || before
@@ -269,6 +291,18 @@ impl ChatMessage {
                     self.history_source.clone(),
                     self.media_size,
                 )
+    }
+
+    pub(crate) fn merge_bank_card(&mut self, card: &BankCardRef) -> bool {
+        let changed = self.bank_card_ref.as_ref() != Some(card);
+        if changed {
+            self.bank_card_ref = Some(card.clone());
+        }
+        if self.text != BANK_CARD_PREVIEW && !self.text.starts_with("[Đã thu hồi]") {
+            self.text = BANK_CARD_PREVIEW.into();
+            return true;
+        }
+        changed
     }
 
     /// Keep aggregate counts and event replay cursors across cache/network merges.
@@ -6438,6 +6472,27 @@ fn extract_contact_card(content: &Value) -> Option<ContactCard> {
     })
 }
 
+fn bank_card_content(content: &Value) -> Option<std::borrow::Cow<'_, Value>> {
+    let content = if let Some(text) = content.as_str() {
+        std::borrow::Cow::Owned(serde_json::from_str::<Value>(text).ok()?)
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    };
+    (content["action"].as_str() == Some("zinstant.bankcard")).then_some(content)
+}
+
+fn extract_bank_card_ref(content: &Value) -> Option<BankCardRef> {
+    let params = content.get("params")?;
+    let parsed;
+    let params = if let Some(text) = params.as_str() {
+        parsed = serde_json::from_str::<Value>(text).ok()?;
+        &parsed
+    } else {
+        params
+    };
+    BankCardRef::from_url(params["pcItem"]["data_url"].as_str()?)
+}
+
 /// `chat.delete`: `content` lists `{globalDelMsgId, clientDelMsgId, uidFrom, uidTo, type}` for the
 /// messages the user deleted for themselves on another device.
 fn parse_delete_event(it: &Value) -> Option<ChatMessage> {
@@ -6495,6 +6550,7 @@ pub fn is_visible_message(m: &ChatMessage, deleted: &std::collections::HashSet<&
         && m.link_url.is_none()
         && m.link_thumb.is_none()
         && m.contact_card.is_none()
+        && m.bank_card_ref.is_none()
         && m.poll_id.is_none();
     !blank
         && m.deletes.is_empty()
@@ -6555,8 +6611,18 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else {
         None
     };
-    let media_content = content_value
-        .filter(|_| !is_poll && contact_card.is_none() && formatted_text.is_none());
+    // Bank cards use the webcontent type or its numeric equivalent (re-notes/54).
+    let bank_card = if matches!(msg_type.as_str(), "chat.webcontent" | "52")
+        || (msg_type.is_empty() && it["originMsgType"].as_str() == Some("chat.webcontent"))
+    {
+        raw_content_val.and_then(bank_card_content)
+    } else {
+        None
+    };
+    let bank_card_ref = bank_card.as_deref().and_then(extract_bank_card_ref);
+    let media_content = content_value.filter(|_| {
+        !is_poll && contact_card.is_none() && formatted_text.is_none() && bank_card.is_none()
+    });
     let mut sticker_meta = media_content.and_then(extract_sticker_info);
     if sticker_meta.is_none()
         && (msg_type == "chat.sticker" || msg_type == "sticker" || msg_type == "5")
@@ -6567,7 +6633,9 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         .map(extract_link_info)
         .unwrap_or((None, None, None, None, None));
 
-    let mut content = if is_poll {
+    let mut content = if bank_card.is_some() {
+        BANK_CARD_PREVIEW.to_owned()
+    } else if is_poll {
         poll_content
             .and_then(crate::poll::question_from_message)
             .map_or_else(
@@ -6874,7 +6942,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
             }
         }
     }
-    let media_size = if !is_poll && !is_voice_msg && !is_undo_type && sticker_meta.is_none() {
+    let media_size = if !is_poll && bank_card.is_none() && !is_voice_msg && !is_undo_type && sticker_meta.is_none() {
         raw_content_val
             .and_then(|content| parse_media_size(content, &msg_type, is_photo_msg, is_video_msg))
     } else {
@@ -6920,6 +6988,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         media_size,
         poll_id,
         contact_card,
+        bank_card_ref,
 
         history_source: voice_source,
         ..Default::default()
@@ -10830,6 +10899,56 @@ mod send_identity_tests {
                 let msg = parse_chat_message(&raw).expect("must parse message");
                 assert_eq!(msg.media_size, None, "{msg_type}");
             }
+        }
+    }
+
+    #[test]
+    fn chat_bank_cards_parse_named_and_numeric_messages() {
+        let url = "https://zinst-stc.zadn.vn/static/bankcard?data=html";
+        let params = json!({"pcItem": {"data_url": url}});
+        for (kind, params, sender) in [
+            (json!("chat.webcontent"), params.clone(), "1"),
+            (json!(52), json!(params.to_string()), "0"),
+        ] {
+            let raw = json!({
+                "msgType": kind, "msgId": "123", "uidFrom": sender,
+                "content": {"action": "zinstant.bankcard", "params": params}
+            });
+            let msg = parse_chat_message(&raw).unwrap();
+            assert_eq!(msg.text, BANK_CARD_PREVIEW);
+            assert_eq!(msg.bank_card_ref.as_ref().unwrap().data_url, url);
+            assert_eq!(msg.is_outgoing, sender == "0");
+
+            let mut cached = ChatMessage {
+                text: "[Tin nhắn]".into(),
+                ..Default::default()
+            };
+            assert!(cached.merge_message_metadata(&msg));
+            assert_eq!(cached.text, BANK_CARD_PREVIEW);
+            assert_eq!(cached.bank_card_ref, msg.bank_card_ref);
+            assert!(!cached.merge_message_metadata(&ChatMessage::default()));
+        }
+    }
+
+    #[test]
+    fn chat_bank_cards_keep_preview_and_drop_untrusted_data_url() {
+        for url in [
+            "https://zinst-stc.zadn.vn.example.org/card",
+            "http://zinst-stc.zadn.vn/card",
+            "wss://zinst-stc.zadn.vn/card",
+            "https://user:password@zinst-stc.zadn.vn/card",
+        ] {
+            let raw = json!({
+                "msgType": 52, "msgId": "123",
+                "content": {
+                    "action": "zinstant.bankcard", "href": "https://example.org",
+                    "params": {"pcItem": {"data_url": url}}
+                }
+            });
+            let msg = parse_chat_message(&raw).unwrap();
+            assert_eq!(msg.text, BANK_CARD_PREVIEW);
+            assert!(msg.bank_card_ref.is_none());
+            assert!(msg.link_url.is_none());
         }
     }
 
