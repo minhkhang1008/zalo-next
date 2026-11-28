@@ -1,5 +1,8 @@
 use super::*;
 
+/// Height of one composer text row at the 15 px composer font.
+const COMPOSER_ROW_H: f32 = 20.0;
+
 impl ZaloGuiApp {
     /// Start loading the full-resolution texture the image viewer shows. Message bubbles and
     /// the media grid keep a 480 px copy; the `hd_` key keeps this one (and its disk cache) apart.
@@ -5196,17 +5199,53 @@ impl ZaloGuiApp {
                                                 }
                                             }
 
-                                            let is_multiline = self.input_message.contains('\n');
+                                            let send_btn_w =
+                                                if is_narrow_w { 52.0 } else { 76.0 };
+                                            let sched_btn_w = 34.0;
+                                            // The separator below takes 8 px of the row.
+                                            let input_w = (ui.available_width()
+                                                - 8.0
+                                                - send_btn_w
+                                                - sched_btn_w
+                                                - 16.0)
+                                                .max(50.0);
+                                            // Paint picked @tags blue inside the composer, like sent bubbles.
+                                            let mention_names: Vec<String> = self
+                                                .composer_mentions
+                                                .iter()
+                                                .map(|p| p.name.clone())
+                                                .collect();
+                                            let composer_text_col = pal.text_primary;
+                                            let composer_tag_col =
+                                                super::messages::mention_link_color(pal);
+                                            // Grow with the text, wrapped lines included, up to about a third
+                                            // of the window; past that the box scrolls.
+                                            let text_rows = if self.input_message.is_empty() {
+                                                1
+                                            } else {
+                                                let mut job = composer_mention_layout_job(
+                                                    &self.input_message,
+                                                    &mention_names,
+                                                    composer_text_col,
+                                                    composer_tag_col,
+                                                );
+                                                // TextEdit margin (6 px each side) plus a little slack.
+                                                job.wrap.max_width = (input_w - 22.0).max(20.0);
+                                                ui.fonts(|f| f.layout_job(job)).rows.len().max(1)
+                                            };
+                                            let max_rows = ((ui.ctx().screen_rect().height() * 0.35)
+                                                / COMPOSER_ROW_H)
+                                                .floor()
+                                                .clamp(5.0, 14.0)
+                                                as usize;
+                                            let is_multiline = text_rows > 1;
                                             let vis_lines = if is_multiline {
-                                                self.input_message
-                                                    .split('\n')
-                                                    .count()
-                                                    .clamp(2, 5)
+                                                text_rows.clamp(2, max_rows)
                                             } else {
                                                 1
                                             };
                                             let box_h = if is_multiline {
-                                                14.0 + (vis_lines as f32 * 20.0)
+                                                14.0 + (vis_lines as f32 * COMPOSER_ROW_H)
                                             } else {
                                                 34.0
                                             };
@@ -5221,27 +5260,10 @@ impl ZaloGuiApp {
                                                 Stroke::new(1.0_f32, pal.border),
                                             );
 
-                                            let send_btn_w =
-                                                if is_narrow_w { 52.0 } else { 76.0 };
-                                            let sched_btn_w = 34.0;
-                                            let input_w = (ui.available_width()
-                                                - send_btn_w
-                                                - sched_btn_w
-                                                - 16.0)
-                                                .max(50.0);
                                             let hint_str = format!(
                                                 "Nhập tin nhắn tới {}...",
                                                 truncate_chars(&thread_name, 18)
                                             );
-                                            // Paint picked @tags blue inside the composer, like sent bubbles.
-                                            let mention_names: Vec<String> = self
-                                                .composer_mentions
-                                                .iter()
-                                                .map(|p| p.name.clone())
-                                                .collect();
-                                            let composer_text_col = pal.text_primary;
-                                            let composer_tag_col =
-                                                super::messages::mention_link_color(pal);
                                             let mut composer_layouter =
                                                 |ui: &egui::Ui, text: &str, wrap_width: f32| {
                                                     let mut job = composer_mention_layout_job(
