@@ -1457,3 +1457,43 @@ Entry template:
 - NOT done / pending: received bank card rendering, add-account redesign, call popup + optional video,
   phone-number cards, rich text, bank-cards adversarial review. Full plan in
   `.agents/handoff/HANDOFF-2026-11-28.md` (briefs saved next to it).
+
+## 2026-11-28 — Handoff queue finished: bank cards received + form, rich text, call popup, phone cards  (agent: Claude Code, claude-opus-5-5 (orchestrator; wrote call popup, opt-in video, phone cards, merges) + Codex (worker: received bank cards, bank form + review fixes, rich text + review fixes; reviewer: 2 adversarial + 1 native review))
+- Request: finish every open item of `.agents/handoff/HANDOFF-2026-11-28.md`; owner also asked to stop
+  creating many worktrees and to delete each one as soon as its work is merged (disk was at 2.4 GiB free).
+- Merged into `test/upstream-port`: feature/owner-feedback-2; feature/owner-feedback-3 (0b01105);
+  feature/rich-text-composer (35a3d75) + fixes 8db98f5; feature/bank-cards-received (6afe181, e3cd1a0;
+  conflicts in chat.rs/messages.rs/store.rs resolved by keeping both rich text and bank cards). All feature
+  worktrees removed (branches kept; deleting them needs the owner's OK).
+- Received bank cards (re-notes/54): `chat.webcontent`/52 `zinstant.bankcard` → `ChatMessage.bank_card_ref`
+  (trusted https data_url only, persisted in raw_json); cookie-less, no-redirect, 256 KiB/15 s fetch; HTML
+  scanned for bin/name/number/logo/VietQR (CRC checked, else rebuilt locally); card bubble with QR, right-click
+  copy / VietQR. Add-account form redesigned (bank picker with logos/search, labelled fields, inline validation).
+- Bank cards adversarial review (mandatory) → fixed: per-form TextEdit ids + undo cleared on close/account
+  reset; ambiguous card-send failures say "Có thể thẻ đã được gửi" and need "Vẫn gửi lại"; delete rechecks the
+  account before POST; list/catalogue row and field caps. Kept: failover only on HTTP 404 (no write happened).
+- Calls: ringing call shows `call_popup.rs` (always-on-top, non-activating, decorations off, top-right; macOS
+  `setCanHide(false)` + `orderFrontRegardless` so it shows while the app is hidden; Cargo feature NSWindow);
+  choices Nghe máy / Nghe nhưng tắt mic / Không nghe máy (camera choices only when video is enabled); locked app
+  shows no caller name and offers "Mở Zalo-next". Main window no longer raised on IncomingCall (one Dock
+  bounce). `AnswerCall.mic_start_off` → call state `mic_muted`, re-applied on every media (re)start; group
+  answer 12098 audioState follows it; GUI sends the existing SetCallMediaState once connected if muted.
+  `video_calls_enabled` setting (default false): hides header video/Zavi buttons and the in-call camera
+  button, call-again/retry become voice, incoming video answered with camera off.
+- Phone-number messages (`phone_card.rs`): VN formats → synthetic ContactCard; lookup only for on-screen rows,
+  1 per 1.5 s, ≤30 per session, keyed by account+number, failures retried after 5 min; no logging of numbers.
+- Rich text (re-notes/53): incoming textProperties kept as byte spans and rendered natively; composer toolbar
+  (Cmd/Ctrl+Shift+X) sends native textProperties; drafts keep styles. Adversarial review → fixed failed-send
+  draft recovery, hydration merging differently styled twins, envelope offsets, Backspace attribution with
+  repeated chars, forwarding losing styles.
+- Codex review of Claude's call/phone-card diff → fixed: retry honours video opt-out, popup label/truncation,
+  group mute state, visible-only paced lookups, transient lookup failures, photo-with-number-title. Rejected:
+  pass initial mute into MediaHandle (setter runs right after spawn, before the capture device delivers audio;
+  same pattern as the existing cam_start_off); multi-monitor popup origin (egui gives no monitor origin;
+  popup uses the main window's monitor size) — known limitation; voice-only media for a video call (would
+  change call signalling; camera is off instead).
+- Verification: `cargo test --locked` 642 lib tests pass + integration tests; cargo check clean; dmg rebuilt.
+- NOT verified: anything live — popup visibility while the app is hidden (Cmd+H / closed to tray), focus
+  behaviour, answering muted, incoming video with video disabled, received bank card HTML from the real CDN,
+  bank form visuals light/dark, rich text round trip with the phone/Zalo PC, phone-number lookups and Zalo's
+  rate limit, Windows/Linux. Owner must re-scan the QR (session expired earlier).
