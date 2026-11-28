@@ -337,7 +337,15 @@ impl MessageStore {
                  is_group = excluded.is_group,
                  last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts),
                  last_read_msg_id = CASE
-                     WHEN excluded.last_read_msg_id IS NOT NULL AND excluded.last_read_msg_id != ''
+                     WHEN excluded.last_read_msg_id IS NULL OR excluded.last_read_msg_id = ''
+                     THEN threads.last_read_msg_id
+                     WHEN threads.last_read_msg_id IS NULL OR threads.last_read_msg_id = ''
+                          OR excluded.last_read_msg_id GLOB '*[^0-9]*'
+                          OR threads.last_read_msg_id GLOB '*[^0-9]*'
+                     THEN excluded.last_read_msg_id
+                     WHEN length(excluded.last_read_msg_id) > length(threads.last_read_msg_id)
+                          OR (length(excluded.last_read_msg_id) = length(threads.last_read_msg_id)
+                              AND excluded.last_read_msg_id > threads.last_read_msg_id)
                      THEN excluded.last_read_msg_id
                      ELSE threads.last_read_msg_id
                  END",
@@ -352,13 +360,28 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Persist the read-point (last read message ID) of a thread (#119).
+    /// Persist the read-point (last read message ID) of a thread (#119). Numeric server ids only
+    /// move forward, so a thread snapshot taken before the user read a message can never put an
+    /// older read point back (the GUI's `UnreadState::advance_seen` follows the same rule).
     /// Upserts safely even if the thread does not have a row yet.
     pub fn set_thread_read(&mut self, thread_id: &str, last_msg_id: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO threads (thread_id, last_read_msg_id)
              VALUES (?1, ?2)
-             ON CONFLICT(thread_id) DO UPDATE SET last_read_msg_id = excluded.last_read_msg_id",
+             ON CONFLICT(thread_id) DO UPDATE SET
+                 last_read_msg_id = CASE
+                     WHEN excluded.last_read_msg_id IS NULL OR excluded.last_read_msg_id = ''
+                     THEN threads.last_read_msg_id
+                     WHEN threads.last_read_msg_id IS NULL OR threads.last_read_msg_id = ''
+                          OR excluded.last_read_msg_id GLOB '*[^0-9]*'
+                          OR threads.last_read_msg_id GLOB '*[^0-9]*'
+                     THEN excluded.last_read_msg_id
+                     WHEN length(excluded.last_read_msg_id) > length(threads.last_read_msg_id)
+                          OR (length(excluded.last_read_msg_id) = length(threads.last_read_msg_id)
+                              AND excluded.last_read_msg_id > threads.last_read_msg_id)
+                     THEN excluded.last_read_msg_id
+                     ELSE threads.last_read_msg_id
+                 END",
             params![thread_id, last_msg_id],
         )?;
         Ok(())
@@ -2489,6 +2512,30 @@ mod tests {
         // Explicit new read-point updates.
         store.set_thread_read("t1", "msg-200").unwrap();
         assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-200");
+    }
+
+    #[test]
+    fn numeric_read_points_never_move_backwards() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let thread = |read: &str| StoredThread {
+            thread_id: "t1".into(),
+            name: "A".into(),
+            is_group: false,
+            last_ts: 1,
+            last_read_msg_id: read.into(),
+        };
+        store.set_thread_read("t1", "8489400346565").unwrap();
+        // A snapshot queued before the newer read point arrives late.
+        store.upsert_thread(&thread("8489400346000")).unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "8489400346565");
+        store.set_thread_read("t1", "999").unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "8489400346565");
+        // Forward moves still apply, including to a longer id.
+        store.upsert_thread(&thread("18489400346566")).unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "18489400346566");
+        // Local (non-numeric) ids cannot be ordered and are taken as written.
+        store.set_thread_read("t1", "out_local").unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "out_local");
     }
 
     #[test]

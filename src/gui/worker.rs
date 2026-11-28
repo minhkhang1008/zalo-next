@@ -682,6 +682,8 @@ pub enum WorkerCmd {
         user_name: String,
     },
     PersistThreads(Vec<Thread>),
+    /// `(thread_id, last read message id)` read points; written in order with `PersistThreads`.
+    SaveReadPoints(Vec<(String, String)>),
     CheckForUpdates {
         silent: bool,
     },
@@ -1927,6 +1929,19 @@ pub(super) fn spawn_session_worker(
                                     );
                                 }
                             });
+                        }
+                        WorkerCmd::SaveReadPoints(points) => {
+                            // Same queue and database as PersistThreads, so the two never race.
+                            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                                let mut store = crate::store::MessageStore::open("zalo_history.db")?;
+                                for (thread_id, msg_id) in &points {
+                                    store.set_thread_read(thread_id, msg_id)?;
+                                }
+                                Ok(())
+                            }).await;
+                            if !matches!(result, Ok(Ok(()))) {
+                                let _ = gui_tx.send(GuiEvent::StatusUpdate("Không thể lưu trạng thái đã đọc trên máy.".into()));
+                            }
                         }
                         WorkerCmd::PersistThreads(threads_snapshot) => {
                             // Keep snapshots ordered with Saved mutations and account-file switches.

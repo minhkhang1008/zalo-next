@@ -244,15 +244,9 @@ impl ZaloGuiApp {
             crate::APP_DISPLAY_NAME.to_string(),
         ));
         if !read_points.is_empty() {
-            let uin = self.user_uin.clone();
-            std::thread::spawn(move || {
-                let db = crate::store::db_path_for_account(&uin);
-                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
-                    for (tid, mid) in read_points {
-                        let _ = store.set_thread_read(&tid, &mid);
-                    }
-                }
-            });
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::SaveReadPoints(read_points));
+            }
         }
         self.show_toast(format!("Đã đánh dấu {count} cuộc trò chuyện là đã đọc"));
     }
@@ -330,15 +324,10 @@ impl ZaloGuiApp {
         // Persist the read-point so reopening the app does not recount read messages (#119).
         if let Some(last_mid) = last_mid {
             self.threads[index].unread.last_seen_id = Some(last_mid.clone());
-            let mid = last_mid.clone();
-            let tid_c = tid.clone();
-            let uin_c = self.user_uin.clone();
-            std::thread::spawn(move || {
-                let db = crate::store::db_path_for_account(&uin_c);
-                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
-                    let _ = store.set_thread_read(&tid_c, &mid);
-                }
-            });
+            // Through the worker queue, ordered with PersistThreads snapshots.
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::SaveReadPoints(vec![(tid.clone(), last_mid.clone())]));
+            }
             if !self.settings.block_seen && !last_mid.is_empty() {
                 if let Some(tx) = WORKER_TX.get() {
                     let _ = tx.send(WorkerCmd::SendSeen {
