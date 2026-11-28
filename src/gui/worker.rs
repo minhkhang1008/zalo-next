@@ -615,6 +615,11 @@ pub enum WorkerCmd {
     ParseLinkPreview {
         url: String,
     },
+    /// Name/avatar for a message that is only a phone number; answered by `PhoneCardLookedUp`.
+    LookupPhoneCard {
+        uin: String,
+        phone: String,
+    },
     LookupPhone {
         phone: String,
     },
@@ -628,6 +633,8 @@ pub enum WorkerCmd {
     AnswerCall {
         accept: bool,
         cam_start_off: bool,
+        /// Answer with the microphone muted ("Nghe máy nhưng tắt mic").
+        mic_start_off: bool,
     },
     SetCallMediaState {
         is_on_mic: bool,
@@ -4251,9 +4258,10 @@ pub(super) fn spawn_session_worker(
                         WorkerCmd::AnswerCall {
                             accept,
                             cam_start_off,
+                            mic_start_off,
                         } => {
                             if let Some((_,control,cancelled))=voice_control.take(){cancelled.store(true,std::sync::atomic::Ordering::Relaxed);let _=control.send(true);}
-                            call_bridge.answer_call(accept, cam_start_off);
+                            call_bridge.answer_call(accept, cam_start_off, mic_start_off);
                             egui_ctx.request_repaint();
                         }
                         WorkerCmd::SetCallMediaState {
@@ -4405,6 +4413,26 @@ pub(super) fn spawn_session_worker(
                                     }
                                 }
                                 ctx_clone.request_repaint();
+                            });
+                        }
+                        WorkerCmd::LookupPhoneCard { uin, phone } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let s = session_clone.lock().await.clone();
+                                // Results belong to the account that asked; never log the number.
+                                let same_account =
+                                    s.login.as_ref().is_some_and(|login| login.uin == uin);
+                                let profile = if same_account {
+                                    crate::chat::find_user_by_phone(&s, &phone).await.ok()
+                                } else {
+                                    None
+                                };
+                                let _ = gui_tx_clone.send(GuiEvent::PhoneCardLookedUp {
+                                    uin,
+                                    phone,
+                                    profile,
+                                });
                             });
                         }
                         WorkerCmd::LookupPhone { phone } => {

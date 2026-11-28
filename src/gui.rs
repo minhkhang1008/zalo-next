@@ -30,6 +30,7 @@ mod app_lock_ui;
 mod appearance;
 mod background;
 mod bank_cards_ui;
+mod call_popup;
 mod clipboard_write;
 mod contact_card;
 mod doc_preview_ui;
@@ -41,6 +42,7 @@ mod macos_clipboard;
 mod macos_drag;
 mod messages;
 mod modals;
+mod phone_card;
 mod photo_gallery;
 mod picker;
 mod poll_card;
@@ -291,6 +293,12 @@ pub enum GuiEvent {
     },
     PhoneLookupSuccess(crate::chat::PhoneLookupResult),
     PhoneLookupFailed(String),
+    /// Lazy lookup for a phone-number-only message (`phone_card.rs`); `None` when not found.
+    PhoneCardLookedUp {
+        uin: String,
+        phone: String,
+        profile: Option<crate::chat::PhoneLookupResult>,
+    },
     FriendStatusChecked {
         user_id: String,
         status: crate::chat::FriendshipStatus,
@@ -786,6 +794,9 @@ struct AppSettings {
     selected_mic_device: String,
     selected_camera_device: String,
     mic_gain_percent: u32,
+    /// Video calls are opt-in (owner request 2026-11-28): when off, video buttons are hidden and
+    /// incoming video calls are answered with the camera off.
+    video_calls_enabled: bool,
     // 8. Quản lý hội thoại (Context menu: Ghim, Phân loại, Tắt thông báo, Ẩn)
     pinned_threads: Vec<String>,
     muted_threads: HashMap<String, i64>,
@@ -871,6 +882,7 @@ impl Default for AppSettings {
             selected_mic_device: String::new(),
             selected_camera_device: String::new(),
             mic_gain_percent: 100,
+            video_calls_enabled: false,
             pinned_threads: Vec::new(),
             muted_threads: HashMap::new(),
             hidden_threads: HashSet::new(),
@@ -1001,8 +1013,11 @@ pub struct ZaloGuiApp {
     /// Palette for the current theme + custom colours. `palette()` hands out this copy so
     /// `theme.json` is read from disk only when `refresh_cached_palette` runs, not every frame.
     cached_palette: ThemePalette,
-    /// The call window was raised "always on top" while ringing and must be reset afterwards.
-    call_window_on_top: bool,
+    /// The incoming-call popup's native window was found and kept visible while the app is
+    /// hidden (macOS); reset when the call stops ringing.
+    incoming_popup_pinned: bool,
+    /// Contact cards for messages that are only a phone number.
+    phone_cards: phone_card::PhoneCards,
     /// Local Assistant state (messages live outside `threads`, see `gui/ai_ui.rs`).
     ai: ai_ui::State,
 
@@ -1474,7 +1489,8 @@ impl ZaloGuiApp {
             dark_mode,
             theme_dirty: false,
             cached_palette,
-            call_window_on_top: false,
+            incoming_popup_pinned: false,
+            phone_cards: Default::default(),
             ai: ai_ui::State::new(),
             is_logged_in,
             user_name,
@@ -2874,6 +2890,13 @@ impl ZaloGuiApp {
                         .insert(res.user_id.clone(), res.friendship);
                     self.phone_lookup_result = Some(res);
                 }
+                GuiEvent::PhoneCardLookedUp {
+                    uin,
+                    phone,
+                    profile,
+                } => {
+                    self.phone_cards.finish(&uin, &phone, profile, std::time::Instant::now());
+                }
                 GuiEvent::PhoneLookupFailed(err) => {
                     self.phone_lookup_loading = false;
                     self.phone_lookup_result = None;
@@ -2912,10 +2935,21 @@ impl ZaloGuiApp {
                             call.is_connected = false;
                         }
                     } else if let Some(ref mut call) = self.active_call {
+                        let was_connected = call.is_connected;
                         call.is_connected = matches!(state.as_str(), "incall" | "connected")
                             && call.error_reason.is_none();
                         if call.is_connected {
                             call.is_incoming_ringing = false;
+                        }
+                        // Answered with the mic off: tell the partner through the same media-state
+                        // update the in-call mic button sends.
+                        if call.is_connected && !was_connected && call.mic_muted {
+                            if let Some(tx) = WORKER_TX.get() {
+                                let _ = tx.send(WorkerCmd::SetCallMediaState {
+                                    is_on_mic: false,
+                                    is_on_cam: call.cam_enabled,
+                                });
+                            }
                         }
                         if call.error_reason.is_none() {
                             call.state_label = match state.as_str() {
@@ -2969,9 +3003,11 @@ impl ZaloGuiApp {
                         members_popover_open: false,
                         invite_search_query: String::new(),
                     });
-                    background::show_app(ctx);
+                    // The incoming-call popup (`call_popup.rs`) shows the call without raising
+                    // the main window or taking focus; the Dock icon bounces once.
+                    self.incoming_popup_pinned = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                        egui::UserAttentionType::Critical,
+                        egui::UserAttentionType::Informational,
                     ));
                 }
                 GuiEvent::CallRejected { code, reason } => {
@@ -3481,6 +3517,8 @@ impl eframe::App for ZaloGuiApp {
         self.request_notification_permission_at_startup();
         Self::handle_frameless_resize(ctx);
         self.render_custom_title_bar(ctx, &pal);
+        // Before the lock screen: a locked app still shows that a call is ringing (no name).
+        self.render_incoming_call_popup(ctx, &pal);
         if self.render_app_lock(ctx, &pal) {
             return;
         }

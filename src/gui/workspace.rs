@@ -2938,7 +2938,8 @@ impl ZaloGuiApp {
                                         Stroke::new(1.0_f32, pal.border),
                                     );
 
-                                    // Video Call / Zavi SFU Group Call Button
+                                    // Video Call / Zavi SFU Group Call Button (opt-in, Settings)
+                                    if self.settings.video_calls_enabled {
                                     let vid_btn_w = if is_group { 96.0 } else { 34.0 };
                                     let (vid_rect, vid_resp) = ui.allocate_exact_size(
                                         Vec2::new(vid_btn_w, 32.0),
@@ -3045,6 +3046,7 @@ impl ZaloGuiApp {
                                             });
                                         }
                                         }
+                                    }
                                     }
 
                                     // Voice Call Button
@@ -4114,6 +4116,15 @@ impl ZaloGuiApp {
                                                     continue;
                                                 }
                                                 let msg = &thread.messages[idx];
+                                                // A message that is only a phone number shows as a contact card.
+                                                let phone_card_msg = self
+                                                    .phone_cards
+                                                    .card_for(&self.user_uin, msg)
+                                                    .map(|card| ChatMessage {
+                                                        contact_card: Some(card),
+                                                        ..msg.clone()
+                                                    });
+                                                let msg = phone_card_msg.as_ref().unwrap_or(msg);
                                                 let album_len = album_by_head
                                                     .get(&pos)
                                                     .map(|(len, _)| *len)
@@ -4251,6 +4262,14 @@ impl ZaloGuiApp {
                                                         9.0
                                                     });
                                                 });
+                                                // Look up a phone-number card's owner only once its row is on screen.
+                                                if phone_card_msg.is_some() && ui.is_rect_visible(row.response.rect) {
+                                                    self.phone_cards.request(
+                                                        &self.user_uin,
+                                                        &thread.messages[idx],
+                                                        std::time::Instant::now(),
+                                                    );
+                                                }
                                                 // A jump to a hidden album member lands on the album row.
                                                 if jump_index.is_some_and(|j| {
                                                     j == idx
@@ -4354,6 +4373,9 @@ impl ZaloGuiApp {
                     } else if load_older_clicked {
                         self.show_toast("Đang kiểm tra tin nhắn cũ từ máy chủ Zalo…");
                     }
+                    if self.phone_cards.flush(&self.user_uin, std::time::Instant::now()) {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(1500));
+                    }
                     for (idx, action) in pending_poll_fetches.into_iter().chain(pending_action) {
                         let target = self
                             .threads
@@ -4361,6 +4383,7 @@ impl ZaloGuiApp {
                             .and_then(|t| t.messages.get(idx))
                             .cloned();
                         if let Some(m) = target {
+                            let m = self.phone_cards.with_card(&self.user_uin, m);
                             match action {
                                 BubbleAction::FetchPoll { poll_id } => {
                                     self.request_group_poll(&thread_id, &m.id, poll_id, None);
@@ -4515,6 +4538,8 @@ impl ZaloGuiApp {
                                     }
                                 }
                                 BubbleAction::CallAgain { is_video } => {
+                                    // Video calls are opt-in; call back by voice otherwise.
+                                    let is_video = is_video && self.settings.video_calls_enabled;
                                     self.active_call = Some(ActiveCallOverlay {
                                         partner_id: thread_id.clone(),
                                         partner_name: thread_name.clone(),
