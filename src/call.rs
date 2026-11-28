@@ -2911,6 +2911,7 @@ impl CallBridge {
                                     reason: last_err_reason.clone(),
                                 });
                                 let _ = gui_tx_clone.send(GuiEvent::MessageSent {
+                                    text_styles: Vec::new(),
                                     mentions: Vec::new(),
                                     client_message_id: String::new(),
                                     thread_id: partner_id,
@@ -3259,6 +3260,7 @@ impl CallBridge {
                                     let _ = gui_tx_clone
                                         .send(GuiEvent::CallStateChanged("free".into()));
                                     let _ = gui_tx_clone.send(GuiEvent::MessageSent {
+                                        text_styles: Vec::new(),
                                         mentions: Vec::new(),
                                         client_message_id: String::new(),
                                         thread_id: partner_id,
@@ -3590,6 +3592,7 @@ impl CallBridge {
                                     (false, false) => format!("📞 Cuộc gọi đến ({duration_sec}s)"),
                                 };
                                 let _ = gui_tx.send(GuiEvent::MessageSent {
+                                    text_styles: Vec::new(),
                                     mentions: Vec::new(),
                                     client_message_id: String::new(),
                                     thread_id: thread_id.clone(),
@@ -4227,6 +4230,7 @@ impl CallBridge {
                                     });
                                     if let Some(st) = taken {
                                         let _ = gui_tx.send(GuiEvent::MessageSent {
+                                            text_styles: Vec::new(),
                                             mentions: Vec::new(),
                                             client_message_id: String::new(),
                                             thread_id: st.thread_id.clone(),
@@ -4382,6 +4386,7 @@ impl CallBridge {
                                         (false, false, false) => "📞 Cuộc gọi nhỡ".to_string(),
                                     };
                                     let _ = gui_tx.send(GuiEvent::MessageSent {
+                                        text_styles: Vec::new(),
                                         mentions: Vec::new(),
                                         client_message_id: String::new(),
                                         thread_id: st.thread_id.clone(),

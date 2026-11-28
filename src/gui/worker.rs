@@ -502,6 +502,7 @@ pub enum WorkerCmd {
     SendMessage {
         to_id: String,
         text: String,
+        text_styles: Vec<crate::chat::TextStyle>,
         is_group: bool,
         /// Members tagged from the composer (group threads only; ignored for 1-1).
         mentions: Vec<crate::chat::MentionPick>,
@@ -509,6 +510,7 @@ pub enum WorkerCmd {
     SendQuote {
         to_id: String,
         text: String,
+        text_styles: Vec<crate::chat::TextStyle>,
         quoted: ChatMessage,
         is_group: bool,
         /// Members tagged in the reply (group threads only; ignored for 1-1).
@@ -1087,6 +1089,7 @@ pub(super) fn spawn_session_worker(
                                                 thread_id: item.thread_id.clone(),
                                                 text: item.text.clone(),
                                                 msg_id,
+                                                text_styles: Vec::new(),
                                                 mentions: Vec::new(),
                                             });
                                         }
@@ -2794,6 +2797,7 @@ pub(super) fn spawn_session_worker(
                                                                                 thread_id: t.id.clone(),
                                                                                 text: reply_text,
                                                                                 msg_id,
+                                                                                text_styles: Vec::new(),
                                                                                 mentions: Vec::new(),
                                                                             });
                                                                         }
@@ -3047,6 +3051,7 @@ pub(super) fn spawn_session_worker(
                         WorkerCmd::SendMessage {
                             to_id,
                             text,
+                            text_styles,
                             is_group,
                             mentions,
                         } => {
@@ -3060,7 +3065,7 @@ pub(super) fn spawn_session_worker(
                                 // `sendlink` has no verified mention support, so a group text with
                                 // tags goes through `group/mention` (the URL stays plain text).
                                 let has_tags = is_group && !mentions.is_empty();
-                                let link_url = if has_tags {
+                                let link_url = if has_tags || !text_styles.is_empty() {
                                     None
                                 } else {
                                     crate::chat::extract_first_url(&text)
@@ -3141,13 +3146,14 @@ pub(super) fn spawn_session_worker(
                                     }
                                 }
 
+                                let prepared = crate::chat::PreparedText::new(&text, &text_styles);
                                 let res = if is_group {
-                                    crate::chat::send_group_mention_message_with_client_id(
-                                        &s, &to_id, &text, client_id, &mentions,
+                                    crate::chat::send_group_mention_message_prepared(
+                                        &s, &to_id, &prepared, client_id, &mentions,
                                     )
                                     .await
                                 } else {
-                                    crate::chat::send_message_with_client_id(&s, &to_id, &text, client_id).await
+                                    crate::chat::send_message_prepared(&s, &to_id, &prepared, client_id).await
                                 };
                                 match res {
                                     Ok(resp) => {
@@ -3161,6 +3167,7 @@ pub(super) fn spawn_session_worker(
                                             },
                                             thread_id: to_id,
                                             text,
+                                            text_styles,
                                             msg_id,
                                         });
                                         ctx_clone.request_repaint();
@@ -3168,9 +3175,10 @@ pub(super) fn spawn_session_worker(
                                     Err(e) => {
                                         let err_s = e.to_string();
                                         crate::logger::log_error("gui::send_message", &err_s);
-                                        let _ = gui_tx_clone.send(GuiEvent::SendFailed {
+                                        let _ = gui_tx_clone.send(GuiEvent::ComposerSendFailed {
                                             thread_id: to_id,
                                             text,
+                                            text_styles,
                                             error: err_s.clone(),
                                         });
                                         if crate::session::SessionStatus::from_error(&e)
@@ -3198,6 +3206,7 @@ pub(super) fn spawn_session_worker(
                         WorkerCmd::SendQuote {
                             to_id,
                             text,
+                            text_styles,
                             quoted,
                             is_group,
                             mentions,
@@ -3210,8 +3219,9 @@ pub(super) fn spawn_session_worker(
                                 let client_id = crate::chat::next_client_message_id();
                                 let picks: &[crate::chat::MentionPick] =
                                     if is_group { &mentions } else { &[] };
+                                let prepared = crate::chat::PreparedText::new(&text, &text_styles);
                                 match crate::chat::send_quote_message_with_mentions(
-                                    &s, &to_id, &text, &quoted, is_group, client_id, picks)
+                                    &s, &to_id, &prepared, &quoted, is_group, client_id, picks)
                                 .await
                                 {
                                     Ok(resp) => {
@@ -3222,15 +3232,17 @@ pub(super) fn spawn_session_worker(
                                             text,
                                             msg_id: extract_msg_id(&resp),
                                             quoted,
+                                            text_styles,
                                             mentions,
                                         });
                                     }
                                     Err(e) => {
                                         let err_s = e.to_string();
                                         crate::logger::log_error("gui::send_quote", &err_s);
-                                        let _ = gui_tx_clone.send(GuiEvent::SendFailed {
+                                        let _ = gui_tx_clone.send(GuiEvent::ComposerSendFailed {
                                             thread_id: to_id,
                                             text,
+                                            text_styles,
                                             error: err_s,
                                         });
                                     }
@@ -3303,6 +3315,7 @@ pub(super) fn spawn_session_worker(
                                                 thread_id: target_id.clone(),
                                                 text: clean_text.to_string(),
                                                 msg_id,
+                                                text_styles: Vec::new(),
                                                 mentions: Vec::new(),
                                             });
                                         }
@@ -3327,6 +3340,7 @@ pub(super) fn spawn_session_worker(
                                                         thread_id: target_id.clone(),
                                                         text: note,
                                                         msg_id: extract_msg_id(&resp),
+                                                        text_styles: Vec::new(),
                                                         mentions: Vec::new(),
                                                     });
                                                 }

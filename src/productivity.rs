@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub struct Draft {
     pub thread_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_styles: Vec<crate::chat::TextStyle>,
     pub reply: Option<crate::chat::ChatMessage>,
     #[serde(default)]
     pub auto_mention: Option<(String, String)>,
@@ -540,6 +542,11 @@ mod tests {
         let draft = Draft {
             thread_id: "thread-fixture".into(),
             text: "Unsent fixture".into(),
+            text_styles: vec![crate::chat::TextStyle {
+                start: 0,
+                end: 6,
+                format: crate::chat::TextStyleFormat { bold: true, ..Default::default() },
+            }],
             reply: Some(crate::chat::ChatMessage {
                 id: "quoted-fixture".into(),
                 ..Default::default()
@@ -554,6 +561,7 @@ mod tests {
         let reopened = crate::store::MessageStore::open(path.to_str().unwrap()).unwrap();
         let state = snapshot(&reopened.conn).unwrap();
         assert_eq!(state.drafts[0].text, "Unsent fixture");
+        assert!(state.drafts[0].text_styles[0].format.bold);
         assert_eq!(state.drafts[0].reply.as_ref().unwrap().id, "quoted-fixture");
         assert_eq!(
             state.drafts[0].auto_mention.as_ref().unwrap().0,

@@ -24,6 +24,71 @@ impl ContactCard {
     }
 }
 
+pub(crate) const MAX_TEXT_STYLES: usize = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ListKind {
+    Bullet,
+    Numbered,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TextStyleFormat {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub size: Option<u8>,
+    pub color: Option<[u8; 3]>,
+    pub list: Option<ListKind>,
+    pub indent: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TextStyle {
+    /// Half-open byte range in the plain message text.
+    pub start: usize,
+    pub end: usize,
+    #[serde(flatten)]
+    pub format: TextStyleFormat,
+}
+
+impl TextStyle {
+    pub(crate) fn fits(self, text: &str) -> bool {
+        self.start < self.end && text.get(self.start..self.end).is_some()
+    }
+}
+
+impl TextStyleFormat {
+    fn sanitize(&mut self) {
+        self.size = self.size.filter(|size| matches!(size, 13 | 15 | 18 | 20));
+        self.color = self.color.filter(|color| !matches!(color, [0, 0, 0] | [5, 10, 25]));
+        self.indent = self.indent.min(5);
+    }
+
+    pub(crate) fn overlay(&mut self, other: Self) {
+        self.bold |= other.bold;
+        self.italic |= other.italic;
+        self.underline |= other.underline;
+        self.strike |= other.strike;
+        self.size = other.size.or(self.size);
+        self.color = other.color.or(self.color);
+        self.list = other.list.or(self.list);
+        self.indent = self.indent.max(other.indent);
+    }
+}
+
+/// Validate persisted byte ranges before using them in a layout or edit.
+pub(crate) fn validate_text_styles(text: &str, styles: &mut Vec<TextStyle>) {
+    styles.truncate(MAX_TEXT_STYLES);
+    styles.retain_mut(|span| {
+        span.format.sanitize();
+        span.fits(text) && span.format != TextStyleFormat::default()
+    });
+    styles.sort_by_key(|span| span.start);
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     #[serde(default)]
@@ -37,6 +102,8 @@ pub struct ChatMessage {
     pub id: String,
     pub sender: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_styles: Vec<TextStyle>,
     pub time: String,
     pub is_outgoing: bool,
     pub ts: i64,
@@ -104,7 +171,43 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    pub(crate) fn mark_recalled(&mut self) {
+        const PREFIX: &str = "[Đã thu hồi] ";
+        if self.text.starts_with("[Đã thu hồi]") {
+            return;
+        }
+        if self.text.trim().is_empty() {
+            self.text = "[Tin nhắn đã thu hồi]".into();
+            self.text_styles.clear();
+        } else {
+            self.text.insert_str(0, PREFIX);
+            for span in &mut self.text_styles {
+                span.start = span.start.saturating_add(PREFIX.len());
+                span.end = span.end.saturating_add(PREFIX.len());
+            }
+        }
+    }
+
+    /// Formatting offsets belong to the incoming plain text, so merge them together.
+    pub(crate) fn merge_text_styles(&mut self, incoming: &Self) -> bool {
+        if incoming.text_styles.is_empty()
+            || self.text.starts_with("[Đã thu hồi]")
+            || (self.text == incoming.text && self.text_styles == incoming.text_styles)
+        {
+            return false;
+        }
+        self.text.clone_from(&incoming.text);
+        self.text_styles.clone_from(&incoming.text_styles);
+        true
+    }
+
     pub fn merge_message_metadata(&mut self, incoming: &Self) -> bool {
+        let same_text = self.text == incoming.text;
+        let styles_changed = self.merge_text_styles(incoming);
+        // Cached Markdown and the native echo can have different mention offsets.
+        if styles_changed && !same_text {
+            self.wire_ref.fields.remove("mentions");
+        }
         let previous_mentions = self.resolved_mention_uids.clone();
         self.resolved_mention_uids
             .extend(incoming.resolved_mention_uids.clone());
@@ -121,7 +224,11 @@ impl ChatMessage {
         }
         if !incoming.wire_ref.fields.is_empty() {
             let mut fields = self.wire_ref.fields.clone();
-            fields.extend(incoming.wire_ref.fields.clone());
+            fields.extend(incoming.wire_ref.fields.iter()
+                .filter(|(key, _)| {
+                    key.as_str() != "mentions" || self.text_styles.is_empty() || self.text == incoming.text
+                })
+                .map(|(key, value)| (key.clone(), value.clone())));
             self.wire_ref = crate::message_model::WireMessageRef::from_raw(&Value::Object(
                 fields.into_iter().collect(),
             ));
@@ -149,7 +256,8 @@ impl ChatMessage {
             }
         }
         self.delivery = self.delivery.merge(incoming.delivery);
-        poll_changed
+        styles_changed
+            || poll_changed
             || contact_changed
             || previous_mentions != self.resolved_mention_uids
             || before
@@ -1098,14 +1206,7 @@ pub fn merge_thread_into(
                 existing_msg.time = msg.time;
             }
             if msg.text.trim() == "[Tin nhắn đã thu hồi]" {
-                if !existing_msg.text.starts_with("[Đã thu hồi]") {
-                    if existing_msg.text.trim().is_empty() {
-                        existing_msg.text = "[Tin nhắn đã thu hồi]".to_string();
-                    } else {
-                        existing_msg.text = format!("[Đã thu hồi] {}", existing_msg.text);
-                    }
-                }
-                // Anti-recall: Retain sticker, link_url, link_thumb so user can still view recalled photos & media!
+                existing_msg.mark_recalled();
             }
             if existing_msg.sticker_id.is_none() && msg.sticker_id.is_some() {
                 existing_msg.sticker_id = msg.sticker_id;
@@ -1123,7 +1224,7 @@ pub fn merge_thread_into(
                 existing_msg.link_desc = msg.link_desc;
                 existing_msg.link_thumb = msg.link_thumb;
                 existing_msg.link_src = msg.link_src;
-                if !msg.text.is_empty() {
+                if !msg.text.is_empty() && existing_msg.text_styles.is_empty() {
                     existing_msg.text = msg.text;
                 }
             }
@@ -1597,71 +1698,171 @@ pub fn extract_zalo_rtf_text_properties(raw: &str) -> (String, Option<String>) {
     }
 }
 
-/// Reconstruct Markdown markers from Zalo's incoming `rtf` object (`{"action":"rtf","title":...,"params":"{\"styles\":[...]}"}`)
-/// so incoming rich-text messages sent from official Zalo PC / Mobile render with bold, underline, strikethrough, and lists.
-fn format_incoming_zalo_rtf(title: &str, params_str: &str) -> String {
-    let Ok(p_val) = serde_json::from_str::<Value>(params_str.trim()) else {
-        return title.to_string();
+/// Decode the format documented in re-notes/53_rich_text_styles.md. A boundary inside a
+/// surrogate pair has no byte equivalent and invalidates the span.
+fn parse_text_properties(text: &str, properties: &Value) -> Vec<TextStyle> {
+    let parsed;
+    let properties = if let Some(raw) = properties.as_str() {
+        let Ok(value) = serde_json::from_str::<Value>(raw) else {
+            return Vec::new();
+        };
+        parsed = value;
+        &parsed
+    } else {
+        properties
     };
-    let Some(styles) = p_val.get("styles").and_then(Value::as_array) else {
-        return title.to_string();
+    let Some(styles) = properties.get("styles").and_then(Value::as_array) else {
+        return Vec::new();
     };
-    if styles.is_empty() {
-        return title.to_string();
-    }
-    let u16_units: Vec<u16> = title.encode_utf16().collect();
-    let mut spans: Vec<(usize, usize, String)> = styles
-        .iter()
-        .filter_map(|s| {
-            let start = s.get("start")?.as_u64()? as usize;
-            let len = s.get("len")?.as_u64()? as usize;
-            let st = s.get("st")?.as_str()?.to_string();
-            if len > 0 && start + len <= u16_units.len() {
-                Some((start, start + len, st))
-            } else {
-                None
+    let mut wire_spans = Vec::new();
+    let mut boundaries = std::collections::BTreeMap::new();
+    for span in styles.iter().take(MAX_TEXT_STYLES) {
+        let Some(start) = span["start"].as_u64().and_then(|n| usize::try_from(n).ok()) else {
+            continue;
+        };
+        let Some(len) = span["len"].as_u64().and_then(|n| usize::try_from(n).ok()) else {
+            continue;
+        };
+        let Some(end) = start.checked_add(len).filter(|&end| end > start && end <= text.len()) else {
+            continue;
+        };
+        let Some(tokens) = span["st"].as_str() else {
+            continue;
+        };
+        let mut format = TextStyleFormat::default();
+        for token in tokens.split(',') {
+            match token {
+                "b" => format.bold = true,
+                "i" => format.italic = true,
+                "u" => format.underline = true,
+                "s" => format.strike = true,
+                "f_13" => format.size = Some(13),
+                "f_15" => format.size = Some(15),
+                "f_18" => format.size = Some(18),
+                "f_20" => format.size = Some(20),
+                "lst_1" => format.list = Some(ListKind::Bullet),
+                "lst_2" => format.list = Some(ListKind::Numbered),
+                "ind_10" => format.indent = 1,
+                "ind_20" => format.indent = 2,
+                "ind_30" => format.indent = 3,
+                "ind_40" => format.indent = 4,
+                "ind_50" => format.indent = 5,
+                _ => {
+                    if let Some(hex) = token.strip_prefix("c_").filter(|hex| {
+                        hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+                    }) {
+                        if let Ok(rgb) = u32::from_str_radix(hex, 16) {
+                            format.color = Some([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+                        }
+                    }
+                }
             }
-        })
-        .collect();
-    if spans.is_empty() {
-        return title.to_string();
+        }
+        format.sanitize();
+        if format != TextStyleFormat::default() {
+            boundaries.insert(start, None);
+            boundaries.insert(end, None);
+            wire_spans.push((start, end, format));
+        }
     }
-    spans.sort_by_key(|x| x.0);
-    let mut out = String::with_capacity(title.len() + spans.len() * 4);
-    let mut cursor = 0usize;
-    for (s, e, st) in spans {
-        if s < cursor {
+    let mut chars = text.char_indices();
+    let mut next_boundary = (0, 0);
+    for (&target, byte) in &mut boundaries {
+        while next_boundary.0 < target {
+            let Some((index, ch)) = chars.next() else {
+                break;
+            };
+            next_boundary.0 += ch.len_utf16();
+            next_boundary.1 = index + ch.len_utf8();
+        }
+        if next_boundary.0 == target {
+            *byte = Some(next_boundary.1);
+        }
+    }
+    let mut result: Vec<_> = wire_spans.into_iter().filter_map(|(start, end, format)| {
+        Some(TextStyle {
+            start: (*boundaries.get(&start)?)?,
+            end: (*boundaries.get(&end)?)?,
+            format,
+        })
+    }).collect();
+    result.sort_by_key(|span| span.start);
+    result
+}
+
+fn text_style_tokens(mut format: TextStyleFormat) -> String {
+    format.sanitize();
+    let mut tokens = Vec::new();
+    for (enabled, token) in [
+        (format.bold, "b"), (format.italic, "i"),
+        (format.underline, "u"), (format.strike, "s"),
+    ] {
+        if enabled {
+            tokens.push(token.to_owned());
+        }
+    }
+    if let Some(size) = format.size.filter(|&size| size != 15) {
+        tokens.push(format!("f_{size}"));
+    }
+    if let Some([r, g, b]) = format.color {
+        tokens.push(format!("c_{r:02x}{g:02x}{b:02x}"));
+    }
+    if let Some(list) = format.list {
+        tokens.push(match list { ListKind::Bullet => "lst_1", ListKind::Numbered => "lst_2" }.into());
+    }
+    if format.indent > 0 {
+        tokens.push(format!("ind_{}", format.indent * 10));
+    }
+    tokens.join(",")
+}
+
+fn build_zalo_text_properties(text: &str, styles: &[TextStyle]) -> Option<String> {
+    let mut merged: Vec<(usize, usize, String)> = Vec::new();
+    for span in styles.iter().copied().filter(|span| span.fits(text)) {
+        let tokens = text_style_tokens(span.format);
+        if tokens.is_empty() {
             continue;
         }
-        if s > cursor {
-            out.push_str(&String::from_utf16_lossy(&u16_units[cursor..s]));
+        if let Some(last) = merged.last_mut().filter(|last| last.1 == span.start && last.2 == tokens) {
+            last.1 = span.end;
+        } else {
+            merged.push((span.start, span.end, tokens));
         }
-        let seg = String::from_utf16_lossy(&u16_units[s..e]);
-        let tags: Vec<&str> = st.split(',').collect();
-        let is_bold = tags.contains(&"b") || tags.iter().any(|t| t.starts_with("f_"));
-        let is_italic = tags.contains(&"i");
-        let is_under = tags.contains(&"u");
-        let is_strike = tags.contains(&"s");
-        let mut wrapped = seg;
-        if is_italic && !is_bold {
-            wrapped = format!("*{wrapped}*");
-        }
-        if is_bold {
-            wrapped = format!("**{wrapped}**");
-        }
-        if is_under {
-            wrapped = format!("__{wrapped}__");
-        }
-        if is_strike {
-            wrapped = format!("~~{wrapped}~~");
-        }
-        out.push_str(&wrapped);
-        cursor = e;
     }
-    if cursor < u16_units.len() {
-        out.push_str(&String::from_utf16_lossy(&u16_units[cursor..]));
+    let mut previous = (0, 0);
+    let styles: Vec<_> = merged.into_iter().map(|(start, end, st)| {
+        let start_u16 = if start >= previous.0 {
+            previous.1 + text[previous.0..start].encode_utf16().count()
+        } else {
+            text[..start].encode_utf16().count()
+        };
+        let len = text[start..end].encode_utf16().count();
+        previous = (start, start_u16);
+        json!({"start": start_u16, "len": len, "st": st})
+    }).collect();
+    (!styles.is_empty()).then(|| json!({"styles": styles, "ver": 0}).to_string())
+}
+
+pub(crate) struct PreparedText {
+    pub text: String,
+    properties: Option<String>,
+}
+
+impl PreparedText {
+    pub(crate) fn new(text: &str, styles: &[TextStyle]) -> Self {
+        let (text, properties) = if styles.is_empty() {
+            extract_zalo_rtf_text_properties(text)
+        } else {
+            (text.to_owned(), build_zalo_text_properties(text, styles))
+        };
+        Self { text, properties }
     }
-    out
+
+    fn insert_properties(&self, body: &mut Value) {
+        if let (Some(tp), Some(map)) = (&self.properties, body.as_object_mut()) {
+            map.insert("textProperties".into(), json!(tp));
+        }
+    }
 }
 
 /// Send a 1-1 text message: `POST {domains.chat}/api/message/sms?{common}`
@@ -1676,19 +1877,25 @@ pub(crate) async fn send_message_with_client_id(
     text: &str,
     now: u64,
 ) -> Result<Value> {
+    send_message_prepared(s, to_id, &PreparedText::new(text, &[]), now).await
+}
+
+pub(crate) async fn send_message_prepared(
+    s: &Session,
+    to_id: &str,
+    text: &PreparedText,
+    now: u64,
+) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
     let mut body = obj(&[
         ("toid", json!(to_id)),
-        ("message", json!(clean_text)),
+        ("message", json!(text.text)),
         ("clientId", json!(now)),
         ("imei", json!(s.imei)),
     ]);
-    if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
-        map.insert("textProperties".into(), json!(tp));
-    }
+    text.insert_properties(&mut body);
     let params = s.encoded_params(&body)?;
 
     let host = if s.domains.chat.contains("-msg-chat.")
@@ -1728,6 +1935,15 @@ pub(crate) async fn send_group_message_with_client_id(
     text: &str,
     now: u64,
 ) -> Result<Value> {
+    send_group_message_prepared(s, grid, &PreparedText::new(text, &[]), now).await
+}
+
+pub(crate) async fn send_group_message_prepared(
+    s: &Session,
+    grid: &str,
+    text: &PreparedText,
+    now: u64,
+) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
@@ -1735,17 +1951,14 @@ pub(crate) async fn send_group_message_with_client_id(
         .trim_start_matches("group_")
         .trim_start_matches('g')
         .trim_start_matches('G');
-    let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
     let mut body = obj(&[
         ("grid", json!(clean_grid)),
-        ("message", json!(clean_text)),
+        ("message", json!(text.text)),
         ("clientId", json!(now)),
         ("imei", json!(s.imei)),
         ("visibility", json!(0)),
     ]);
-    if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
-        map.insert("textProperties".into(), json!(tp));
-    }
+    text.insert_properties(&mut body);
     let params = s.encoded_params(&body)?;
     let url = format!(
         "{}/api/group/sendmsg?{}",
@@ -1824,20 +2037,19 @@ pub fn build_mention_info(text: &str, picks: &[MentionPick]) -> Vec<Value> {
 /// Without any resolvable tag this is exactly `send_group_message_with_client_id`. If the
 /// mention endpoint rejects the request (anything but an expired session), the text is resent
 /// through `sendmsg` so the message is not lost, just untagged.
-pub(crate) async fn send_group_mention_message_with_client_id(
+pub(crate) async fn send_group_mention_message_prepared(
     s: &Session,
     grid: &str,
-    text: &str,
+    text: &PreparedText,
     now: u64,
     picks: &[MentionPick],
 ) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
-    let mentions = build_mention_info(&clean_text, picks);
+    let mentions = build_mention_info(&text.text, picks);
     if mentions.is_empty() {
-        return send_group_message_with_client_id(s, grid, text, now).await;
+        return send_group_message_prepared(s, grid, text, now).await;
     }
     let clean_grid = grid
         .trim_start_matches("group_")
@@ -1845,16 +2057,14 @@ pub(crate) async fn send_group_mention_message_with_client_id(
         .trim_start_matches('G');
     let mut body = obj(&[
         ("grid", json!(clean_grid)),
-        ("message", json!(clean_text)),
+        ("message", json!(text.text)),
         ("mentionInfo", json!(Value::Array(mentions).to_string())),
         ("clientId", json!(now)),
         ("imei", json!(s.imei)),
         ("ttl", json!(0)),
         ("visibility", json!(0)),
     ]);
-    if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
-        map.insert("textProperties".into(), json!(tp));
-    }
+    text.insert_properties(&mut body);
     let attempt: Result<Value> = async {
         let params = s.encoded_params(&body)?;
         let url = format!(
@@ -1886,7 +2096,7 @@ pub(crate) async fn send_group_mention_message_with_client_id(
         }
         Err(e) => {
             crate::logger::log_error("chat::send_group_mention", &e.to_string());
-            send_group_message_with_client_id(s, grid, text, now).await
+            send_group_message_prepared(s, grid, text, now).await
         }
     }
 }
@@ -3984,7 +4194,7 @@ pub(crate) async fn send_quote_message_with_client_id(
     is_group: bool,
     now: u64,
 ) -> Result<Value> {
-    send_quote_message_with_mentions(s, to_id, text, quoted, is_group, now, &[]).await
+    send_quote_message_with_mentions(s, to_id, &PreparedText::new(text, &[]), quoted, is_group, now, &[]).await
 }
 
 /// Quote reply that may also tag group members.
@@ -3995,7 +4205,7 @@ pub(crate) async fn send_quote_message_with_client_id(
 pub(crate) async fn send_quote_message_with_mentions(
     s: &Session,
     to_id: &str,
-    text: &str,
+    text: &PreparedText,
     quoted: &ChatMessage,
     is_group: bool,
     now: u64,
@@ -4046,10 +4256,9 @@ pub(crate) async fn send_quote_message_with_mentions(
                 .trim_start_matches("group_")
                 .trim_start_matches('g')
                 .trim_start_matches('G');
-            let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
             let mut body = obj(&[
                 ("grid", json!(clean_grid)),
-                ("message", json!(clean_text)),
+                ("message", json!(text.text)),
                 ("clientId", json!(now)),
                 ("language", json!("vi")),
                 ("qmsgOwner", json!(qmsg_owner)),
@@ -4063,11 +4272,9 @@ pub(crate) async fn send_quote_message_with_mentions(
                 ("imei", json!(s.imei)),
                 ("zsource", json!(101)),
             ]);
-            let mentions = build_mention_info(&clean_text, picks);
+            let mentions = build_mention_info(&text.text, picks);
+            text.insert_properties(&mut body);
             if let Some(map) = body.as_object_mut() {
-                if let Some(tp) = text_props_opt {
-                    map.insert("textProperties".into(), json!(tp));
-                }
                 if !mentions.is_empty() {
                     map.insert(
                         "mentionInfo".into(),
@@ -4094,10 +4301,9 @@ pub(crate) async fn send_quote_message_with_mentions(
             } else {
                 &s.domains.chat
             };
-            let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
             let mut body = obj(&[
                 ("toid", json!(to_id)),
-                ("message", json!(clean_text)),
+                ("message", json!(text.text)),
                 ("clientId", json!(now)),
                 ("qmsgOwner", json!(qmsg_owner)),
                 ("qmsgId", json!(qmsg_id_num)),
@@ -4109,9 +4315,7 @@ pub(crate) async fn send_quote_message_with_mentions(
                 ("ttl", json!(0)),
                 ("zsource", json!(101)),
             ]);
-            if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
-                map.insert("textProperties".into(), json!(tp));
-            }
+            text.insert_properties(&mut body);
             let params = s.encoded_params(&body)?;
             let url = format!("{host}/api/message/quote?{}", s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
@@ -4132,9 +4336,9 @@ pub(crate) async fn send_quote_message_with_mentions(
             // The plain-text fallback hides why a reply was not threaded, so keep the reason.
             crate::logger::log_error("chat::send_quote_message", &e.to_string());
             if is_group {
-                send_group_mention_message_with_client_id(s, to_id, text, now, picks).await
+                send_group_mention_message_prepared(s, to_id, text, now, picks).await
             } else {
-                send_message_with_client_id(s, to_id, text, now).await
+                send_message_prepared(s, to_id, text, now).await
             }
         }
     }
@@ -5726,9 +5930,6 @@ fn extract_content_text(v: &Value) -> Option<String> {
                 });
             if o.get("action").and_then(Value::as_str) == Some("rtf") {
                 if let Some(title) = o.get("title").and_then(Value::as_str) {
-                    if let Some(params_s) = o.get("params").and_then(Value::as_str) {
-                        return Some(format_incoming_zalo_rtf(title, params_s));
-                    }
                     return Some(title.to_string());
                 }
             }
@@ -6317,14 +6518,33 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         })
         .or_else(|| it.get("msg"));
 
-    let poll_content_json = if is_poll {
-        raw_content_val
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-    } else {
-        None
-    };
-    let poll_content = poll_content_json.as_ref().or(raw_content_val);
+    let content_json = raw_content_val
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| text.starts_with('{') && text.ends_with('}'))
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let content_value = content_json.as_ref().or(raw_content_val);
+    let rtf_content = content_value.filter(|value| value["action"].as_str() == Some("rtf"));
+    let text_properties = rtf_content
+        .and_then(|value| value.get("params"))
+        .or_else(|| content_value.and_then(|value| value.get("textProperties")))
+        .or_else(|| it.get("textProperties"))
+        .or_else(|| it.get("message")?.get("textProperties"))
+        .filter(|properties| {
+            properties.get("styles").is_some()
+                || properties.as_str().is_some_and(|raw| raw.trim_start().starts_with('{'))
+        });
+    let formatted_text = rtf_content
+        .and_then(|value| value["title"].as_str())
+        .or_else(|| {
+            text_properties?;
+            let content = raw_content_val?;
+            content.as_str()
+                .or_else(|| content["message"].as_str())
+                .or_else(|| content["text"].as_str())
+        });
+
+    let poll_content = content_value;
     let poll_id = if is_poll {
         poll_content.and_then(crate::poll::poll_id_from_message)
     } else {
@@ -6335,8 +6555,8 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else {
         None
     };
-    // Polls and contact cards are not link/media content.
-    let media_content = raw_content_val.filter(|_| !is_poll && contact_card.is_none());
+    let media_content = content_value
+        .filter(|_| !is_poll && contact_card.is_none() && formatted_text.is_none());
     let mut sticker_meta = media_content.and_then(extract_sticker_info);
     if sticker_meta.is_none()
         && (msg_type == "chat.sticker" || msg_type == "sticker" || msg_type == "5")
@@ -6358,7 +6578,8 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         contact_card
             .as_ref()
             .map(ContactCard::summary)
-            .or_else(|| raw_content_val.and_then(extract_content_text))
+            .or_else(|| formatted_text.map(str::to_owned))
+            .or_else(|| content_value.and_then(extract_content_text))
             .unwrap_or_default()
     };
 
@@ -6448,7 +6669,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else if sticker_meta.is_some() && (content.is_empty() || content.starts_with('{')) {
         content = "[Nhãn dán]".to_string();
     }
-    if !is_poll && sticker_meta.is_none() && contact_card.is_none() {
+    if !is_poll && sticker_meta.is_none() && contact_card.is_none() && formatted_text.is_none() {
         let parse_ami = |s: &str| -> Option<(u64, u64, u32)> {
             let pos = s.find("ami_fat_cat_")?;
             let num_str = s.get(pos + 12..pos + 14)?;
@@ -6659,7 +6880,12 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else {
         None
     };
+    let text_styles = text_properties
+        .filter(|_| !is_poll && !is_undo_type && !is_voice_msg && !is_photo_msg
+            && !is_file_msg && !is_video_msg && sticker_meta.is_none() && contact_card.is_none())
+        .map_or_else(Vec::new, |props| parse_text_properties(&content, props));
     Some(ChatMessage {
+        text_styles,
         kind: if is_voice_msg {
             crate::message_model::MessageKind::Voice
         } else {
@@ -6976,13 +7202,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                         existing.time = parsed.time;
                     }
                     if parsed.text.trim() == "[Tin nhắn đã thu hồi]" {
-                        if !existing.text.starts_with("[Đã thu hồi]") {
-                            if existing.text.trim().is_empty() {
-                                existing.text = "[Tin nhắn đã thu hồi]".to_string();
-                            } else {
-                                existing.text = format!("[Đã thu hồi] {}", existing.text);
-                            }
-                        }
+                        existing.mark_recalled();
                     }
                     if existing.sticker_id.is_none() && parsed.sticker_id.is_some() {
                         existing.sticker_id = parsed.sticker_id;
@@ -7000,7 +7220,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                         existing.link_desc = parsed.link_desc;
                         existing.link_thumb = parsed.link_thumb;
                         existing.link_src = parsed.link_src;
-                        if !parsed.text.is_empty() {
+                        if !parsed.text.is_empty() && existing.text_styles.is_empty() {
                             existing.text = parsed.text;
                         }
                     }
@@ -7134,7 +7354,7 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
                     existing.link_desc = m.link_desc;
                     existing.link_thumb = m.link_thumb;
                     existing.link_src = m.link_src;
-                    if !m.text.is_empty() {
+                    if !m.text.is_empty() && existing.text_styles.is_empty() {
                         existing.text = m.text;
                     }
                 }
@@ -10719,6 +10939,103 @@ mod send_identity_tests {
     }
 
     #[test]
+    fn rich_text_wire_round_trip_uses_utf16_and_preserves_plain_text() {
+        let text = "ế😀 Chào\nHai";
+        let properties = json!({"styles": [
+            {"start": 1, "len": 2, "st": "b,i,u,s,f_13,c_DB342E,lst_1,ind_50"},
+            {"start": 4, "len": 4, "st": "f_18,c_f27806,lst_2,ind_10"},
+            {"start": 9, "len": 3, "st": "f_20,c_15a85f"}
+        ], "ver": 0});
+        let incoming = parse_chat_message(&json!({
+            "msgId": "fixture",
+            "msgType": "chat.text",
+            "content": {"action": "rtf", "title": text, "params": properties.to_string()}
+        })).unwrap();
+        assert_eq!(incoming.text, text);
+        assert_eq!(&text[incoming.text_styles[0].start..incoming.text_styles[0].end], "😀");
+        let prepared = PreparedText::new(&incoming.text, &incoming.text_styles);
+        assert_eq!(prepared.text, text);
+        let encoded: Value = serde_json::from_str(&prepared.properties.unwrap()).unwrap();
+        assert_eq!(encoded["styles"][0]["st"], "b,i,u,s,f_13,c_db342e,lst_1,ind_50");
+        assert_eq!(encoded["styles"][0]["len"], 2);
+        assert_eq!(&encoded["styles"].as_array().unwrap()[1..], &properties["styles"].as_array().unwrap()[1..]);
+        let mut cached = ChatMessage { text: "old Markdown".into(), ..Default::default() };
+        assert!(cached.merge_message_metadata(&incoming));
+        assert_eq!(cached.text, text);
+        assert_eq!(cached.text_styles, incoming.text_styles);
+    }
+
+    #[test]
+    fn rich_text_drops_bad_offsets_and_omits_default_tokens() {
+        let text = "😀**a**z";
+        let props = json!({"styles": [
+            {"start": 1, "len": 1, "st": "i"},
+            {"start": 0, "len": 1, "st": "i"},
+            {"start": 2, "len": u64::MAX, "st": "i"},
+            {"start": 999, "len": 1, "st": "i"},
+            {"start": 2, "len": 1, "st": "b,f_15,c_050a19"},
+            {"start": 3, "len": 1, "st": "b,f_16,c_000000"},
+            {"start": 4, "len": 1, "st": "b,c_+ab123,ind_15"},
+            {"start": 5, "len": 1, "st": "f_12,c_café1,lst_3,ind_60"}
+        ]});
+        let spans = parse_text_properties(text, &props);
+        assert_eq!(spans.len(), 3);
+        let prepared = PreparedText::new(text, &spans);
+        assert_eq!(prepared.text, text);
+        assert_eq!(
+            serde_json::from_str::<Value>(&prepared.properties.unwrap()).unwrap(),
+            json!({"styles": [{"start": 2, "len": 3, "st": "b"}], "ver": 0})
+        );
+        assert_eq!(PreparedText::new("**a**", &[]).text, "a");
+    }
+
+    #[test]
+    fn rich_text_envelope_keeps_literal_json_and_mention_offsets() {
+        let text = r#"{"text":"😀 @An"}"#;
+        let mut props = json!({"styles": [{"start": 0, "len": 1, "st": "i,c_f7b503,ind_40"}]});
+        let wire = json!({"msgId": "fixture", "message": text, "textProperties": props});
+        let incoming = parse_chat_message(&wire).unwrap();
+        assert_eq!(incoming.text, text);
+
+        let prepared = PreparedText::new(&incoming.text, &incoming.text_styles);
+        let mut payload = json!({"message": prepared.text});
+        prepared.insert_properties(&mut payload);
+        props["ver"] = json!(0);
+        assert_eq!(payload["message"], text);
+        assert_eq!(serde_json::from_str::<Value>(payload["textProperties"].as_str().unwrap()).unwrap(), props);
+        assert_eq!(build_mention_info(&prepared.text, &[MentionPick {
+            uid: "123".into(),
+            name: "An".into(),
+        }]), [json!({"pos": 12, "len": 3, "type": 0, "uid": "123"})]);
+    }
+
+    #[test]
+    fn null_text_properties_preserves_legacy_sticker_parsing() {
+        let msg = parse_chat_message(&json!({
+            "msgId": "fixture",
+            "msgType": "chat.sticker",
+            "content": r#"{"id":42,"catId":11}"#,
+            "textProperties": null,
+        })).unwrap();
+        assert_eq!(msg.sticker_id, Some(42));
+        assert_eq!(msg.sticker_cate_id, Some(11));
+        assert_eq!(msg.text, "[Nhãn dán]");
+    }
+
+    #[test]
+    fn rich_text_caps_received_spans() {
+        let spans: Vec<_> = (0..501)
+            .map(|start| json!({"start": start, "len": 1, "st": "b"}))
+            .collect();
+        let text = "x".repeat(501);
+        let msg = parse_chat_message(&json!({
+            "msgId": "fixture",
+            "message": {"content": text, "textProperties": {"styles": spans}}
+        })).unwrap();
+        assert_eq!(msg.text_styles.len(), 500);
+    }
+
+    #[test]
     fn merge_message_metadata_keeps_size_until_incoming_supplies_one() {
         let mut existing = ChatMessage {
             media_size: Some((1280, 960)),
@@ -11260,7 +11577,7 @@ mod ai_guard_tests {
             ..Default::default()
         };
         let session = Session::new(false, false, false).unwrap();
-        let err = send_quote_message_with_mentions(&session, "1", "hi", &quoted, false, 1, &[])
+        let err = send_quote_message_with_mentions(&session, "1", &PreparedText::new("hi", &[]), &quoted, false, 1, &[])
             .await
             .unwrap_err();
         assert!(err.to_string().contains("AI"), "{err}");

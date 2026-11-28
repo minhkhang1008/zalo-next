@@ -46,6 +46,7 @@ mod picker;
 mod poll_card;
 mod productivity;
 mod reactions_dialog;
+mod rich_composer;
 mod stickers;
 mod theme;
 mod tray;
@@ -212,6 +213,7 @@ pub enum GuiEvent {
         client_message_id: String,
         thread_id: String,
         text: String,
+        text_styles: Vec<crate::chat::TextStyle>,
         msg_id: String,
         /// `mentionInfo` entries sent with the text, so our own bubble highlights the tags.
         mentions: Vec<serde_json::Value>,
@@ -300,6 +302,7 @@ pub enum GuiEvent {
         client_message_id: String,
         thread_id: String,
         text: String,
+        text_styles: Vec<crate::chat::TextStyle>,
         msg_id: String,
         quoted: ChatMessage,
         /// `mentionInfo` entries sent with the reply, kept so our own bubble shows the tags.
@@ -337,6 +340,12 @@ pub enum GuiEvent {
     SendFailed {
         thread_id: String,
         text: String,
+        error: String,
+    },
+    ComposerSendFailed {
+        thread_id: String,
+        text: String,
+        text_styles: Vec<crate::chat::TextStyle>,
         error: String,
     },
     SessionExpired(String),
@@ -1038,6 +1047,7 @@ pub struct ZaloGuiApp {
     thread_filter: ThreadFilter,
     search_query: String,
     input_message: String,
+    rich_composer: rich_composer::RichComposer,
     status_msg: String,
 
     // Reply / forward state
@@ -1497,6 +1507,7 @@ impl ZaloGuiApp {
             thread_filter: ThreadFilter::All,
             search_query: String::new(),
             input_message: String::new(),
+            rich_composer: rich_composer::RichComposer::default(),
             replying_to: None,
             forward_msg: None,
             forward_filter: String::new(),
@@ -2249,6 +2260,7 @@ impl ZaloGuiApp {
                     client_message_id,
                     thread_id,
                     text,
+                    text_styles,
                     msg_id,
                     mentions,
                 } => {
@@ -2266,6 +2278,7 @@ impl ZaloGuiApp {
                             client_message_id,
                             sender: "Tôi".into(),
                             text,
+                            text_styles,
                             time: now,
                             is_outgoing: true,
                             ts: (crate::login::unix_now() * 1000) as i64,
@@ -2397,6 +2410,7 @@ impl ZaloGuiApp {
                     client_message_id,
                     thread_id,
                     text,
+                    text_styles,
                     msg_id,
                     quoted,
                     mentions,
@@ -2415,6 +2429,7 @@ impl ZaloGuiApp {
                             client_message_id,
                             sender: "Tôi".into(),
                             text,
+                            text_styles,
                             time: now,
                             is_outgoing: true,
                             ts: (crate::login::unix_now() * 1000) as i64,
@@ -2487,13 +2502,7 @@ impl ZaloGuiApp {
                             (!msg_id.is_empty() && m.id == msg_id)
                                 || (msg_id.is_empty() && m.ts == ts)
                         }) {
-                            if !m.text.starts_with("[Đã thu hồi]") {
-                                if m.text.trim().is_empty() {
-                                    m.text = "[Tin nhắn đã thu hồi]".into();
-                                } else {
-                                    m.text = format!("[Đã thu hồi] {}", m.text);
-                                }
-                            }
+                            m.mark_recalled();
                             // Anti-recall: Preserve sticker_id, link_url, link_thumb so user can still see media!
                         }
                         if let Some(last) = t.messages.last() {
@@ -2886,6 +2895,15 @@ impl ZaloGuiApp {
                     error,
                 } => {
                     if self.input_message.is_empty() && !text.is_empty() {
+                        self.input_message = text;
+                    }
+                    self.status_msg = format!("Không gửi được: {error}");
+                }
+                GuiEvent::ComposerSendFailed { thread_id, text, text_styles, error } => {
+                    if self.input_message.is_empty()
+                        && self.threads.get(self.selected_thread_index).is_some_and(|t| t.id == thread_id)
+                    {
+                        self.rich_composer.restore(&text, text_styles);
                         self.input_message = text;
                     }
                     self.status_msg = format!("Không gửi được: {error}");
