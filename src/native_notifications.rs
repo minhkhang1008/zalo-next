@@ -14,6 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const MAX_TITLE_CHARS: usize = 120;
 /// Longest notification body forwarded to the OS, in characters.
 const MAX_BODY_CHARS: usize = 240;
+const LOCKED_BODY: &str = "Bạn có thông báo mới";
 /// Deadline for a single delivery attempt.
 const NOTIFY_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -113,18 +114,18 @@ async fn spawn_helper(
     path: &Path,
     command: &str,
 ) -> Result<tokio::process::Child, NotificationError> {
-    spawn_with(path, &[command], false).await
+    spawn_with(path, || [command], false).await
 }
 #[cfg(not(windows))]
-async fn spawn_with(
+async fn spawn_with<'a, Args: IntoIterator<Item = &'a str>>(
     path: &Path,
-    args: &[&str],
+    args: impl Fn() -> Args,
     piped_stdin: bool,
 ) -> Result<tokio::process::Child, NotificationError> {
     let mut attempt = 0;
     loop {
         match tokio::process::Command::new(path)
-            .args(args)
+            .args(args())
             .stdin(if piped_stdin {
                 Stdio::piped()
             } else {
@@ -341,15 +342,15 @@ async fn run_helper_delivery(
     body: &str,
     attachment: Option<&Path>,
 ) -> Result<(), NotificationError> {
-    let child = spawn_with(path, &[mode], true).await?;
-    parse_delivery(
-        &collect_output(
-            child,
-            Some(helper_payload(title, body, attachment)),
-            NOTIFY_DEADLINE,
-        )
-        .await?,
-    )
+    let child = spawn_with(path, || [mode], true).await?;
+    let payload = helper_payload(title, body, attachment);
+    // Spawning can retry. Check again before sending any content through the child's stdin.
+    let payload = if crate::app_lock::is_locked() {
+        helper_payload(crate::APP_DISPLAY_NAME, LOCKED_BODY, None)
+    } else {
+        payload
+    };
+    parse_delivery(&collect_output(child, Some(payload), NOTIFY_DEADLINE).await?)
 }
 /// AppleScript that reads title and body from `argv`, so message text is never parsed as code.
 #[cfg(any(not(windows), test))]
@@ -373,7 +374,10 @@ fn osascript_args<'a>(title: &'a str, body: &'a str) -> Vec<&'a str> {
 async fn notify_via_osascript(title: &str, body: &str) -> Result<(), NotificationError> {
     let child = spawn_with(
         Path::new("/usr/bin/osascript"),
-        &osascript_args(title, body),
+        || {
+            let (title, body, _) = locked_content(title, body, None);
+            osascript_args(title, body)
+        },
         false,
     )
     .await?;
@@ -394,13 +398,14 @@ pub async fn notify(title: &str, body: &str) -> Result<(), NotificationError> {
 }
 
 /// The notification content allowed while App Lock is on: a fixed text and no attachment.
+/// Alerts already shown before locking stay under OS control.
 fn locked_content<'a>(
     title: &'a str,
     body: &'a str,
     attachment: Option<&'a Path>,
 ) -> (&'a str, &'a str, Option<&'a Path>) {
     if crate::app_lock::is_locked() {
-        (crate::APP_DISPLAY_NAME, "Bạn có thông báo mới", None)
+        (crate::APP_DISPLAY_NAME, LOCKED_BODY, None)
     } else {
         (title, body, attachment)
     }
@@ -505,7 +510,7 @@ fn windows_authorization_status(setting: Option<i32>) -> AuthorizationStatus {
 mod windows_toast {
     use super::{
         local_attachment_uri, windows_authorization_status, windows_toast_template,
-        AuthorizationStatus, NotificationError, NOTIFY_DEADLINE,
+        AuthorizationStatus, NotificationError, LOCKED_BODY, NOTIFY_DEADLINE,
     };
     use std::{path::PathBuf, time::Duration};
     use windows::{
@@ -657,8 +662,17 @@ mod windows_toast {
             if started.elapsed() >= NOTIFY_DEADLINE {
                 return Err(NotificationError::Timeout);
             }
-            toast_document(&title, &body, image_uri.as_deref())
-                .and_then(|document| ToastNotification::CreateToastNotification(&document))
+            let make_toast = |title: &str, body: &str, image_uri: Option<&str>| {
+                toast_document(title, body, image_uri)
+                    .and_then(|document| ToastNotification::CreateToastNotification(&document))
+            };
+            let toast = make_toast(&title, &body, image_uri.as_deref());
+            let toast = if crate::app_lock::is_locked() {
+                make_toast(crate::APP_DISPLAY_NAME, LOCKED_BODY, None)
+            } else {
+                toast
+            };
+            toast
                 .and_then(|toast| notifier.Show(&toast))
                 .map_err(|_| NotificationError::WindowsApi)
         })

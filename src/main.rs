@@ -10,6 +10,7 @@
 
 use anyhow::Result;
 use session::Session;
+use std::path::Path;
 pub use zalo_rust::{
     account_manager, api_mcp, audio, call, chat, clock, crypto, data_dir, endpoints, feed, gui,
     history_sync, logger, login, media, media_resources, message_model, param_cipher, qr,
@@ -52,6 +53,10 @@ fn startup_runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?)
+}
+
+fn app_lock_refuses_tui(config: Result<zalo_rust::app_lock::Config>) -> bool {
+    config.map_or(true, |config| config.usable())
 }
 
 fn main() -> Result<()> {
@@ -191,6 +196,11 @@ fn main() -> Result<()> {
         if !force_gui && !force_tui && !force_qr {
             return Ok(());
         }
+    }
+
+    if !gui_mode && app_lock_refuses_tui(zalo_rust::app_lock::load(Path::new("."))) {
+        eprintln!("Khóa ứng dụng đang bật cho thư mục dữ liệu này; hãy mở bằng giao diện đồ họa.");
+        std::process::exit(1);
     }
 
     logger::init(dev_mode);
@@ -457,4 +467,21 @@ async fn run_tui_mode(
     tui::run_tui(tui_app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_lock_tui_guard_refuses_usable_or_unreadable_configs() {
+        let mut config = zalo_rust::app_lock::Config::default();
+        assert!(!app_lock_refuses_tui(Ok(config.clone())));
+        config.enabled = true;
+        config.method = zalo_rust::app_lock::Method::Passcode;
+        assert!(!app_lock_refuses_tui(Ok(config.clone())));
+        config.method = zalo_rust::app_lock::Method::System;
+        assert!(app_lock_refuses_tui(Ok(config)));
+        assert!(app_lock_refuses_tui(Err(anyhow::anyhow!("unreadable"))));
+    }
 }
