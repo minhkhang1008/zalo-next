@@ -40,6 +40,8 @@ pub mod unread;
 pub mod video_player;
 pub mod video_tools;
 pub mod voip_log;
+mod zalo_emoticon_table;
+pub mod zalo_emoticons;
 pub mod zproto_host;
 
 /// Local HTTP REST API, MCP JSON-RPC 2.0 server, and auto-reply rules (#35).
