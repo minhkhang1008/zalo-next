@@ -977,23 +977,10 @@ impl ZaloGuiApp {
                                         }
                                     }
                                 }
+                                // The filter's right-to-left layout takes the rest of the row, so the
+                                // mark-all-read button lives inside it: a widget added after it would
+                                // sit past the panel edge and make the resizable panel grow every frame.
                                 self.render_sidebar_label_filter(ui, pal);
-                                if !self.unread_counts.is_empty() {
-                                    let mark_all = ui
-                                        .add(
-                                            egui::Button::new(
-                                                RichText::new(lucide::CHECK_CHECK)
-                                                    .size(15.0)
-                                                    .color(pal.text_secondary),
-                                            )
-                                            .frame(false),
-                                        )
-                                        .on_hover_cursor(CursorIcon::PointingHand)
-                                        .on_hover_text("Đánh dấu tất cả đã đọc");
-                                    if mark_all.clicked() {
-                                        self.mark_all_read(ctx);
-                                    }
-                                }
                             });
                         }
                     });
@@ -7194,6 +7181,23 @@ impl ZaloGuiApp {
                     .sense(Sense::click()),
                 )
                 .on_hover_cursor(CursorIcon::PointingHand);
+            if !self.unread_counts.is_empty() {
+                let mark_all = ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(lucide::CHECK_CHECK)
+                                .size(15.0)
+                                .color(pal.text_secondary),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("Đánh dấu tất cả đã đọc");
+                if mark_all.clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.mark_all_read(&ctx);
+                }
+            }
             if btn.clicked() {
                 self.sidebar_label_menu_open = !self.sidebar_label_menu_open;
                 if self.sidebar_label_menu_open && !self.conv_labels_loading {
