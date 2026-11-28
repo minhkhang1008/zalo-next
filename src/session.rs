@@ -13,10 +13,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::crypto;
+use crate::media_resources::{read_bounded_response, MediaError};
 
 pub const ZPW_VER: &str = "694";
 pub const ZPW_TYPE: &str = "30";
 pub const CONFIG_DOMAIN: &str = "zaloapp.com";
+
+const GROUP_POLL_BODY_LIMIT: usize = 1024 * 1024;
+pub(crate) const GROUP_POLL_BODY_TOO_LARGE: &str = "Phản hồi bình chọn quá lớn.";
+
+async fn read_group_poll_body(response: reqwest::Response) -> Result<String> {
+    let status = response.status();
+    if !status.is_success() {
+        bail!("HTTP {status} from {}", redact_url(response.url().as_str()));
+    }
+    let bytes = read_bounded_response(response, GROUP_POLL_BODY_LIMIT)
+        .await
+        .map_err(|error| match error {
+            MediaError::TooLarge => anyhow::Error::new(error).context(GROUP_POLL_BODY_TOO_LARGE),
+            _ => error.into(),
+        })?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
 
 /// Return whether an absolute URL uses a secure transport and a trusted Zalo domain.
 pub fn is_trusted_zalo_url(url: &str) -> bool {
@@ -1202,13 +1220,17 @@ impl Session {
                 if !is_trusted_zalo_url(&url) {
                     bail!("Refusing authenticated poll request to an untrusted Zalo URL");
                 }
-                self.send_with_client(client, Method::GET, &url, None).await
+                self.send_with_client(client, Method::GET, &url, None, true).await
             },
             |error| {
                 if is_vote {
                     error.to_string().starts_with("HTTP 404 ")
                 } else {
                     Self::should_failover_candidate(error)
+                        || matches!(
+                            error.downcast_ref::<MediaError>(),
+                            Some(MediaError::Offline | MediaError::Timeout)
+                        )
                 }
             },
         )
@@ -1304,7 +1326,7 @@ impl Session {
     }
 
     async fn send(&self, m: Method, url: &str, body: Option<String>) -> Result<Value> {
-        self.send_with_client(&self.http, m, url, body).await
+        self.send_with_client(&self.http, m, url, body, false).await
     }
 
     async fn send_with_client(
@@ -1313,6 +1335,7 @@ impl Session {
         m: Method,
         url: &str,
         body: Option<String>,
+        bounded_poll_body: bool,
     ) -> Result<Value> {
         let start = std::time::Instant::now();
         if is_url_blocked_by_privacy(url) {
@@ -1383,7 +1406,11 @@ impl Session {
         };
 
         let status = resp.status();
-        let text = resp.text().await?;
+        let text = if bounded_poll_body {
+            read_group_poll_body(resp).await?
+        } else {
+            resp.text().await?
+        };
         if self.verbose {
             eprintln!("← {status} {}", truncate(&text, 400));
         }
@@ -1943,6 +1970,27 @@ mod tests {
         assert_eq!(domains.candidates("group_poll"), [domains.group.as_str()]);
         domains.group = "https://also-untrusted.example".into();
         assert!(domains.candidates("group_poll").is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_poll_body_rejects_responses_larger_than_one_mib() {
+        use tokio_tungstenite::tungstenite::http::Response;
+
+        for (status, size, expected_error) in [
+            (200, GROUP_POLL_BODY_LIMIT, None),
+            (200, GROUP_POLL_BODY_LIMIT + 1, Some(GROUP_POLL_BODY_TOO_LARGE)),
+            (404, GROUP_POLL_BODY_LIMIT + 1, Some("HTTP 404 ")),
+        ] {
+            let response = Response::builder()
+                .status(status)
+                .body(vec![b'a'; size])
+                .unwrap();
+            let result = read_group_poll_body(response.into()).await;
+            match expected_error {
+                Some(error) => assert!(result.unwrap_err().to_string().starts_with(error)),
+                None => assert_eq!(result.unwrap().len(), size),
+            }
+        }
     }
 
     #[test]

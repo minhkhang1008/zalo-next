@@ -4457,12 +4457,13 @@ pub async fn vote_poll(
         "imei": s.imei,
     });
     let data = request_poll(s, "/api/poll/vote", &body, true).await?;
-    poll_vote_detail(data)
+    Ok(poll_vote_detail(data, poll_id))
 }
 
-fn poll_vote_detail(data: Value) -> Result<Option<PollDetail>> {
-    let detail: Option<PollDetail> = serde_json::from_value(data)?;
-    Ok(detail.filter(|detail| detail != &PollDetail::default()))
+fn poll_vote_detail(data: Value, poll_id: &str) -> Option<PollDetail> {
+    serde_json::from_value::<PollDetail>(data)
+        .ok()
+        .filter(|detail| !detail.options.is_empty() && detail.poll_id.as_deref() == Some(poll_id))
 }
 
 fn poll_option_param(id: &str) -> Value {
@@ -10328,14 +10329,27 @@ mod send_identity_tests {
 
     #[test]
     fn poll_vote_acknowledgement_without_details_needs_a_refetch() {
-        for acknowledgement in [Value::Null, json!({}), json!({"success": true})] {
-            assert_eq!(poll_vote_detail(acknowledgement).unwrap(), None);
+        let options = json!([{"option_id": 1}]);
+        for acknowledgement in [
+            Value::Null,
+            json!({}),
+            json!({"success": true}),
+            json!({"poll_id": 42, "joined": true}),
+            json!({"poll_id": 42, "options": null}),
+            json!({"poll_id": 42, "options": "invalid"}),
+            json!({"options": options}),
+            json!({"poll_id": 43, "options": options}),
+        ] {
+            assert_eq!(poll_vote_detail(acknowledgement, "42"), None);
         }
-        let updated = poll_vote_detail(json!({"poll_id": 42, "joined": true}))
-            .unwrap()
-            .unwrap();
+        let updated = poll_vote_detail(
+            json!({"poll_id": 42, "joined": true, "options": options}),
+            "42",
+        )
+        .unwrap();
         assert_eq!(updated.poll_id.as_deref(), Some("42"));
         assert_eq!(updated.joined, Some(true));
+        assert_eq!(updated.options.len(), 1);
     }
 
     #[test]
