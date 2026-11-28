@@ -1540,3 +1540,21 @@ Entry template:
 - Changes: the rail stores the avatar rect (`profile_avatar_rect`); the popover excludes clicks inside it and
   opens beside it (fallback to the old position before the first frame).
 - Verification: cargo check; `cargo test --locked --lib gui::` pass; dmg rebuilt. NOT verified live.
+
+## 2026-11-28 — Unmute did nothing; mute icon size; thread menu alignment  (agent: Claude Code, claude-opus-5-5 + Codex (adversarial reviewer))
+- Request: muted icon too small; after "Mở lại thông báo" the icon and the menu item stay; context-menu items
+  of a conversation are not aligned.
+- Root cause (unmute): `set_mute_conversation` sent `action: 2`. The local Zalo Web bundle
+  (`web-bundle/`) uses `SET_MUTE = 1`, `UNSET_MUTE = 3` (re-notes/55). The server ignored 2, and the worker's
+  follow-up `getmute` snapshot (`MuteSnapshotSynced`) re-muted the thread. Errors were ignored silently.
+- Root cause (alignment): frameless egui buttons have no padding, sub-menu buttons (Phân loại, Tắt thông
+  báo) use `button_padding.x = 10`, so they were indented.
+- Changes: `chat::mute_action` (1/3) + inner `error_code` check (`setmute_rejection`); worker sends
+  `GuiEvent::MuteFailed` → toast; row icon = Lucide bell-off (`lucide::BELL_OFF` U+E05A, 14 px); thread
+  context menu `button_padding.x = 0`. re-notes/55, GIAO_THUC_ZALO index (50–55), CHANGELOG.
+- Review: Codex adversarial review confirmed action 3 / duration -1 against the bundle. Fixed: inner error
+  codes, failure toast. Not fixed (pre-existing design): a delayed thread refresh or an older mute snapshot /
+  control event can still OR a stale mute back in (no per-thread ordering of mute state); the success toast
+  is shown optimistically.
+- Verification: `cargo test --locked --lib` 646 pass; dmg rebuilt. NOT verified live: unmute on the real
+  server, notification delivery after unmute, icon and menu visuals.
