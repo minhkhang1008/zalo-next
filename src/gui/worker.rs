@@ -2145,9 +2145,9 @@ pub(super) fn spawn_session_worker(
                                 .await
                                 {
                                     crate::logger::log_error("gui::mute_thread", &e.to_string());
-                                    let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
-                                        "Không đổi được thông báo của hội thoại trên máy chủ Zalo.".into(),
-                                    ));
+                                    let _ = gui_tx_clone.send(GuiEvent::MuteFailed {
+                                        unmute: !mute,
+                                    });
                                 }
                                 if let Ok(mute_resp) = crate::chat::get_mute_conversations(&s).await
                                 {

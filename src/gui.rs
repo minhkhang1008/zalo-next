@@ -343,6 +343,10 @@ pub enum GuiEvent {
         target_name: String,
         error: Option<String>,
     },
+    /// `setmute` failed; the follow-up mute snapshot restores the server state.
+    MuteFailed {
+        unmute: bool,
+    },
     TypingEventsReceived(Vec<crate::chat::TypingEvent>),
     SeenEventsReceived(Vec<crate::chat::SeenEvent>),
     SendFailed {
@@ -3038,6 +3042,13 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::StatusUpdate(msg) => {
                     self.status_msg = msg;
+                }
+                GuiEvent::MuteFailed { unmute } => {
+                    self.show_toast(if unmute {
+                        "⚠️ Không mở lại được thông báo trên máy chủ Zalo. Hãy thử lại."
+                    } else {
+                        "⚠️ Không tắt được thông báo trên máy chủ Zalo. Hãy thử lại."
+                    });
                 }
                 GuiEvent::HistoryReachedStart(tid) => {
                     self.history_reached_start.insert(tid);

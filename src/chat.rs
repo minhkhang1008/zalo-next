@@ -8376,7 +8376,18 @@ pub async fn set_mute_conversation(
     let resp = s
         .post_endpoint_form("profile", &path, format!("params={params}"))
         .await?;
-    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+    let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    // Zalo Web rejects a nonzero code inside the decrypted envelope too.
+    if let Some(code) = setmute_rejection(&resp) {
+        anyhow::bail!("Zalo từ chối thay đổi thông báo (mã lỗi {code})");
+    }
+    Ok(resp)
+}
+
+fn setmute_rejection(resp: &Value) -> Option<i64> {
+    [&resp["error_code"], &resp["data"]["error_code"]]
+        .into_iter()
+        .find_map(|code| code.as_i64().filter(|&c| c != 0))
 }
 
 /// Fetch the full mute snapshot (`chatEntries` + `groupChatEntries`) from Official Zalo PC
@@ -9363,6 +9374,11 @@ mod tests {
         // re-notes/55: SET_MUTE = 1, UNSET_MUTE = 3.
         assert_eq!(super::mute_action(true), 1);
         assert_eq!(super::mute_action(false), 3);
+        assert_eq!(super::setmute_rejection(&serde_json::json!({"error_code": 0})), None);
+        assert_eq!(
+            super::setmute_rejection(&serde_json::json!({"error_code": 0, "data": {"error_code": 114}})),
+            Some(114)
+        );
     }
 
     #[cfg(unix)]
