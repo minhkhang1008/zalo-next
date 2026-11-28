@@ -26,6 +26,7 @@ mod ai_ui;
 mod album;
 mod appearance;
 mod background;
+mod bank_cards_ui;
 mod clipboard_write;
 mod doc_preview_ui;
 #[cfg(target_os = "macos")]
@@ -57,11 +58,32 @@ pub use theme::{emoji_to_tex_key, load_app_icon, lucide, REACTION_LIST};
 pub use worker::WorkerCmd;
 use worker::*;
 
+pub enum BankCardsUpdate {
+    Loaded {
+        banks: std::sync::Arc<[crate::bank_cards::Bank]>,
+        accounts: Vec<crate::bank_cards::BankAccount>,
+        has_multiple: bool,
+    },
+    Saved,
+    Deleted,
+    Sent,
+}
+
 fn merge_sent_message(thread: &mut Thread, message: ChatMessage) {
     crate::chat::merge_sent_message(thread, message);
 }
 
 pub enum GuiEvent {
+    BankCards {
+        uin: String,
+        request_id: u64,
+        result: Result<BankCardsUpdate, String>,
+    },
+    BankLogo {
+        uin: String,
+        url: String,
+        image: Option<egui::ColorImage>,
+    },
     VoiceProgress {
         account: String,
         generation: u64,
@@ -1011,6 +1033,7 @@ pub struct ZaloGuiApp {
     phone_lookup_loading: bool,
     phone_lookup_result: Option<crate::chat::PhoneLookupResult>,
     phone_lookup_error: Option<String>,
+    bank_cards: bank_cards_ui::BankCardsState,
     in_chat_search_open: bool,
     in_chat_search_query: String,
     in_chat_search_focus_pending: bool,
@@ -1439,6 +1462,7 @@ impl ZaloGuiApp {
             phone_lookup_loading: false,
             phone_lookup_result: None,
             phone_lookup_error: None,
+            bank_cards: Default::default(),
             in_chat_search_open: false,
             in_chat_search_query: String::new(),
             in_chat_search_focus_pending: false,
@@ -1666,6 +1690,16 @@ impl ZaloGuiApp {
                 eprintln!("[call] check_events dequeued IncomingCall");
             }
             match event {
+                GuiEvent::BankCards { uin, request_id, result } => {
+                    if self.is_logged_in && uin == self.user_uin {
+                        self.on_bank_cards_update(request_id, result);
+                    }
+                }
+                GuiEvent::BankLogo { uin, url, image } => {
+                    if self.is_logged_in && uin == self.user_uin {
+                        self.bank_cards.on_logo(ctx, url, image);
+                    }
+                }
                 GuiEvent::AiThreadLoaded { thread_id, messages } => {
                     self.ai_on_thread_loaded(thread_id, messages);
                 }
@@ -1771,6 +1805,7 @@ impl ZaloGuiApp {
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
                     if !self.is_logged_in || self.user_uin != uin {
                         self.invalidate_storage_usage();
+                        self.bank_cards = Default::default();
                     }
                     if let Some(tx) = WORKER_TX.get() {
                         self.conv_labels_loading = true;
@@ -2036,6 +2071,7 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::SessionExpired(reason) => {
                     self.invalidate_storage_usage();
+                    self.bank_cards = Default::default();
                     self.productivity = Default::default();
                     self.voice = Default::default();
                     self.doc_preview = Default::default();
@@ -2058,6 +2094,7 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::LoggedOut => {
                     self.invalidate_storage_usage();
+                    self.bank_cards = Default::default();
                     self.close_image_viewer();
                     self.productivity = Default::default();
                     self.voice = Default::default();
@@ -2078,6 +2115,7 @@ impl ZaloGuiApp {
                     threads,
                 } => {
                     self.invalidate_storage_usage();
+                    self.bank_cards = Default::default();
                     // The viewer holds the previous account's photos.
                     self.close_image_viewer();
                     self.is_logged_in = true;

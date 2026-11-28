@@ -35,6 +35,9 @@ pub const AUTH: &str = "https://wpa.zaloapp.com";
 /// Base host that serves `getServerInfo` for an authenticated web session.
 pub const WPA_CHAT: &str = "https://wpa.chat.zalo.me";
 
+/// Zalo Web's fallback for the bank-card service (re-notes/52_bank_cards.md).
+pub const ZINSTANT_MSG: &str = "https://zimsg.chat.zalo.me";
+
 /// Group board (pinned messages / notes / reminders). Zalo PC resolves this through
 /// `apiGroupBoard = https://groupboard-wpa.api.${domain}`; web sessions answer on the
 /// `chat.zalo.me` flavour, which is what the live capture came from (`friendboard-wpa.chat.zalo.me`).

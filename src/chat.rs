@@ -3169,6 +3169,13 @@ pub fn normalize_sticker_keyword(s: &str) -> String {
 
 /// Strip Vietnamese diacritics to lowercase ASCII (`simpleStripVietnamese` in `compact-app-pc.js:12955017`).
 pub fn strip_vn_for_sticker_kw(s: &str) -> String {
+    fold_vietnamese(s)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn fold_vietnamese(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for raw in s.chars() {
         for c in raw.to_lowercase() {
@@ -3192,7 +3199,7 @@ pub fn strip_vn_for_sticker_kw(s: &str) -> String {
             out.push(mapped);
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    out
 }
 
 /// Map common unaccented Vietnamese keywords, English terms, or chat slang to the accented

@@ -487,6 +487,7 @@ impl ZaloGuiApp {
             });
 
         if self.contacts_view_open {
+            self.render_bank_cards(ctx, pal);
             self.render_contacts_page(ctx, pal);
             self.render_profile_popover(ctx, pal);
             self.render_wipe_confirm(ctx, pal);
@@ -5196,6 +5197,8 @@ impl ZaloGuiApp {
                                                 }
                                             }
 
+                                            self.bank_cards_toolbar(ui, pal, &thread_id, is_group);
+
                                             let is_multiline = self.input_message.contains('\n');
                                             let vis_lines = if is_multiline {
                                                 self.input_message
@@ -5859,6 +5862,7 @@ impl ZaloGuiApp {
         self.render_forward_dialog(ctx, pal);
         self.render_message_details(ctx, pal);
         self.render_reactions_dialog(ctx, pal);
+        self.render_bank_cards(ctx, pal);
         self.render_call_overlay(ctx, pal);
         self.render_image_viewer_modal(ctx, pal);
         self.render_video_player_modal(ctx, pal);

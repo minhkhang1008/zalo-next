@@ -168,6 +168,9 @@ pub struct Domains {
     /// `zpw_service_map_v3.sticker[0]` — `/api/message/sticker/*` catalog & search endpoints.
     #[serde(default = "default_sticker")]
     pub sticker: String,
+    /// `zpw_service_map_v3.zinstant_msg[0]` — `/api/transfer/*` bank-card endpoints.
+    #[serde(default = "default_zinstant_msg")]
+    pub zinstant_msg: String,
     /// `zpw_ws[...]` — control websocket endpoints (`wss://wsN-msg.chat.zalo.me`).
     ///
     /// [O] The server hands back full `wss://` URLs in the login config; the client never
@@ -209,6 +212,10 @@ fn default_sticker() -> String {
         .into()
 }
 
+fn default_zinstant_msg() -> String {
+    crate::endpoints::ZINSTANT_MSG.into()
+}
+
 /// [O] `re-notes/02_chat_data.md`: `zpw_ws` = `wss://ws{1..8}-msg.chat.zalo.me`.
 fn default_ws() -> Vec<String> {
     (1..=8)
@@ -236,6 +243,7 @@ impl Default for Domains {
             cloud_msg: default_cloud_msg(),
             voice_call: default_voice_call(),
             sticker: default_sticker(),
+            zinstant_msg: default_zinstant_msg(),
             ws: default_ws(),
             service_map_candidates: std::collections::BTreeMap::new(),
             saved_candidates: std::collections::BTreeMap::new(),
@@ -331,8 +339,12 @@ impl Domains {
             ("group_cloud_message", &mut self.cloud_msg),
             ("voice_call", &mut self.voice_call),
             ("sticker", &mut self.sticker),
+            ("zinstant_msg", &mut self.zinstant_msg),
         ] {
-            let urls = map.get(key).map(all_urls).unwrap_or_default();
+            let mut urls = map.get(key).map(all_urls).unwrap_or_default();
+            if key == "zinstant_msg" {
+                urls.retain(|url| is_zinstant_msg_host(url));
+            }
             if !urls.is_empty() {
                 self.service_map_candidates.insert(key.into(), urls.clone());
             }
@@ -363,6 +375,7 @@ impl Domains {
             "group_cloud_message" | "cloud_msg" => &self.cloud_msg,
             "voice_call" => &self.voice_call,
             "sticker" => &self.sticker,
+            "zinstant_msg" => &self.zinstant_msg,
             "auth" => &self.auth,
             "wpa_chat" => &self.wpa_chat,
             _ => "",
@@ -375,6 +388,7 @@ impl Domains {
     /// 3. Hosts returned by `zpw_service_map_v3`
     /// 4. Host loaded from `session.json` before healing
     /// 5. For `friend`, fallback to `profile` host if distinct
+    /// 6. For `zinstant_msg`, keep only trusted HTTPS origins and append the Web fallback
     pub fn candidates(&self, endpoint: &str) -> Vec<String> {
         let canonical = if endpoint == "convers_api" {
             "conversation"
@@ -407,6 +421,10 @@ impl Domains {
         }
         if canonical == "friend" {
             push_unique_host(&mut list, &self.profile);
+        }
+        if canonical == "zinstant_msg" {
+            list.retain(|url| is_zinstant_msg_host(url));
+            push_unique_host(&mut list, crate::endpoints::ZINSTANT_MSG);
         }
         list
     }
@@ -534,12 +552,24 @@ pub fn redact_proxy_url(raw: &str) -> String {
     trimmed.to_string()
 }
 
-fn build_http_client(jar: &Arc<Jar>, proxy_url: Option<&str>) -> Result<Client> {
+/// A service map value is an HTTPS origin to which callers append an API path.
+fn is_zinstant_msg_host(host: &str) -> bool {
+    is_trusted_zalo_url(host)
+        && reqwest::Url::parse(host).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+}
+
+fn http_client_builder(proxy_url: Option<&str>) -> Result<reqwest::ClientBuilder> {
     let mut default_headers = HeaderMap::new();
     default_headers.insert(REFERER, HeaderValue::from_static("https://chat.zalo.me/"));
     default_headers.insert(ORIGIN, HeaderValue::from_static("https://chat.zalo.me"));
     let mut builder = Client::builder()
-        .cookie_provider(Arc::clone(jar))
         .default_headers(default_headers)
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(35))
@@ -560,7 +590,13 @@ fn build_http_client(jar: &Arc<Jar>, proxy_url: Option<&str>) -> Result<Client> 
             builder = builder.proxy(proxy);
         }
     }
-    Ok(builder.build()?)
+    Ok(builder)
+}
+
+fn build_http_client(jar: &Arc<Jar>, proxy_url: Option<&str>) -> Result<Client> {
+    Ok(http_client_builder(proxy_url)?
+        .cookie_provider(Arc::clone(jar))
+        .build()?)
 }
 
 /// `error_code` values Zalo answers when the stored credentials are no longer usable.
@@ -654,6 +690,14 @@ impl SessionStatus {
 }
 
 impl Session {
+    /// Keep bank-card traffic off the logging path and prevent any POST replay or redirect.
+    pub(crate) fn bank_http_client(&self) -> Result<Client> {
+        Ok(http_client_builder(self.proxy_url.as_deref())?
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()?)
+    }
+
     pub fn new(verbose: bool, dump: bool, dump_raw: bool) -> Result<Self> {
         let jar = Arc::new(Jar::default());
         let env_proxy = std::env::var("ZALO_PROXY")
@@ -1656,6 +1700,47 @@ mod tests {
         domains.apply_service_map(&serde_json::json!({"sticker": "https://from-server.test"}));
 
         assert_eq!(domains.sticker, "https://from-server.test");
+    }
+
+    #[test]
+    fn zinstant_msg_uses_service_map_and_keeps_web_fallback() {
+        let mut stored = serde_json::to_value(Domains::default()).unwrap();
+        stored.as_object_mut().unwrap().remove("zinstant_msg");
+        let mut domains: Domains = serde_json::from_value(stored).unwrap();
+        let fallback = crate::endpoints::ZINSTANT_MSG;
+        assert_eq!(domains.zinstant_msg, fallback);
+        assert_eq!(domains.candidates("zinstant_msg"), [fallback]);
+
+        domains.apply_service_map(&serde_json::json!({
+            "zinstant_msg": [
+                "https://zalo.me.example.test",
+                "http://zimsg.zalo.me",
+                "https://zimsg.zalo.me/",
+                "https://zimsg.zaloapp.com",
+                "https://zimsg.zalo.me/?ignored=1",
+            ],
+        }));
+        assert_eq!(domains.zinstant_msg, "https://zimsg.zalo.me");
+        assert_eq!(
+            domains.candidates("zinstant_msg"),
+            ["https://zimsg.zalo.me", "https://zimsg.zaloapp.com", fallback],
+        );
+    }
+
+    #[test]
+    fn zinstant_msg_rejects_untrusted_saved_and_preferred_hosts() {
+        let mut domains = Domains {
+            zinstant_msg: "https://example.test".into(),
+            ..Default::default()
+        };
+        domains.remember_winner("zinstant_msg", "https://old.zalo.me.example.test");
+        domains.apply_service_map(&serde_json::json!({
+            "zinstant_msg": ["wss://zimsg.zalo.me", "https://zimsg.zalo.me@evil.example"]
+        }));
+        assert_eq!(
+            domains.candidates("zinstant_msg"),
+            [crate::endpoints::ZINSTANT_MSG],
+        );
     }
 
     #[test]
