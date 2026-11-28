@@ -49,6 +49,11 @@ Chỉ đổi trạng thái khi có bằng chứng (chạy thật hoặc chủ d�
 | Xem video trong app | ✅ | |
 | Tin nhắn thoại AAC | ✅ |  |
 | Sửa tin nhắn đã gửi | ⛔ | |
+| Bình chọn trong nhóm | 🟡 | Tạo, bỏ phiếu, kết quả cập nhật trực tiếp; chưa kiểm thử đầy đủ với máy chủ thật |
+| Danh thiếp & biểu tượng cảm xúc Zalo | 🟡 | Thẻ danh thiếp có Nhắn tin / Sao chép số; tin chỉ gồm một số điện thoại cũng hiện thành danh thiếp (tự tra tối đa 30 số mỗi phiên) |
+| Gửi & nhận số tài khoản ngân hàng | 🟡 | Danh sách lưu trên máy chủ Zalo, gửi thẻ, nhận thẻ có logo/số/VietQR; chuột phải sao chép số / hiện VietQR; không có nút chuyển tiền. Chưa kiểm thử với máy chủ thật |
+| Định dạng tin nhắn (Zalo) | 🟡 | Hiện và gửi chữ đậm/nghiêng/gạch chân/gạch ngang, cỡ chữ, màu, danh sách, thụt lề; nút Định dạng hoặc Cmd/Ctrl+Shift+X. Chưa kiểm thử với máy chủ thật |
+| Đánh dấu tất cả đã đọc | ✅ | Nút ✓✓ cạnh tab hội thoại; chỉ trên máy này |
 
 ## Hội thoại & bạn bè
 
@@ -66,7 +71,8 @@ Chỉ đổi trạng thái khi có bằng chứng (chạy thật hoặc chủ d�
 |---|---|---|
 | Gọi thoại 1-1 | ✅ | Đã test |
 | Gọi video | 🟡 | Báo hiệu hoạt động; chưa hiển thị camera điện thoại, hình gửi đi còn mờ/trễ |
-| Cuộc gọi đến | ✅ | Cửa sổ luôn nằm trên cùng, kèm thông báo hệ thống |
+| Cuộc gọi đến | 🟡 | Ô nhỏ ở góc màn hình, không lấy focus: Nghe máy / Nghe nhưng tắt mic / Không nghe máy; chưa kiểm thử với cuộc gọi thật |
+| Bật/tắt gọi video | 🟡 | Cài đặt → Cho phép gọi video, mặc định tắt; khi tắt trả lời cuộc gọi video bằng thoại |
 | Gọi nhóm | 🟡 | |
 | Tự cài công cụ gọi video (FFmpeg) | 🟡 | macOS: tải bản đã kiểm SHA-256 vào thư mục dữ liệu; Windows (WinGet) và Linux (apt) chưa kiểm thử |
 
@@ -76,6 +82,7 @@ Chỉ đổi trạng thái khi có bằng chứng (chạy thật hoặc chủ d�
 |---|---|---|
 | Giao diện đồ hoạ kiểu Zalo PC, sáng/tối/hệ thống | ✅ | **Cài đặt → Giao diện**: bảng màu, phông chữ, thu phóng, hiệu ứng, màu tùy chỉnh |
 | Chạy nền khi đóng cửa sổ | ✅ | Icon ở menu bar (macOS) / khay (Windows); Linux chỉ thu nhỏ, Windows chưa kiểm thử |
+| Khóa ứng dụng | 🟡 | Touch ID / mật khẩu macOS (chỉ hỏi khi bấm Mở khóa), mã khóa ≥ 6 ký tự ở nơi khác; chỉ khóa giao diện |
 | Trợ lý AI `@AI` | ✅ | Chỉ mình bạn thấy, không gửi tới Zalo; cần tự cấu hình nhà cung cấp tương thích OpenAI. Khi bật chia sẻ: liên kết, ảnh, tệp, tra cứu lịch sử của cuộc trò chuyện (ADR-0007). Chưa kiểm chứng với nhà cung cấp thật (công cụ và ảnh chỉ thử với máy chủ giả); chưa có streaming. Xem [AI_TRO_LY.md](AI_TRO_LY.md) |
 | Giao diện terminal (TUI) | ✅ | `--tui` |
 | Thông báo tin nhắn mới | ✅ | macOS: Notification Center. Windows: thông báo (toast) của Windows, chưa kiểm thử trên máy thật; Linux chưa có |

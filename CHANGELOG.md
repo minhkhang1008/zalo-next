@@ -13,6 +13,17 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Windows dùng một thư mục dữ liệu cố định `%LOCALAPPDATA%\ctdozlite`** (trước đây là thư mục khởi chạy, nên mở từ Start menu, từ file `.exe` hay từ terminal có thể thấy phiên đăng nhập khác nhau). Lần mở đầu tiên tự chuyển dữ liệu cũ sang, giữ bản gốc `*.bak`. Chưa kiểm thử trên máy thật.
 
 ### Added (Tính năng mới)
+- **Bình chọn trong nhóm:** tạo bình chọn, bỏ phiếu và xem kết quả cập nhật trực tiếp ngay trong cuộc trò chuyện. Chưa kiểm thử đầy đủ với máy chủ thật.
+- **Khóa ứng dụng (App Lock):** khóa giao diện khi rời máy hoặc theo phím tắt; mở bằng Touch ID / mật khẩu macOS (chỉ hỏi khi bấm **Mở khóa**), nơi khác dùng mã khóa ≥ 6 ký tự. Chỉ khóa giao diện, tin nhắn vẫn nhận bình thường.
+- **Danh thiếp** hiện thành thẻ (ảnh, tên, số điện thoại) với nút **Nhắn tin** và **Sao chép số**; **biểu tượng cảm xúc riêng của Zalo** trong tin nhắn hiện đúng hình.
+- **Tin nhắn chỉ gồm một số điện thoại** (0xxxxxxxxx, +84…, có dấu cách/chấm) hiện thành danh thiếp: tự tra tên và ảnh qua tìm kiếm số điện thoại của Zalo (tối đa 30 số mỗi phiên vì Zalo giới hạn lượt tìm), có **Nhắn tin** (nếu đã có cuộc trò chuyện) và **Sao chép số**. Chưa kiểm thử trên giao diện thật.
+- **Gửi số tài khoản ngân hàng** như Zalo: quản lý danh sách tài khoản lưu trên máy chủ Zalo (dùng chung với điện thoại), gửi thẻ tài khoản, chuột phải để sao chép số hoặc hiện mã VietQR, bấm vào mã để phóng to. Không có nút chuyển tiền. Biểu mẫu **Thêm số tài khoản** được thiết kế lại (chọn ngân hàng có logo và ô tìm kiếm, báo lỗi ngay dưới ô nhập).
+- **Thẻ tài khoản ngân hàng nhận được** hiện đầy đủ (logo, tên ngân hàng, số tài khoản, mã VietQR) thay vì `[Hình ảnh]`; chuột phải để sao chép số hoặc hiện mã VietQR. Dữ liệu thẻ tải từ máy chủ Zalo, không kèm cookie. Chưa kiểm thử với thẻ thật.
+- **Định dạng tin nhắn của Zalo:** tin nhận được hiện đúng chữ đậm, nghiêng, gạch chân, gạch ngang, cỡ chữ, màu, danh sách và thụt lề. Nút **Định dạng** (Cmd/Ctrl+Shift+X) trên khung soạn tin mở thanh B / I / U / S, cỡ chữ, màu, danh sách, thụt lề và Xóa định dạng; tin gửi đi dùng định dạng gốc của Zalo nên điện thoại cũng thấy. Chưa kiểm thử với máy chủ thật.
+- **Khung soạn tin tự giãn** theo nội dung khi gõ nhiều dòng.
+- **Đánh dấu tất cả đã đọc** (nút ✓✓ cạnh các tab hội thoại). Chỉ đổi trên máy này, không gửi trạng thái "đã xem".
+- **Cuộc gọi đến hiện thành ô nhỏ ở góc màn hình** (luôn nằm trên, không lấy focus, không phóng to cửa sổ) với **Nghe máy / Nghe nhưng tắt mic / Không nghe máy**; cửa sổ cuộc gọi chỉ mở sau khi bạn nghe máy. Khi app đang khóa, ô này không hiện tên người gọi. Chưa kiểm thử với cuộc gọi thật.
+- **Gọi video là tùy chọn, mặc định tắt** (Cài đặt → mục Thiết bị Âm thanh & Video → Cho phép gọi video). Khi tắt: ẩn nút gọi video và nút bật camera, cuộc gọi video đến được trả lời bằng thoại.
 - **Cài đặt → Bộ nhớ:** xem dung lượng theo nhóm (dữ liệu hệ thống, bộ nhớ đệm sticker/ảnh thu nhỏ, video và ghi âm đã tải theo tài khoản, nhật ký, thư mục do ctdozlite để lại) và dọn từng nhóm. Phiên đăng nhập, lịch sử tin nhắn, cài đặt và khóa không bao giờ bị xóa ở đây; tệp vừa dùng trong 10 phút gần đây được giữ lại. Chưa kiểm thử trên giao diện thật.
 - **Chỉ một cửa sổ Zalo-next cho mỗi thư mục dữ liệu:** mở app lần nữa sẽ đưa cửa sổ đang chạy lên trước (macOS/Linux) thay vì chạy bản thứ hai đăng nhập trùng phiên. Chưa kiểm thử trên giao diện thật; Windows chỉ chặn, không đưa cửa sổ lên.
 - **Phông Open Sans** trong Cài đặt → Giao diện (đóng gói sẵn, không cần cài). Giấy phép của các phông đóng gói xem tại Cài đặt → Giao diện → Giấy phép phông chữ.
@@ -22,6 +33,9 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Thông báo trên Windows:** tin nhắn mới, nhắc hẹn, bản cập nhật và cuộc gọi đến hiện thông báo của Windows, kèm ảnh đại diện người gửi. Chưa kiểm thử trên máy thật (đặc biệt với bản portable).
 
 ### Fixed (Sửa lỗi)
+- **Cuộc gọi thoại không còn bị hiện là cuộc gọi video:** loại cuộc gọi giờ chỉ dựa vào trường `callType` của Zalo.
+- **Mở app không còn đổ chuông/thông báo hàng loạt** cho tin cũ tải về lúc khởi động: chỉ tin mới trong 2 phút gần nhất mới thông báo.
+- Tin đã **xóa phía tôi trên thiết bị khác** giờ cũng ẩn ở đây; các dòng tin trống không còn hiện.
 - **Danh sách tin không còn "nhảy"** khi ảnh và video tải xong: khung chờ giữ đúng tỉ lệ ảnh/video ngay từ đầu (theo kích thước Zalo gửi kèm tin). Tin đã lưu từ trước vẫn dùng khung cũ. Chưa kiểm thử trên giao diện thật.
 - **Đồng bộ tin từ điện thoại ngay sau khi mở app** không còn bị "mất lệnh": yêu cầu gửi lúc kết nối chưa đăng nhập xong được giữ lại và gửi ngay khi kết nối sẵn sàng (trước đây bị bỏ, khiến tiến trình đứng yên tới khi hết thời gian chờ). Chưa kiểm chứng với điện thoại thật.
 - **Tô sáng `@tên`** trong tin không có dữ liệu nhắc tên không còn lan sang các chữ thường phía sau (ví dụ "@Hoang Nam dạ anh" chỉ tô "@Hoang Nam").
