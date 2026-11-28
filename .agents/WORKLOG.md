@@ -1404,3 +1404,27 @@ Entry template:
 - NOT verified: any live poll detail/vote (owner must vote on a real group), Touch ID/password prompt, lock
   screen, auto-lock after sleep, ringing call while locked, passcode flow on Windows/Linux.
 - Status: waiting for Codex adversarial reviews and the owner's live checks before merging either branch.
+
+## 2026-11-28 — Owner test build, review fixes, contact cards and Zalo emoticons  (agent: Claude Code, claude-opus-5-5 (orchestrator) + Codex (worker, reviewer))
+- Request: build an app to test everything; owner picks nothing on licences (Claude chose an in-app viewer:
+  Settings → Giao diện → Giấy phép phông chữ, 4aba180 on main). Then: contact cards and Zalo text emoticons.
+- Branches: `test/upstream-port` (checked out in the main dir) merges main + `feature/group-polls` +
+  `feature/app-lock` + `feature/emoticons-contact-card`. Nothing merged into main, nothing pushed.
+- Owner-found bugs fixed on the test branch: Settings tabs laid out in one row (8361b80; the storage page's
+  ScrollArea dropped the vertical layout); albums older than the 20 cached messages split after restart
+  (2ad4d62; pre-existing: album params and mention spans now kept in raw_json). Both still need to reach main.
+- Mandatory adversarial reviews (Codex was over its limit earlier, rerun after reset): App Lock 6 findings fixed
+  (b8b7b35: TUI refuses a locked data dir, macOS fails closed on an unreadable config, notifications re-check the
+  lock, only a connected call defers locking, settings count once saved, 15 s sleep jump); polls 5 findings fixed
+  (24dae54: session generation for queued votes, voter privacy, 1 MiB/size caps, ack refetch, stale cards).
+  Claude also fixed a Windows-only type error in the toast code (not compiled here).
+- New: re-notes/51 (Zalo Web bundle: emojiRC table, sprite URL + SHA-256, xp5P matching rule; contact card
+  `recommened.user` fields). Emoticons e578f0b (cookie-less pinned sprite download, tile textures, selection
+  copies the shortcut); contact cards 2d56ab6; review fixes 5677cf8 (redirect-checked avatar client for all
+  `ava_` loads, Nhắn tin uses the sidebar open path, recall marker, `+` kept, cross-section boundaries,
+  URL in endpoints.rs).
+- Verification: `cargo test --locked` 586 passed on the test branch; dmg built
+  (dist/zalo-next-0.4.0-macos-arm64.dmg).
+- NOT verified: everything live (owner testing): polls voting, App Lock prompts/sleep/calls, contact card
+  actions, emoticon rendering and selection copy, storage clearing, account switching after the cookie-jar
+  change, Windows/Linux builds.
