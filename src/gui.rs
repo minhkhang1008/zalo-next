@@ -30,6 +30,7 @@ mod app_lock_ui;
 mod appearance;
 mod background;
 mod clipboard_write;
+mod contact_card;
 mod doc_preview_ui;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_auth;

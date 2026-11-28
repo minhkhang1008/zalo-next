@@ -8,6 +8,22 @@ use serde_json::{json, Value};
 use crate::poll::PollDetail;
 use crate::session::{obj, Session, SessionError};
 
+/// A Zalo user or Official Account shared in a conversation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContactCard {
+    pub uid: String,
+    pub name: String,
+    pub phone: Option<String>,
+    pub avatar: Option<String>,
+    pub is_oa: bool,
+}
+
+impl ContactCard {
+    pub(crate) fn summary(&self) -> String {
+        format!("[Danh thiếp] {}", self.name)
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     #[serde(default)]
@@ -76,6 +92,8 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_card: Option<ContactCard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_source: Option<Value>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub resolved_mention_uids: std::collections::BTreeMap<String, String>,
@@ -115,8 +133,21 @@ impl ChatMessage {
         if poll_changed {
             self.poll_id.clone_from(&incoming.poll_id);
         }
+        let mut contact_changed = false;
+        if let Some(card) = &incoming.contact_card {
+            if self.contact_card.as_ref() != Some(card) {
+                self.contact_card = Some(card.clone());
+                contact_changed = true;
+            }
+            if !self.text.starts_with("[Đã thu hồi]") && self.text != incoming.text {
+                self.text.clone_from(&incoming.text);
+                contact_changed = true;
+            }
+        }
         self.delivery = self.delivery.merge(incoming.delivery);
-        poll_changed || previous_mentions != self.resolved_mention_uids
+        poll_changed
+            || contact_changed
+            || previous_mentions != self.resolved_mention_uids
             || before
                 != (
                     self.kind,
@@ -6155,6 +6186,46 @@ fn parse_media_size(
     valid_media_size(&size).then_some(size)
 }
 
+fn extract_contact_card(content: &Value) -> Option<ContactCard> {
+    let parsed_content;
+    let content = if let Some(text) = content.as_str() {
+        parsed_content = serde_json::from_str::<Value>(text).ok()?;
+        &parsed_content
+    } else {
+        content
+    };
+    // The action names use Zalo's spelling. See re-notes/51_zalo_emoticons_and_contact_cards.md.
+    let is_oa = match content.get("action")?.as_str()? {
+        "recommened.user" => false,
+        "recommened.vip" => true,
+        _ => return None,
+    };
+    let phone = content.get("description").and_then(|description| {
+        let phone = if let Some(text) = description.as_str() {
+            pick_str(&serde_json::from_str::<Value>(text).ok()?, &["phone"])
+        } else {
+            pick_str(description, &["phone"])
+        };
+        phone.filter(|number| !number.trim().is_empty())
+    });
+    Some(ContactCard {
+        uid: content["params"].as_str().unwrap_or_default().trim().to_owned(),
+        name: content["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Người dùng Zalo")
+            .to_owned(),
+        phone,
+        avatar: content["thumb"]
+            .as_str()
+            .map(str::trim)
+            .filter(|url| url.starts_with("https://") && crate::session::is_trusted_zalo_url(url))
+            .map(str::to_owned),
+        is_oa,
+    })
+}
+
 fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let msg_type = normalize_msg_type(it);
     let is_poll = msg_type == "group.poll";
@@ -6181,7 +6252,13 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else {
         None
     };
-    let media_content = if is_poll { None } else { raw_content_val };
+    let contact_card = if msg_type == "chat.recommended" {
+        raw_content_val.and_then(extract_contact_card)
+    } else {
+        None
+    };
+    // Polls and contact cards are not link/media content.
+    let media_content = raw_content_val.filter(|_| !is_poll && contact_card.is_none());
     let mut sticker_meta = media_content.and_then(extract_sticker_info);
     if sticker_meta.is_none()
         && (msg_type == "chat.sticker" || msg_type == "sticker" || msg_type == "5")
@@ -6200,8 +6277,10 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
                 |question| format!("Bình chọn: {question}"),
             )
     } else {
-        raw_content_val
-            .and_then(extract_content_text)
+        contact_card
+            .as_ref()
+            .map(ContactCard::summary)
+            .or_else(|| raw_content_val.and_then(extract_content_text))
             .unwrap_or_default()
     };
 
@@ -6291,7 +6370,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else if sticker_meta.is_some() && (content.is_empty() || content.starts_with('{')) {
         content = "[Nhãn dán]".to_string();
     }
-    if !is_poll && sticker_meta.is_none() {
+    if !is_poll && sticker_meta.is_none() && contact_card.is_none() {
         let parse_ami = |s: &str| -> Option<(u64, u64, u32)> {
             let pos = s.find("ami_fat_cat_")?;
             let num_str = s.get(pos + 12..pos + 14)?;
@@ -6536,6 +6615,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         link_src,
         media_size,
         poll_id,
+        contact_card,
 
         history_source: voice_source,
         ..Default::default()
@@ -10422,6 +10502,111 @@ mod send_identity_tests {
                 assert_eq!(msg.media_size, None, "{msg_type}");
             }
         }
+    }
+
+    #[test]
+    fn parse_contact_card_descriptions() {
+        for (action, description, phone, is_oa) in [
+            (
+                "recommened.user",
+                json!(r#"{"phone":"0793862568","qrCodeUrl":"https://example.test/qr","gUid":"1"}"#),
+                Some("0793862568"),
+                false,
+            ),
+            (
+                "recommened.user",
+                json!({"phone": "+84 79 386 2568"}),
+                Some("+84 79 386 2568"),
+                false,
+            ),
+            ("recommened.user", json!({"gUid": "1"}), None, false),
+            ("recommened.vip", json!("{"), None, true),
+        ] {
+            let content = json!({
+                "action": action,
+                "title": "Nguyễn Văn An",
+                "thumb": "https://avatar.zadn.vn/avatar.jpg",
+                "params": "12345",
+                "description": description,
+            });
+            let raw = json!({
+                "msgType": "chat.recommended",
+                "content": if is_oa { json!(content.to_string()) } else { content },
+            });
+            let msg = parse_chat_message(&raw).unwrap();
+            assert_eq!(msg.text, "[Danh thiếp] Nguyễn Văn An");
+            assert_eq!(
+                msg.contact_card,
+                Some(ContactCard {
+                    uid: "12345".into(),
+                    name: "Nguyễn Văn An".into(),
+                    phone: phone.map(str::to_owned),
+                    avatar: Some("https://avatar.zadn.vn/avatar.jpg".into()),
+                    is_oa,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn parse_contact_card_drops_untrusted_avatar_and_accepts_missing_uid() {
+        let raw = json!({
+            "msgType": "chat.recommended",
+            "content": {
+                "action": "recommened.user",
+                "title": "An",
+                "thumb": "https://avatar.zadn.vn.example.test/track.png"
+            }
+        });
+        let card = parse_chat_message(&raw).unwrap().contact_card.unwrap();
+        assert!(card.uid.is_empty());
+        assert_eq!(card.avatar, None);
+        assert_eq!(card.phone, None);
+    }
+
+    #[test]
+    fn parse_contact_card_does_not_change_other_recommendations() {
+        let link = parse_chat_message(&json!({
+            "msgType": "chat.recommended",
+            "content": {
+                "action": "recommened.link",
+                "title": "Example",
+                "description": "A link",
+                "href": "https://example.test/article"
+            }
+        }))
+        .unwrap();
+        assert_eq!(link.contact_card, None);
+        assert_eq!(link.text, "A link");
+        assert_eq!(link.link_url.as_deref(), Some("https://example.test/article"));
+
+        for action in ["recommened.calltime", "recommened.misscall"] {
+            let call = parse_chat_message(&json!({
+                "msgType": "chat.recommended",
+                "content": {"action": action, "title": "Cuộc gọi thoại"}
+            }))
+            .unwrap();
+            assert_eq!(call.contact_card, None);
+            assert_eq!(call.text, "Cuộc gọi thoại");
+        }
+    }
+
+    #[test]
+    fn merge_message_metadata_upgrades_cached_contact_card() {
+        let incoming = parse_chat_message(&json!({
+            "msgType": "chat.recommended",
+            "content": {"action": "recommened.user", "title": "An", "params": "12345"}
+        }))
+        .unwrap();
+        let mut existing = ChatMessage {
+            text: r#"{"phone":"0793862568"}"#.into(),
+            ..Default::default()
+        };
+        assert!(existing.merge_message_metadata(&incoming));
+        assert_eq!(existing.contact_card, incoming.contact_card);
+        assert_eq!(existing.text, incoming.text);
+        assert!(!existing.merge_message_metadata(&ChatMessage::default()));
+        assert_eq!(existing.contact_card, incoming.contact_card);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::chat::{ChatMessage, Thread};
+use crate::chat::{ChatMessage, ContactCard, Thread};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredMessage {
@@ -575,6 +575,7 @@ impl MessageStore {
                 let mut media_size = None;
                 let mut wire_fields = std::collections::BTreeMap::new();
                 let mut poll_id = None;
+                let mut contact_card = None;
                 if !sm.raw_json.is_empty() {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sm.raw_json) {
                         sticker_id = val
@@ -659,6 +660,9 @@ impl MessageStore {
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_owned);
                         wire_fields = restore_render_wire_fields(&val);
+                        contact_card = val
+                            .get("contact_card")
+                            .and_then(|value| ContactCard::deserialize(value).ok());
                     }
                 }
                 let cm = ChatMessage {
@@ -693,6 +697,7 @@ impl MessageStore {
                         fields: wire_fields,
                         ..Default::default()
                     },
+                    contact_card,
 
                     ..Default::default()
                 };
@@ -700,6 +705,8 @@ impl MessageStore {
                     (!existing.id.is_empty() && existing.id == cm.id)
                         || (existing.poll_id.is_none()
                             && cm.poll_id.is_none()
+                            && existing.contact_card.is_none()
+                            && cm.contact_card.is_none()
                             && existing.text == cm.text
                             && existing.is_outgoing == cm.is_outgoing
                             && (existing.ts == cm.ts
@@ -721,6 +728,12 @@ impl MessageStore {
                                 .entry(key.clone())
                                 .or_insert_with(|| value.clone());
                         }
+                    }
+                    if let (None, Some(card)) = (&existing.contact_card, cm.contact_card) {
+                        if !existing.text.starts_with("[Đã thu hồi]") {
+                            existing.text = card.summary();
+                        }
+                        existing.contact_card = Some(card);
                     }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
@@ -912,6 +925,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if let Some(poll_id) = &m.poll_id {
             meta.insert("poll_id".into(), serde_json::json!(poll_id));
+        }
+        if let Some(card) = &m.contact_card {
+            meta.insert("contact_card".into(), serde_json::json!(card));
         }
         let raw_json = if meta.is_empty() {
             String::new()
@@ -1881,6 +1897,55 @@ fn import_official_zalo_pc_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contact_card_round_trips_through_stored_message_metadata() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let card = crate::chat::ContactCard {
+            uid: "12345".into(),
+            name: "Nguyễn Văn An".into(),
+            phone: Some("0793862568".into()),
+            avatar: Some("https://avatar.zadn.vn/avatar.jpg".into()),
+            is_oa: true,
+        };
+        let message = ChatMessage {
+            id: "card-1".into(),
+            text: "[Danh thiếp] Nguyễn Văn An".into(),
+            ts: 1000,
+            contact_card: Some(card.clone()),
+            ..Default::default()
+        };
+        let thread = Thread {
+            id: "thread-1".into(),
+            messages: vec![
+                message.clone(),
+                ChatMessage {
+                    id: "text-1".into(),
+                    text: "Xin chào".into(),
+                    ts: 2000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(persist_threads(&mut store, &[thread]).unwrap(), 2);
+
+        let rows = store.messages_for("thread-1", 10).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&rows[0].raw_json).unwrap();
+        assert_eq!(raw["contact_card"], serde_json::json!(card));
+
+        let mut hydrated = Vec::new();
+        assert_eq!(store.hydrate_threads(&mut hydrated, 10).unwrap(), 2);
+        assert_eq!(hydrated[0].messages[0].contact_card, Some(card.clone()));
+        assert_eq!(hydrated[0].messages[0].text, message.text);
+        assert_eq!(hydrated[0].messages[1].contact_card, None);
+
+        hydrated[0].messages[0].contact_card = None;
+        hydrated[0].messages[0].text = "Dữ liệu cũ".into();
+        assert_eq!(store.hydrate_threads(&mut hydrated, 10).unwrap(), 0);
+        assert_eq!(hydrated[0].messages[0].contact_card, Some(card));
+        assert_eq!(hydrated[0].messages[0].text, message.text);
+    }
 
     #[test]
     fn album_layout_and_mentions_survive_the_database_round_trip() {

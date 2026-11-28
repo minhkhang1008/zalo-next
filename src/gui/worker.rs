@@ -479,6 +479,11 @@ pub enum WorkerCmd {
         key: String,
         cluster: String,
     },
+    /// Crop one tile from the shared Zalo emoticon sprite.
+    FetchZaloEmojiTile {
+        col: u8,
+        row: u8,
+    },
     FetchStickerStore,
     FetchStickerPack {
         cate_id: u64,
@@ -1262,6 +1267,7 @@ pub(super) fn spawn_session_worker(
                 // Poll commands run in order (an earlier fetch must not overwrite a vote's result)
                 // without holding up the command loop; tokio's Mutex grants the lock FIFO.
                 let poll_queue = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                let zalo_emoji_sprite = std::sync::Arc::new(tokio::sync::OnceCell::new());
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         // Hashing takes a noticeable time (PBKDF2): run off the command loop.
@@ -3712,6 +3718,34 @@ pub(super) fn spawn_session_worker(
                                 };
                                 let _ = gui_tx_clone.send(event);
                                 ctx_clone.request_repaint();
+                            });
+                        }
+                        WorkerCmd::FetchZaloEmojiTile { col, row } => {
+                            let gui_tx = gui_tx.clone();
+                            let sprite = zalo_emoji_sprite.clone();
+                            tokio::spawn(async move {
+                                use crate::zalo_emoticons;
+
+                                let key = zalo_emoticons::texture_key(col, row);
+                                let tile = sprite
+                                    .get_or_init(zalo_emoticons::load_sprite_with_retry)
+                                    .await
+                                    .as_ref()
+                                    .and_then(|image| zalo_emoticons::crop_tile(image, col, row));
+                                let event = match tile {
+                                    Some(tile) => {
+                                        let edge = zalo_emoticons::TILE_SIZE as usize;
+                                        GuiEvent::StickerImageReady {
+                                            key,
+                                            image: egui::ColorImage::from_rgba_unmultiplied(
+                                                [edge, edge],
+                                                tile.as_raw(),
+                                            ),
+                                        }
+                                    }
+                                    None => GuiEvent::StickerImageFailed { key },
+                                };
+                                let _ = gui_tx.send(event);
                             });
                         }
                         WorkerCmd::FetchStickerStore => {

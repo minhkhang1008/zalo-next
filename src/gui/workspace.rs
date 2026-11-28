@@ -188,6 +188,41 @@ impl ZaloGuiApp {
         }
     }
 
+    fn start_voice_call(&mut self, partner_id: String, partner_name: String, is_group: bool) {
+        self.active_call = Some(ActiveCallOverlay {
+            partner_id: partner_id.clone(),
+            partner_name: partner_name.clone(),
+            is_video: false,
+            is_group,
+            state_label: if is_group {
+                "Đang gọi nhóm Zavi…".into()
+            } else {
+                "Đang kết nối cuộc gọi thoại…".into()
+            },
+            started_at: std::time::Instant::now(),
+            mic_muted: false,
+            cam_enabled: false,
+            is_incoming_ringing: false,
+            is_connected: false,
+            error_code: None,
+            error_reason: None,
+            speaker_view: false,
+            pinned_tile_idx: 0,
+            call_page: 0,
+            members_popover_open: false,
+            invite_search_query: String::new(),
+        });
+        if let Some(tx) = WORKER_TX.get() {
+            let _ = tx.send(WorkerCmd::StartCall {
+                partner_id,
+                partner_name,
+                partner_avatar: None,
+                is_video: false,
+                is_group,
+            });
+        }
+    }
+
     pub(super) fn render_chat_workspace(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         // Responsive breakpoints based on live viewport width
         // -------------------------------------------------------------------
@@ -2572,6 +2607,7 @@ impl ZaloGuiApp {
         // -------------------------------------------------------------------
         // 4. CENTRAL CHAT AREA (Clean Header, Messages Stream, Icon Toolbar)
         // -------------------------------------------------------------------
+        let mut open_contact_thread = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(pal.bg_chat_canvas))
             .show(ctx, |ui| {
@@ -2999,38 +3035,11 @@ impl ZaloGuiApp {
                                         })
                                         .clicked()
                                     {
-                                        self.active_call = Some(ActiveCallOverlay {
-                                            partner_id: thread_id.clone(),
-                                            partner_name: thread_name.clone(),
-                                            is_video: false,
+                                        self.start_voice_call(
+                                            thread_id.clone(),
+                                            thread_name.clone(),
                                             is_group,
-                                            state_label: if is_group {
-                                                "Đang gọi nhóm Zavi…".into()
-                                            } else {
-                                                "Đang kết nối cuộc gọi thoại…".into()
-                                            },
-                                            started_at: std::time::Instant::now(),
-                                            mic_muted: false,
-                                            cam_enabled: false,
-                                            is_incoming_ringing: false,
-                                            is_connected: false,
-                                            error_code: None,
-                                            error_reason: None,
-                                            speaker_view: false,
-                                            pinned_tile_idx: 0,
-                                            call_page: 0,
-                                            members_popover_open: false,
-                                            invite_search_query: String::new(),
-                                        });
-                                        if let Some(tx) = WORKER_TX.get() {
-                                            let _ = tx.send(WorkerCmd::StartCall {
-                                                partner_id: thread_id.clone(),
-                                                partner_name: thread_name.clone(),
-                                                partner_avatar: None,
-                                                is_video: false,
-                                                is_group,
-                                            });
-                                        }
+                                        );
                                     }
                                     // Search Messages in Conversation Button (`Ctrl+F`)
                                     let (srch_rect, srch_resp) = ui.allocate_exact_size(
@@ -4181,6 +4190,8 @@ impl ZaloGuiApp {
                                                         &reactor_name,
                                                         album_members.as_deref(),
                                                         poll_card.as_ref(),
+                                                        &self.threads,
+                                                        &self.user_uin,
                                                     ) {
                                                         if matches!(action, BubbleAction::FetchPoll { .. }) {
                                                             pending_poll_fetches.push((idx, action));
@@ -4440,6 +4451,29 @@ impl ZaloGuiApp {
                                     }
                                 }
                                 BubbleAction::ScheduleReminder => { self.open_local_reminder(thread_id.clone(), m); }
+                                BubbleAction::MessageContact => {
+                                    if let Some(card) = m.contact_card {
+                                        open_contact_thread = self
+                                            .threads
+                                            .iter()
+                                            .position(|thread| thread.id == card.uid);
+                                    }
+                                }
+                                BubbleAction::CallContact => {
+                                    if let Some(card) = m.contact_card {
+                                        self.start_voice_call(card.uid, card.name, false);
+                                    }
+                                }
+                                BubbleAction::CopyContactPhone => {
+                                    if let Some(phone) = m.contact_card.and_then(|card| card.phone) {
+                                        let digits: String =
+                                            phone.chars().filter(char::is_ascii_digit).collect();
+                                        if !digits.is_empty() {
+                                            ctx.copy_text(digits);
+                                            self.show_toast("Đã sao chép số điện thoại vào bộ nhớ tạm");
+                                        }
+                                    }
+                                }
                                 BubbleAction::CallAgain { is_video } => {
                                     self.active_call = Some(ActiveCallOverlay {
                                         partner_id: thread_id.clone(),
@@ -5921,6 +5955,16 @@ impl ZaloGuiApp {
                     });
                 }
             });
+
+        if let Some(index) = open_contact_thread {
+            if index != self.selected_thread_index {
+                self.cancel_reply();
+                self.filter_starred_only = false;
+                self.force_scroll_to_bottom = true;
+                self.selected_thread_index = index;
+                ctx.request_repaint();
+            }
+        }
 
         self.render_profile_popover(ctx, pal);
         self.render_wipe_confirm(ctx, pal);
