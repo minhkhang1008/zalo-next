@@ -735,6 +735,7 @@ impl MessageStore {
                             && existing.bank_card_ref.is_none()
                             && cm.bank_card_ref.is_none()
                             && existing.text == cm.text
+                            && existing.text_styles == cm.text_styles
                             && existing.is_outgoing == cm.is_outgoing
                             && (existing.ts == cm.ts
                                 || (existing.ts != 0
@@ -2131,6 +2132,44 @@ mod tests {
         store.hydrate_threads(&mut hydrated, 10).unwrap();
         assert_eq!(hydrated[0].messages[0].text_styles, styles);
         assert_eq!(hydrated[0].messages[0].text, "ế😀");
+    }
+
+    #[test]
+    fn rich_text_hydration_keeps_distinct_messages_with_different_styles() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let thread = Thread {
+            id: "thread-1".into(),
+            messages: vec![
+                ChatMessage {
+                    id: "message-1".into(),
+                    text: "abc".into(),
+                    ts: 1000,
+                    text_styles: serde_json::from_value(serde_json::json!([
+                        {"start": 0, "end": 3, "bold": true}
+                    ])).unwrap(),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "message-2".into(),
+                    text: "abc".into(),
+                    ts: 2000,
+                    text_styles: serde_json::from_value(serde_json::json!([
+                        {"start": 0, "end": 3, "italic": true}
+                    ])).unwrap(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        persist_threads(&mut store, std::slice::from_ref(&thread)).unwrap();
+
+        let mut hydrated = Vec::new();
+        assert_eq!(store.hydrate_threads(&mut hydrated, 10).unwrap(), 2);
+        assert_eq!(hydrated[0].messages.len(), 2);
+        for (actual, expected) in hydrated[0].messages.iter().zip(&thread.messages) {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.text_styles, expected.text_styles);
+        }
     }
 
     fn row(thread: &str, id: &str, ts: i64, text: &str, raw_json: &str) -> StoredMessage {

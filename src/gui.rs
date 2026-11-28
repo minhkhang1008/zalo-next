@@ -2933,11 +2933,18 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Không gửi được: {error}");
                 }
                 GuiEvent::ComposerSendFailed { thread_id, text, text_styles, error } => {
-                    if self.input_message.is_empty()
-                        && self.threads.get(self.selected_thread_index).is_some_and(|t| t.id == thread_id)
-                    {
-                        self.rich_composer.restore(&text, text_styles);
-                        self.input_message = text;
+                    if self.threads.get(self.selected_thread_index).is_some_and(|t| t.id == thread_id) {
+                        if self.input_message.is_empty() {
+                            self.rich_composer.restore(&text, text_styles);
+                            self.input_message = text;
+                        }
+                    } else {
+                        self.recover_failed_draft(crate::productivity::Draft {
+                            thread_id,
+                            text,
+                            text_styles,
+                            ..Default::default()
+                        });
                     }
                     self.status_msg = format!("Không gửi được: {error}");
                 }

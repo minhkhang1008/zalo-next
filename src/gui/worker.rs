@@ -3309,8 +3309,8 @@ pub(super) fn spawn_session_worker(
                                     &msg, client_id)
                                 .await;
                                 match res {
-                                    Ok(resp) if resp_error_code(&resp).is_none() => {
-                                        let msg_id = extract_msg_id(&resp);
+                                    Ok(forwarded) if resp_error_code(&forwarded.response).is_none() => {
+                                        let msg_id = extract_msg_id(&forwarded.response);
                                         if let Some(sid) = msg.sticker_id.filter(|v| *v > 0) {
                                             let _ = gui_tx_clone.send(GuiEvent::StickerSent {
                                                 client_message_id: client_id.to_string(),
@@ -3321,16 +3321,12 @@ pub(super) fn spawn_session_worker(
                                                 sticker_type: msg.sticker_type.unwrap_or(7),
                                             });
                                         } else if msg.link_url.is_some() {
-                                            let clean_text = if let Some(stripped) = msg.text.strip_prefix("[Đã thu hồi] ") {
-                                                stripped
-                                            } else {
-                                                &msg.text
-                                            };
                                             let out_msg = ChatMessage {
                                                 id: if msg_id.is_empty() { format!("out_{client_id}") } else { msg_id },
                                                 client_message_id: client_id.to_string(),
                                                 sender: "Tôi".into(),
-                                                text: clean_text.to_string(),
+                                                text: forwarded.text,
+                                                text_styles: forwarded.text_styles,
                                                 time: crate::ui::clock(),
                                                 is_outgoing: true,
                                                 ts: (crate::login::unix_now() * 1000) as i64,
@@ -3344,17 +3340,12 @@ pub(super) fn spawn_session_worker(
                                                 msg: out_msg,
                                             });
                                         } else {
-                                            let clean_text = if let Some(stripped) = msg.text.strip_prefix("[Đã thu hồi] ") {
-                                                stripped
-                                            } else {
-                                                &msg.text
-                                            };
                                             let _ = gui_tx_clone.send(GuiEvent::MessageSent {
                                                 client_message_id: client_id.to_string(),
                                                 thread_id: target_id.clone(),
-                                                text: clean_text.to_string(),
+                                                text: forwarded.text,
                                                 msg_id,
-                                                text_styles: Vec::new(),
+                                                text_styles: forwarded.text_styles,
                                                 mentions: Vec::new(),
                                             });
                                         }
@@ -3396,10 +3387,10 @@ pub(super) fn spawn_session_worker(
                                             error: None,
                                         });
                                     }
-                                    Ok(resp) => {
+                                    Ok(forwarded) => {
                                         let err_s = format!(
                                             "server error {}",
-                                            resp_error_code(&resp).unwrap_or(0)
+                                            resp_error_code(&forwarded.response).unwrap_or(0)
                                         );
                                         crate::logger::log_error("gui::forward", &err_s);
                                         let _ = gui_tx_clone.send(GuiEvent::ForwardFinished {

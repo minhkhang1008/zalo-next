@@ -90,6 +90,7 @@ pub(crate) fn validate_text_styles(text: &str, styles: &mut Vec<TextStyle>) {
 }
 
 pub(crate) const BANK_CARD_PREVIEW: &str = "[Tài khoản ngân hàng]";
+const RECALL_PREFIX: &str = "[Đã thu hồi] ";
 
 /// Reference to the HTML that supplies a bank card's display data.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -189,7 +190,6 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub(crate) fn mark_recalled(&mut self) {
-        const PREFIX: &str = "[Đã thu hồi] ";
         if self.text.starts_with("[Đã thu hồi]") {
             return;
         }
@@ -197,10 +197,10 @@ impl ChatMessage {
             self.text = "[Tin nhắn đã thu hồi]".into();
             self.text_styles.clear();
         } else {
-            self.text.insert_str(0, PREFIX);
+            self.text.insert_str(0, RECALL_PREFIX);
             for span in &mut self.text_styles {
-                span.start = span.start.saturating_add(PREFIX.len());
-                span.end = span.end.saturating_add(PREFIX.len());
+                span.start = span.start.saturating_add(RECALL_PREFIX.len());
+                span.end = span.end.saturating_add(RECALL_PREFIX.len());
             }
         }
     }
@@ -1884,12 +1884,26 @@ pub(crate) struct PreparedText {
 
 impl PreparedText {
     pub(crate) fn new(text: &str, styles: &[TextStyle]) -> Self {
-        let (text, properties) = if styles.is_empty() {
-            extract_zalo_rtf_text_properties(text)
+        if styles.is_empty() {
+            let (text, properties) = extract_zalo_rtf_text_properties(text);
+            Self { text, properties }
         } else {
-            (text.to_owned(), build_zalo_text_properties(text, styles))
-        };
-        Self { text, properties }
+            Self::from_spans(text, styles)
+        }
+    }
+
+    fn from_spans(text: &str, styles: &[TextStyle]) -> Self {
+        Self {
+            text: text.to_owned(),
+            properties: build_zalo_text_properties(text, styles),
+        }
+    }
+
+    fn into_text_and_styles(self) -> (String, Vec<TextStyle>) {
+        let styles = self.properties.map_or_else(Vec::new, |properties| {
+            parse_text_properties(&self.text, &Value::String(properties))
+        });
+        (self.text, styles)
     }
 
     fn insert_properties(&self, body: &mut Value) {
@@ -4378,6 +4392,31 @@ pub(crate) async fn send_quote_message_with_mentions(
     }
 }
 
+fn prepare_forward_text(msg: &ChatMessage) -> PreparedText {
+    let Some(text) = msg.text.strip_prefix(RECALL_PREFIX) else {
+        return PreparedText::new(&msg.text, &msg.text_styles);
+    };
+    if msg.text_styles.is_empty() {
+        return PreparedText::new(text, &[]);
+    }
+    let removed = RECALL_PREFIX.len();
+    let shifted: Vec<_> = msg.text_styles.iter().copied()
+        .filter(|span| span.end > removed && span.fits(&msg.text))
+        .map(|span| TextStyle {
+            start: span.start.saturating_sub(removed),
+            end: span.end - removed,
+            format: span.format,
+        })
+        .collect();
+    PreparedText::from_spans(text, &shifted)
+}
+
+pub(crate) struct ForwardedMessage {
+    pub response: Value,
+    pub text: String,
+    pub text_styles: Vec<TextStyle>,
+}
+
 /// Forward a message or sticker to another conversation (`forwardMultiMessage` @ `compact-app-pc.js:14323900`).
 pub async fn forward_message(
     s: &Session,
@@ -4387,6 +4426,7 @@ pub async fn forward_message(
 ) -> Result<Value> {
     forward_message_with_client_id(s, target_id, target_is_group, msg, next_client_message_id())
         .await
+        .map(|sent| sent.response)
 }
 
 /// Preserve the request client ID for reconciliation with a later server echo.
@@ -4396,12 +4436,12 @@ pub(crate) async fn forward_message_with_client_id(
     target_is_group: bool,
     msg: &ChatMessage,
     now: u64,
-) -> Result<Value> {
+) -> Result<ForwardedMessage> {
     if let Some(sid) = msg.sticker_id {
         if sid > 0 {
             let cid = msg.sticker_cate_id.unwrap_or(0);
             let stype = msg.sticker_type.unwrap_or(7);
-            return send_sticker_with_client_id(
+            let response = send_sticker_with_client_id(
                 s,
                 target_id,
                 sid,
@@ -4410,22 +4450,17 @@ pub(crate) async fn forward_message_with_client_id(
                 target_is_group,
                 now,
             )
-            .await;
+            .await?;
+            return Ok(ForwardedMessage { response, text: String::new(), text_styles: Vec::new() });
         }
     }
-    // Clean text if message was previously marked as recalled
-    let clean_text = if let Some(stripped) = msg.text.strip_prefix("[Đã thu hồi] ") {
-        stripped
-    } else {
-        &msg.text
-    };
-
     // Forward photo if message contains a photo CDN URL
     if let Some(photo_url) = msg
         .link_url
         .as_deref()
         .filter(|u| is_zalo_photo_cdn_url(u) && is_safe_external_image_url(u))
     {
+        let clean_text = msg.text.strip_prefix(RECALL_PREFIX).unwrap_or(&msg.text);
         if let Ok(resp) = s.http.get(photo_url).send().await {
             if let Ok(bytes) = resp.bytes().await {
                 if !bytes.is_empty() {
@@ -4441,7 +4476,11 @@ pub(crate) async fn forward_message_with_client_id(
                                 .await;
                         let _ = std::fs::remove_file(&temp_path);
                         if let Ok((resp_v, _)) = res {
-                            return Ok(resp_v);
+                            return Ok(ForwardedMessage {
+                                response: resp_v,
+                                text: clean_text.to_owned(),
+                                text_styles: Vec::new(),
+                            });
                         }
                     }
                 }
@@ -4449,11 +4488,14 @@ pub(crate) async fn forward_message_with_client_id(
         }
     }
 
-    if target_is_group {
-        send_group_message_with_client_id(s, target_id, clean_text, now).await
+    let prepared = prepare_forward_text(msg);
+    let response = if target_is_group {
+        send_group_message_prepared(s, target_id, &prepared, now).await?
     } else {
-        send_message_with_client_id(s, target_id, clean_text, now).await
-    }
+        send_message_prepared(s, target_id, &prepared, now).await?
+    };
+    let (text, text_styles) = prepared.into_text_and_styles();
+    Ok(ForwardedMessage { response, text, text_styles })
 }
 
 /// Convert Zalo reaction icon code to visual emoji.
@@ -6580,24 +6622,32 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         .filter(|text| text.starts_with('{') && text.ends_with('}'))
         .and_then(|text| serde_json::from_str::<Value>(text).ok());
     let content_value = content_json.as_ref().or(raw_content_val);
+    fn envelope_text(content: &Value) -> Option<&str> {
+        content["message"].as_str().or_else(|| content["text"].as_str())
+    }
+    let has_styles = |properties: &&Value| {
+        properties.get("styles").is_some()
+            || properties.as_str().is_some_and(|raw| raw.trim_start().starts_with('{'))
+    };
     let rtf_content = content_value.filter(|value| value["action"].as_str() == Some("rtf"));
+    // A JSON-looking string with only outer properties is still the literal message text.
+    let formatted_content = content_json.as_ref()
+        .filter(|value| {
+            envelope_text(value).is_some() && value.get("textProperties").filter(has_styles).is_some()
+        })
+        .or(raw_content_val);
     let text_properties = rtf_content
         .and_then(|value| value.get("params"))
-        .or_else(|| content_value.and_then(|value| value.get("textProperties")))
+        .or_else(|| formatted_content.and_then(|value| value.get("textProperties")))
         .or_else(|| it.get("textProperties"))
         .or_else(|| it.get("message")?.get("textProperties"))
-        .filter(|properties| {
-            properties.get("styles").is_some()
-                || properties.as_str().is_some_and(|raw| raw.trim_start().starts_with('{'))
-        });
+        .filter(has_styles);
     let formatted_text = rtf_content
         .and_then(|value| value["title"].as_str())
         .or_else(|| {
             text_properties?;
-            let content = raw_content_val?;
-            content.as_str()
-                .or_else(|| content["message"].as_str())
-                .or_else(|| content["text"].as_str())
+            let content = formatted_content?;
+            content.as_str().or_else(|| envelope_text(content))
         });
 
     let poll_content = content_value;
@@ -6949,7 +6999,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         None
     };
     let text_styles = text_properties
-        .filter(|_| !is_poll && !is_undo_type && !is_voice_msg && !is_photo_msg
+        .filter(|_| !is_poll && bank_card.is_none() && !is_undo_type && !is_voice_msg && !is_photo_msg
             && !is_file_msg && !is_video_msg && sticker_meta.is_none() && contact_card.is_none())
         .map_or_else(Vec::new, |props| parse_text_properties(&content, props));
     Some(ChatMessage {
@@ -11109,6 +11159,28 @@ mod send_identity_tests {
     }
 
     #[test]
+    fn rich_text_decodes_text_and_properties_from_the_same_envelope() {
+        for key in ["text", "message"] {
+            let mut envelope = json!({
+                "textProperties": {"styles": [{"start": 1, "len": 2, "st": "b"}], "ver": 0}
+            });
+            envelope[key] = json!("ế😀");
+            for content in [envelope.clone(), json!(envelope.to_string())] {
+                let message = parse_chat_message(&json!({
+                    "msgId": "fixture",
+                    "msgType": "chat.text",
+                    "content": content
+                })).unwrap();
+                assert_eq!(message.text, "ế😀");
+                assert_eq!(message.text_styles.len(), 1);
+                let span = message.text_styles[0];
+                assert_eq!(&message.text[span.start..span.end], "😀");
+                assert!(span.format.bold);
+            }
+        }
+    }
+
+    #[test]
     fn rich_text_envelope_keeps_literal_json_and_mention_offsets() {
         let text = r#"{"text":"😀 @An"}"#;
         let mut props = json!({"styles": [{"start": 0, "len": 1, "st": "i,c_f7b503,ind_40"}]});
@@ -11126,6 +11198,41 @@ mod send_identity_tests {
             uid: "123".into(),
             name: "An".into(),
         }]), [json!({"pos": 12, "len": 3, "type": 0, "uid": "123"})]);
+    }
+
+    #[test]
+    fn rich_text_forward_uses_the_same_shifted_offsets_for_wire_and_acknowledgement() {
+        let text = "ế😀**x**";
+        let props = json!({"styles": [
+            {"start": 0, "len": 1, "st": "i"},
+            {"start": 1, "len": 2, "st": "b,c_db342e"}
+        ], "ver": 0});
+        let mut message = parse_chat_message(&json!({
+            "msgId": "fixture",
+            "message": text,
+            "textProperties": props
+        })).unwrap();
+        let expected_styles = message.text_styles.clone();
+        let (forwarded_text, forwarded_styles) = prepare_forward_text(&message).into_text_and_styles();
+        assert_eq!((forwarded_text.as_str(), forwarded_styles), (text, expected_styles.clone()));
+
+        message.mark_recalled();
+        message.text_styles.insert(0, TextStyle {
+            start: 0,
+            end: 1,
+            format: TextStyleFormat { underline: true, ..Default::default() },
+        });
+        message.text_styles[1].start = RECALL_PREFIX.len() - 1;
+        let prepared = prepare_forward_text(&message);
+        assert_eq!(prepared.text, text);
+        assert_eq!(
+            prepared.properties.as_deref().map(|raw| serde_json::from_str::<Value>(raw).unwrap()),
+            Some(props)
+        );
+        assert_eq!(prepared.into_text_and_styles(), (text.to_owned(), expected_styles));
+
+        message.text_styles.truncate(1);
+        assert_eq!(prepare_forward_text(&message).into_text_and_styles(), (text.to_owned(), Vec::new()));
     }
 
     #[test]

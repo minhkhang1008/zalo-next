@@ -17,6 +17,7 @@ pub(super) struct RichComposer {
     pub(super) styles: Vec<TextStyle>,
     text: String,
     pending: Option<(usize, TextStyleFormat)>,
+    backspace: bool,
 }
 
 fn push_span(spans: &mut Vec<TextStyle>, start: usize, end: usize, format: TextStyleFormat) {
@@ -211,13 +212,28 @@ fn selection(ctx: &egui::Context, id: Id, text: &str) -> Range<usize> {
         .unwrap_or(text.len()..text.len())
 }
 
-fn changed_ranges(old: &str, new: &str, anchor: Option<usize>) -> (Range<usize>, Range<usize>) {
+fn changed_ranges(
+    old: &str,
+    new: &str,
+    anchor: Option<usize>,
+    backspace: bool,
+) -> (Range<usize>, Range<usize>) {
     let mut prefix: usize = old
         .chars()
         .zip(new.chars())
         .take_while(|(a, b)| a == b)
         .map(|(ch, _)| ch.len_utf8())
         .sum();
+    if backspace && old.len() > new.len() {
+        let removed = old.len() - new.len();
+        if let Some((start, end)) = anchor.and_then(|end| Some((end.checked_sub(removed)?, end))) {
+            // Only use the caret if removing exactly this range produces the edited text.
+            if start <= prefix && old.is_char_boundary(start) && old.get(end..) == new.get(start..)
+            {
+                return (start..end, start..start);
+            }
+        }
+    }
     if let Some(anchor) = anchor.filter(|&a| a <= prefix && old.is_char_boundary(a)) {
         prefix = anchor;
     }
@@ -324,6 +340,7 @@ impl RichComposer {
     }
 
     pub(super) fn sync(&mut self, text: &str, hint: Option<usize>) {
+        let backspace = hint.is_some() && std::mem::take(&mut self.backspace);
         if text == self.text {
             return;
         }
@@ -332,8 +349,8 @@ impl RichComposer {
             return;
         }
         if !self.styles.is_empty() || self.pending.is_some() {
-            let anchor = self.pending.map(|(at, _)| at).or(hint);
-            let (old, new) = changed_ranges(&self.text, text, anchor);
+            let anchor = hint.or(self.pending.map(|(at, _)| at));
+            let (old, new) = changed_ranges(&self.text, text, anchor, backspace);
             let pending = self.pending.take().filter(|(at, _)| *at == old.start);
             let format = pending.map_or_else(
                 || style_at(&self.styles, old.start, old.is_empty()),
@@ -571,9 +588,30 @@ impl RichComposer {
         }
     }
 
-    pub(super) fn edit_hint(&self, ctx: &egui::Context, id: Id) -> Option<usize> {
-        (!self.styles.is_empty() || self.pending.is_some())
-            .then(|| selection(ctx, id, &self.text).start)
+    pub(super) fn edit_hint(&mut self, ctx: &egui::Context, id: Id) -> Option<usize> {
+        self.backspace = false;
+        if self.styles.is_empty() && self.pending.is_none() {
+            return None;
+        }
+        let selected = selection(ctx, id, &self.text);
+        // egui lays out the edited text before it saves the new caret.
+        self.backspace = selected.is_empty()
+            && ctx.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    egui::Event::Key {
+                        key: Key::Backspace,
+                        pressed: true,
+                        ..
+                    } => Some(true),
+                    egui::Event::Key {
+                        key: Key::Delete,
+                        pressed: true,
+                        ..
+                    } => Some(false),
+                    _ => None,
+                }) == Some(true)
+            });
+        Some(selected.start)
     }
 }
 
@@ -756,6 +794,83 @@ mod tests {
         assert_eq!(composer.styles, [bold(1, 4)]);
         composer.sync("xy", None);
         assert!(composer.styles.is_empty());
+    }
+
+    fn delete_at_editor_caret(key: Key, caret: usize, character: char) -> Vec<TextStyle> {
+        let ctx = egui::Context::default();
+        let id = Id::new("deletion-test-editor");
+        let mut text = character.to_string().repeat(4);
+        let width = character.len_utf8();
+        let mut composer = RichComposer::default();
+        composer.restore(&text, vec![bold(width, 2 * width)]);
+        let mut state = egui::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(caret),
+            )));
+        state.store(&ctx, id);
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mut hint = composer.edit_hint(ctx, id);
+                    let mut initial_layout = true;
+                    let mut layouter = |ui: &egui::Ui, text: &str, width: f32| {
+                        let hint = if std::mem::take(&mut initial_layout) {
+                            None
+                        } else {
+                            hint.take()
+                        };
+                        composer.sync(text, hint);
+                        ui.fonts(|fonts| {
+                            fonts.layout(text.to_owned(), FontId::default(), Color32::WHITE, width)
+                        })
+                    };
+                    egui::TextEdit::singleline(&mut text)
+                        .id(id)
+                        .layouter(&mut layouter)
+                        .show(ui);
+                    composer.caret_changed(ctx, id);
+                });
+            },
+        );
+        assert_eq!(text, character.to_string().repeat(3));
+        composer.styles
+    }
+
+    #[test]
+    fn backspace_uses_the_character_before_the_caret_in_repeated_text() {
+        for character in ['a', 'ế', '😀'] {
+            assert!(delete_at_editor_caret(Key::Backspace, 2, character).is_empty());
+            let width = character.len_utf8();
+            assert_eq!(
+                delete_at_editor_caret(Key::Backspace, 1, character),
+                [bold(0, width)]
+            );
+        }
+    }
+
+    #[test]
+    fn delete_uses_the_character_after_the_caret_in_repeated_text() {
+        for character in ['a', 'ế', '😀'] {
+            assert!(delete_at_editor_caret(Key::Delete, 1, character).is_empty());
+            let width = character.len_utf8();
+            assert_eq!(
+                delete_at_editor_caret(Key::Delete, 2, character),
+                [bold(width, 2 * width)]
+            );
+        }
     }
 
     #[test]

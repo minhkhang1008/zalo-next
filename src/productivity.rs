@@ -16,6 +16,12 @@ pub struct Draft {
     pub auto_mention: Option<(String, String)>,
     pub mentions: Vec<(String, String)>,
 }
+
+impl Draft {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.reply.is_none()
+    }
+}
 /// A locally saved message with an editable note.
 #[derive(Debug, Clone)]
 pub struct Saved {
@@ -74,7 +80,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
 /// Persist even whitespace drafts faithfully; an empty draft removes its row.
 pub fn save_draft(conn: &Connection, draft: &Draft) -> Result<()> {
     ensure!(draft.text.len() <= 1024 * 1024, "Bản nháp quá dài.");
-    if draft.text.is_empty() && draft.reply.is_none() {
+    if draft.is_empty() {
         conn.execute("DELETE FROM drafts WHERE thread_id=?1", [&draft.thread_id])?;
     } else {
         conn.execute("INSERT INTO drafts(thread_id,payload) VALUES(?1,?2) ON CONFLICT(thread_id) DO UPDATE SET payload=excluded.payload", params![draft.thread_id, serde_json::to_string(draft)?])?;

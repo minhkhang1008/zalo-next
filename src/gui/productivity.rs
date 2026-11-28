@@ -21,6 +21,7 @@ pub(super) struct State {
     pub quitting: bool,
     pub status: String,
     pending: HashMap<String, Draft>,
+    deferred_failed_drafts: HashMap<String, Draft>,
     note_edits: HashMap<String, String>,
     fired: Vec<crate::productivity::Reminder>,
 }
@@ -43,7 +44,7 @@ impl ZaloGuiApp {
         self.productivity
             .drafts
             .get(thread)
-            .filter(|d| !d.text.is_empty() || d.reply.is_some())
+            .filter(|draft| !draft.is_empty())
             .map(|d| format!("Nháp: {}", d.text.chars().take(80).collect::<String>()))
     }
     fn current_draft(&self) -> Draft {
@@ -88,6 +89,31 @@ impl ZaloGuiApp {
                     .pending
                     .insert(draft.thread_id.clone(), draft);
             }
+        }
+    }
+    pub(super) fn recover_failed_draft(&mut self, draft: Draft) {
+        if self.user_uin.is_empty()
+            || self.productivity.account != self.user_uin
+            || draft.thread_id.is_empty()
+            || draft.text.is_empty()
+            || self.productivity.drafts.get(&draft.thread_id).is_some_and(|d| !d.is_empty())
+        {
+            return;
+        }
+        let is_bound = self.productivity.bound == draft.thread_id;
+        if is_bound && (!self.input_message.is_empty() || self.replying_to.is_some()) {
+            return;
+        }
+        if self.productivity.loaded {
+            let thread_id = draft.thread_id.clone();
+            self.store_current_draft(draft);
+            if is_bound {
+                // A selection change can leave the old composer bound until local_begin.
+                self.restore_draft(thread_id);
+            }
+        } else {
+            // Wait for the initial snapshot before deciding whether to replace a saved draft.
+            self.productivity.deferred_failed_drafts.entry(draft.thread_id.clone()).or_insert(draft);
         }
     }
     fn restore_draft(&mut self, thread: String) {
@@ -212,6 +238,13 @@ impl ZaloGuiApp {
                 if first {
                     for draft in std::mem::take(&mut self.productivity.pending).into_values() {
                         self.local_action(Action::Draft(draft));
+                    }
+                    for draft in std::mem::take(&mut self.productivity.deferred_failed_drafts).into_values() {
+                        if !self.productivity.snapshot.drafts.iter().any(|saved| {
+                            saved.thread_id == draft.thread_id && !saved.is_empty()
+                        }) {
+                            self.recover_failed_draft(draft);
+                        }
                     }
                 }
                 if first && self.input_message.is_empty() {
