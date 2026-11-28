@@ -1530,3 +1530,13 @@ Entry template:
   immediate quit — applies to every setting, pre-existing.
 - Verification: `cargo test --locked` 644 lib tests pass; python release-notes tests pass; dmg rebuilt.
   NOT verified live: the new Settings layouts (release notes card, HD toggle).
+
+## 2026-11-28 — Account menu rarely opens from the own avatar  (agent: Claude Code, claude-opus-5-5)
+- Request: clicking the own avatar (left rail) usually does not open the account menu; sometimes it does.
+- Root cause: `render_profile_popover` (src/gui/modals.rs) closes on any click outside the popover whose
+  position is not in a hard-coded corner `x <= 64 && y <= 60`. The avatar is drawn below the 32 px custom
+  title bar plus the rail's 16 px margin (≈ y 48–96), so a click on its lower part counted as "outside": the
+  rail opened the menu and the popover closed it in the same frame. Only clicks on the top ~12 px worked.
+- Changes: the rail stores the avatar rect (`profile_avatar_rect`); the popover excludes clicks inside it and
+  opens beside it (fallback to the old position before the first frame).
+- Verification: cargo check; `cargo test --locked --lib gui::` pass; dmg rebuilt. NOT verified live.
