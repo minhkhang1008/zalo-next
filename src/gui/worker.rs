@@ -3,6 +3,9 @@ use std::future::{poll_fn, Future};
 use std::sync::Arc;
 use std::task::Poll;
 use tokio::sync::{watch, Mutex};
+use crate::bank_cards::{Bank, BankAccount, BankCards, DEFAULT_DELETE_ERROR};
+use std::sync::Weak;
+use tokio::sync::OnceCell;
 
 /// Thread (id, name, is_group) list the poll timer maps incoming messages onto; the GUI
 /// republishes it whenever its threads change.
@@ -229,6 +232,95 @@ async fn cache_notification_avatar(
     .flatten()
 }
 
+pub struct BankRequest {
+    pub(super) uin: String,
+    pub(super) id: u64,
+}
+
+#[derive(Default)]
+struct BankCatalogue {
+    session_jar: Weak<reqwest::cookie::Jar>,
+    banks: Arc<OnceCell<Arc<[Bank]>>>,
+}
+
+impl BankCatalogue {
+    fn for_session(&mut self, session: &Session) -> Arc<OnceCell<Arc<[Bank]>>> {
+        let jar = Arc::downgrade(&session.jar);
+        if !self.session_jar.ptr_eq(&jar) {
+            self.session_jar = jar;
+            self.banks = Arc::default();
+        }
+        self.banks.clone()
+    }
+}
+
+async fn run_bank_command(
+    session: &Session,
+    banks: &OnceCell<Arc<[Bank]>>,
+    command: WorkerCmd,
+) -> anyhow::Result<BankCardsUpdate> {
+    let client = BankCards::new(session)?;
+    match command {
+        WorkerCmd::LoadBankAccounts { .. } => {
+            let banks = banks.get_or_try_init(|| async {
+                client.list_banks().await.map(Arc::from)
+            }).await?.clone();
+            let saved = client.list_all_accounts().await?;
+            Ok(BankCardsUpdate::Loaded {
+                banks,
+                accounts: saved.accounts,
+                has_multiple: saved.has_multiple,
+            })
+        }
+        WorkerCmd::CreateBankAccount { account, .. } => {
+            client.create_account(&account).await?;
+            Ok(BankCardsUpdate::Saved)
+        }
+        WorkerCmd::UpdateBankAccount { account, .. } => {
+            client.update_account(&account).await?;
+            Ok(BankCardsUpdate::Saved)
+        }
+        WorkerCmd::DeleteBankAccount { account, .. } => {
+            // The phone can change which account is default while this dialog is open.
+            let saved = client.list_all_accounts().await?;
+            let current = saved.accounts.iter().find(|row| row.account_id == account.account_id)
+                .ok_or_else(|| anyhow::anyhow!("Số tài khoản này không còn trong danh sách."))?;
+            if current.is_default && saved.has_multiple {
+                anyhow::bail!("{DEFAULT_DELETE_ERROR}");
+            }
+            client.delete_account(current).await?;
+            Ok(BankCardsUpdate::Deleted)
+        }
+        WorkerCmd::SendBankCard { thread_id, is_group, account, .. } => {
+            client.send_bank_card(&thread_id, is_group, &account).await?;
+            Ok(BankCardsUpdate::Sent)
+        }
+        _ => anyhow::bail!("Yêu cầu số tài khoản không hợp lệ."),
+    }
+}
+
+async fn load_bank_logo(session: &Session, url: &str) -> Option<egui::ColorImage> {
+    if !crate::session::is_trusted_zalo_url(url) || !url.starts_with("https://") {
+        return None;
+    }
+    // Bank logos use the no-redirect client without any session headers or cookie provider.
+    let response = session.bank_http_client().ok()?.get(url).send().await.ok()?;
+    let bytes = crate::media_resources::read_bounded_response(response, 512 * 1024)
+        .await.ok()?;
+    tokio::task::spawn_blocking(move || {
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format().ok()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(1024);
+        limits.max_image_height = Some(1024);
+        limits.max_alloc = Some(8 * 1024 * 1024);
+        reader.limits(limits);
+        let rgba = reader.decode().ok()?.thumbnail(96, 96).to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        Some(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+    }).await.ok().flatten()
+}
+
 pub enum WorkerCmd {
     AppLockTryPasscode {
         config: app_lock::Config,
@@ -241,6 +333,31 @@ pub enum WorkerCmd {
     },
     AppLockSave {
         config: app_lock::Config,
+    },
+    LoadBankAccounts {
+        request: BankRequest,
+    },
+    CreateBankAccount {
+        request: BankRequest,
+        account: BankAccount,
+    },
+    UpdateBankAccount {
+        request: BankRequest,
+        account: BankAccount,
+    },
+    DeleteBankAccount {
+        request: BankRequest,
+        account: BankAccount,
+    },
+    SendBankCard {
+        request: BankRequest,
+        thread_id: String,
+        is_group: bool,
+        account: BankAccount,
+    },
+    LoadBankLogo {
+        uin: String,
+        url: String,
     },
     StartVideo {
         account: String,
@@ -1305,6 +1422,7 @@ pub(super) fn spawn_session_worker(
                 // without holding up the command loop; tokio's Mutex grants the lock FIFO.
                 let poll_queue = std::sync::Arc::new(tokio::sync::Mutex::new(()));
                 let zalo_emoji_sprite = std::sync::Arc::new(tokio::sync::OnceCell::new());
+                let mut bank_catalogue = BankCatalogue::default();
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         // Hashing takes a noticeable time (PBKDF2): run off the command loop.
@@ -1350,6 +1468,45 @@ pub(super) fn spawn_session_worker(
                             let error = (!matches!(result, Ok(Ok(()))))
                                 .then(|| "Không lưu được cấu hình khóa ứng dụng.".into());
                             let _ = gui_tx.send(GuiEvent::AppLockSaved { config: None, error });
+                        }
+                        command @ (WorkerCmd::LoadBankAccounts { .. }
+                        | WorkerCmd::CreateBankAccount { .. }
+                        | WorkerCmd::UpdateBankAccount { .. }
+                        | WorkerCmd::DeleteBankAccount { .. }
+                        | WorkerCmd::SendBankCard { .. }) => {
+                            let request = match &command {
+                                WorkerCmd::LoadBankAccounts { request }
+                                | WorkerCmd::CreateBankAccount { request, .. }
+                                | WorkerCmd::UpdateBankAccount { request, .. }
+                                | WorkerCmd::DeleteBankAccount { request, .. }
+                                | WorkerCmd::SendBankCard { request, .. } => request,
+                                _ => continue,
+                            };
+                            let uin = request.uin.clone();
+                            let request_id = request.id;
+                            let s = session.lock().await.clone();
+                            let banks = bank_catalogue.for_session(&s);
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let result = if s.login.as_ref().is_some_and(|login| login.uin == uin) {
+                                    run_bank_command(&s, &banks, command).await.map_err(|err| err.to_string())
+                                } else {
+                                    Err("Tài khoản Zalo đã thay đổi.".into())
+                                };
+                                let _ = tx.send(GuiEvent::BankCards { uin, request_id, result });
+                            });
+                        }
+                        WorkerCmd::LoadBankLogo { uin, url } => {
+                            let s = session.lock().await.clone();
+                            let tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let image = if s.login.as_ref().is_some_and(|login| login.uin == uin) {
+                                    load_bank_logo(&s, &url).await
+                                } else {
+                                    None
+                                };
+                                let _ = tx.send(GuiEvent::BankLogo { uin, url, image });
+                            });
                         }
                         WorkerCmd::StartVideo {
                             account,
@@ -1744,6 +1901,7 @@ pub(super) fn spawn_session_worker(
                         }
                         WorkerCmd::Logout => {
                             advance_poll_generation(&poll_generation);
+                            bank_catalogue = BankCatalogue::default();
                             if let Some((_,control,cancelled))=voice_control.take(){cancelled.store(true,std::sync::atomic::Ordering::Relaxed);let _=control.send(true);}
                             crate::history_sync::PHONE_SYNC_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                             crate::history_sync::REFRESH_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1793,6 +1951,7 @@ pub(super) fn spawn_session_worker(
                                 next.logout();
                                 if next.load_from_file("session.json").is_ok() {
                                     *s = next;
+                                    bank_catalogue = BankCatalogue::default();
                                     let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
                                     let name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_default();
                                     let ava = s.login.as_ref().and_then(|l| if l.avatar.is_empty() { None } else { Some(l.avatar.clone()) });
