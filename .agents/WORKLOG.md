@@ -1497,3 +1497,17 @@ Entry template:
   behaviour, answering muted, incoming video with video disabled, received bank card HTML from the real CDN,
   bank form visuals light/dark, rich text round trip with the phone/Zalo PC, phone-number lookups and Zalo's
   rate limit, Windows/Linux. Owner must re-scan the QR (session expired earlier).
+
+## 2026-11-28 — Sidebar black strip / no resize; cleanup rule  (agent: Claude Code, claude-opus-5-5)
+- Request: owner screenshot (dmg 16:52): wide black strip right of the conversation list, sidebar cannot be
+  resized. Also: always clean up branches/worktrees when done, written into AGENTS.md.
+- Root cause: the "Đánh dấu tất cả đã đọc" button (43fda1a) was added to the tab row *after*
+  `render_sidebar_label_filter`, whose `right_to_left` layout already fills the rest of the row, so the
+  button was placed past the panel's right edge. egui's resizable SidePanel stores the content rect as its
+  width every frame (see the 2026-11-11 entry), so the panel grew to its maximum and snapped back after drags.
+- Changes: src/gui/workspace.rs — button moved inside the right-to-left layout (left of "Phân loại").
+  AGENTS.md §5 + CLAUDE.md §3: cleanup rule (remove worktree + delete own merged local branch right away;
+  remote/unmerged/others' branches still need OK). Deleted the 8 merged local branches of this session's
+  work; left `feature/ai-context` and `fix/windows-parity` (older, not created in this session).
+- Verification: cargo check; `cargo test --locked --lib gui::` 158 pass; dmg rebuilt. NOT verified live:
+  the panel width after the fix in the real app (a width already persisted at the maximum may need one drag).
