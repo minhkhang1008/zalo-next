@@ -633,6 +633,43 @@ fn use_session_for_sticker_image(fetch_url: &str) -> bool {
     crate::session::is_trusted_zalo_url(fetch_url)
 }
 
+/// Keep the session's cookies and proxy for Zalo avatars, and check each redirect target.
+fn avatar_image_client(session: &Session) -> Result<reqwest::Client, reqwest::Error> {
+    use reqwest::header::{HeaderMap, HeaderValue, ORIGIN, REFERER};
+    use reqwest::redirect::Policy;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(REFERER, HeaderValue::from_static("https://chat.zalo.me/"));
+    headers.insert(ORIGIN, HeaderValue::from_static("https://chat.zalo.me"));
+    let mut builder = reqwest::Client::builder()
+        .cookie_provider(session.jar.clone())
+        .default_headers(headers)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
+        )
+        .redirect(Policy::custom(|attempt| {
+            if attempt.url().scheme() == "https"
+                && crate::session::is_trusted_zalo_url(attempt.url().as_str())
+            {
+                Policy::default().redirect(attempt)
+            } else {
+                attempt.stop()
+            }
+        }));
+    if let Some(proxy_url) = &session.proxy_url {
+        let mut proxy = reqwest::Proxy::all(proxy_url)?;
+        if let Ok(url) = reqwest::Url::parse(proxy_url) {
+            if !url.username().is_empty() {
+                proxy = proxy.basic_auth(url.username(), url.password().unwrap_or_default());
+            }
+        }
+        builder = builder.proxy(proxy);
+    }
+    builder.build()
+}
+
 /// Full-resolution originals opened in the image viewer (`hd_` keys) can be much larger than
 /// grid thumbnails, so they get their own, still bounded, body limit.
 const ORIGINAL_IMAGE_LIMIT: usize = 64 * 1024 * 1024;
@@ -3351,7 +3388,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     } else {
                                         let fetch_url = crate::store::jxl_to_jpg_url(&url);
                                         let client = if use_session_for_sticker_image(&fetch_url) {
-                                            Ok(session_clone.lock().await.http.clone())
+                                            let session = session_clone.lock().await;
+                                            if key.starts_with("ava_") {
+                                                avatar_image_client(&session)
+                                            } else {
+                                                Ok(session.http.clone())
+                                            }
                                         } else {
                                             crate::media_resources::credential_free_client()
                                         };

@@ -15,6 +15,13 @@ fn format_phone(phone: &str) -> Cow<'_, str> {
     }
 }
 
+pub(super) fn phone_for_clipboard(phone: &str) -> String {
+    phone
+        .chars()
+        .filter(|ch| !matches!(ch, ' ' | '.' | '-' | '(' | ')'))
+        .collect()
+}
+
 pub(super) fn render_contact_card(
     ui: &mut egui::Ui,
     card: &ContactCard,
@@ -95,7 +102,18 @@ pub(super) fn render_contact_card(
 
 #[cfg(test)]
 mod tests {
-    use super::format_phone;
+    use super::{format_phone, phone_for_clipboard};
+
+    #[test]
+    fn clipboard_keeps_international_prefix_and_local_leading_zero() {
+        assert_eq!(phone_for_clipboard("+84 (79) 386-25.68"), "+84793862568");
+        assert_eq!(phone_for_clipboard("(079) 386-25.68"), "0793862568");
+        assert_eq!(
+            phone_for_clipboard("(555) 123-4567;ext=9"),
+            "5551234567;ext=9"
+        );
+        assert_eq!(phone_for_clipboard(" ( . - ) "), "");
+    }
 
     #[test]
     fn formats_ten_digit_vietnamese_numbers() {

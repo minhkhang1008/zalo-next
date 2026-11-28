@@ -1486,26 +1486,62 @@ struct EmojiMark {
     shortcut: Option<String>,
 }
 
+struct SourceEmoticons<'a> {
+    text: &'a str,
+    matches: Vec<crate::zalo_emoticons::Match>,
+}
+
+impl<'a> SourceEmoticons<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            matches: crate::zalo_emoticons::find(text),
+        }
+    }
+
+    fn in_span(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> impl Iterator<Item = &crate::zalo_emoticons::Match> {
+        let first = self.matches.partition_point(|m| m.range.start < start);
+        self.matches[first..]
+            .iter()
+            .take_while(move |m| m.range.end <= start + len)
+    }
+}
+
+// The Markdown parser passes borrowed substrings, including when parsing table cells and lists.
+fn source_offset(source: &str, span: &str) -> usize {
+    if span.is_empty() {
+        0
+    } else {
+        span.as_ptr().addr() - source.as_ptr().addr()
+    }
+}
+
 /// Rebuild `job` so every inline emoji with a ready colour texture becomes its own transparent
 /// placeholder section. The returned marks identify the textures and original Zalo shortcuts.
 fn split_emoji_sections(
     job: egui::text::LayoutJob,
     textures: &HashMap<String, TextureHandle>,
     loading: &mut HashSet<String>,
-    protected_sections: &[usize],
+    source: &SourceEmoticons<'_>,
+    section_offsets: &[Option<usize>],
 ) -> (egui::text::LayoutJob, Vec<EmojiMark>) {
     let mut out = job.clone();
     out.text.clear();
     out.sections.clear();
     let mut marks = Vec::new();
-    for (index, section) in job.sections.iter().enumerate() {
+    for (section, &source_start) in job.sections.iter().zip(section_offsets) {
         let text = &job.text[section.byte_range.clone()];
         let mut replacements = Vec::new();
-        if !protected_sections.contains(&index) {
-            for matched in crate::zalo_emoticons::find(text) {
-                if let Some(tex) = zalo_emoji_texture(&matched, textures, loading) {
-                    let shortcut = &text[matched.range.clone()];
-                    replacements.push((matched.range, "🙂", tex, Some(shortcut)));
+        if let Some(start) = source_start {
+            for matched in source.in_span(start, text.len()) {
+                if let Some(tex) = zalo_emoji_texture(matched, textures, loading) {
+                    let range = matched.range.start - start..matched.range.end - start;
+                    let shortcut = &text[range.clone()];
+                    replacements.push((range, "🙂", tex, Some(shortcut)));
                 }
             }
         }
@@ -1693,25 +1729,23 @@ pub(super) fn message_copy_text(msg: &ChatMessage) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum MdBlock {
+enum MdBlock<'a> {
     Code {
-        lang: String,
+        lang: &'a str,
         body: String,
     },
     Table {
-        headers: Vec<String>,
-        rows: Vec<Vec<String>>,
+        headers: Vec<&'a str>,
+        rows: Vec<Vec<&'a str>>,
     },
-    Lines(Vec<String>),
+    Lines(Vec<&'a str>),
 }
 
-fn split_md_blocks(raw: &str) -> Vec<MdBlock> {
-    let mut out: Vec<MdBlock> = Vec::new();
-    let mut pending: Vec<String> = Vec::new();
-    let mut in_code = false;
-    let mut code_lang = String::new();
-    let mut code_body: Vec<String> = Vec::new();
-    let flush = |pending: &mut Vec<String>, out: &mut Vec<MdBlock>| {
+fn split_md_blocks(raw: &str) -> Vec<MdBlock<'_>> {
+    let mut out = Vec::new();
+    let mut pending = Vec::new();
+    let mut code_start = None;
+    let flush = |pending: &mut Vec<_>, out: &mut Vec<_>| {
         if !pending.is_empty() {
             out.push(MdBlock::Lines(std::mem::take(pending)));
         }
@@ -1721,31 +1755,27 @@ fn split_md_blocks(raw: &str) -> Vec<MdBlock> {
     while i < lines.len() {
         let line = lines[i];
         let t = line.trim_end();
-        if in_code {
+        if let Some((start, lang)) = code_start {
             if t.trim_start().starts_with("```") {
-                in_code = false;
+                code_start = None;
                 out.push(MdBlock::Code {
-                    lang: std::mem::take(&mut code_lang),
-                    body: code_body.join("\n"),
+                    lang,
+                    body: lines[start + 1..i].join("\n"),
                 });
-                code_body.clear();
-            } else {
-                code_body.push(line.to_string());
             }
             i += 1;
             continue;
         }
         if let Some(lang) = t.trim_start().strip_prefix("```") {
             flush(&mut pending, &mut out);
-            in_code = true;
-            code_lang = lang.trim().to_string();
+            code_start = Some((i, lang.trim()));
             i += 1;
             continue;
         }
         if is_table_header(t) && i + 1 < lines.len() && is_table_separator(lines[i + 1].trim_end())
         {
             let headers = split_table_row(t);
-            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut rows = Vec::new();
             let mut j = i + 2;
             let mut ok = false;
             while j < lines.len() {
@@ -1768,17 +1798,13 @@ fn split_md_blocks(raw: &str) -> Vec<MdBlock> {
                 continue;
             }
         }
-        pending.push(line.to_string());
+        pending.push(line);
         i += 1;
     }
-    if in_code {
-        let mut all = vec![format!("```{}", code_lang)];
-        all.extend(code_body);
-        pending.extend(all);
-        flush(&mut pending, &mut out);
-    } else {
-        flush(&mut pending, &mut out);
+    if let Some((start, _)) = code_start {
+        pending.extend_from_slice(&lines[start..]);
     }
+    flush(&mut pending, &mut out);
     out
 }
 
@@ -1802,28 +1828,28 @@ fn is_table_separator(line: &str) -> bool {
     })
 }
 
-fn split_table_row(line: &str) -> Vec<String> {
+fn split_table_row(line: &str) -> Vec<&str> {
     line.trim()
         .trim_matches('|')
         .split('|')
-        .map(|c| c.trim().to_string())
+        .map(str::trim)
         .collect()
 }
 
-fn parse_ordered_item(line: &str) -> Option<(String, usize, String)> {
+fn parse_ordered_item(line: &str) -> Option<(&str, usize, &str)> {
     let indent = line.bytes().take_while(|&b| b == b' ').count().min(12);
     let t = line.trim_start();
     let dot = t.find(". ")?;
     let (num, _) = t.split_at(dot);
     if !num.is_empty() && num.len() <= 3 && num.chars().all(|c| c.is_ascii_digit()) {
-        Some((num.to_string(), indent, t[dot + 2..].to_string()))
+        Some((num, indent, &t[dot + 2..]))
     } else {
         None
     }
 }
 
 fn append_zalo_bold(
-    job: &mut egui::text::LayoutJob,
+    layout: &mut MarkdownLayout<'_>,
     inner: &str,
     base_size: f32,
     pal: &ThemePalette,
@@ -1837,9 +1863,8 @@ fn append_zalo_bold(
     {
         return false;
     }
-    job.append(
+    layout.append(
         inner,
-        0.0,
         egui::TextFormat {
             font_id: FontId::proportional(base_size + 0.4),
             color: if pal.is_dark {
@@ -1853,27 +1878,43 @@ fn append_zalo_bold(
     true
 }
 
-fn append_inline_plain(
-    job: &mut egui::text::LayoutJob,
-    text: &str,
-    format: &egui::TextFormat,
-    protected_sections: &[usize],
-) {
-    // A literal Markdown delimiter must not manufacture a word boundary for a shortcut.
-    let previous = job.sections.len().checked_sub(1);
-    if previous.is_some() && previous != protected_sections.last().copied() {
-        if let Some(last) = job.sections.last_mut().filter(|last| &last.format == format) {
-            job.text.push_str(text);
-            last.byte_range.end = job.text.len();
-            return;
-        }
+struct MarkdownLayout<'a> {
+    job: egui::text::LayoutJob,
+    source: &'a str,
+    // Each section maps to an offset in the original text, unless it is protected or synthetic.
+    section_offsets: Vec<Option<usize>>,
+}
+
+impl MarkdownLayout<'_> {
+    fn append(&mut self, text: &str, format: egui::TextFormat) {
+        self.section_offsets
+            .push(Some(source_offset(self.source, text)));
+        self.job.append(text, 0.0, format);
     }
-    job.append(text, 0.0, format.clone());
+
+    fn append_protected(&mut self, text: &str, format: egui::TextFormat) {
+        self.section_offsets.push(None);
+        self.job.append(text, 0.0, format);
+    }
+
+    fn append_plain(&mut self, text: &str, format: &egui::TextFormat) {
+        let offset = source_offset(self.source, text);
+        if let (Some(last), Some(Some(previous))) =
+            (self.job.sections.last_mut(), self.section_offsets.last())
+        {
+            if &last.format == format && previous + last.byte_range.len() == offset {
+                self.job.text.push_str(text);
+                last.byte_range.end = self.job.text.len();
+                return;
+            }
+        }
+        self.append(text, format.clone());
+    }
 }
 
 fn render_markdown_inline_rich(
     ui: &mut egui::Ui,
-    text: &str,
+    input: (&SourceEmoticons<'_>, &str, &str),
     base_size: f32,
     base_color: Color32,
     pal: &ThemePalette,
@@ -1881,8 +1922,12 @@ fn render_markdown_inline_rich(
     loading: &mut HashSet<String>,
     mentions: Option<&[String]>,
 ) {
-    let mut job = egui::text::LayoutJob::default();
-    let mut protected_sections = Vec::new();
+    let (source, text, prefix) = input;
+    let mut layout = MarkdownLayout {
+        job: egui::text::LayoutJob::default(),
+        source: source.text,
+        section_offsets: Vec::new(),
+    };
     let plain_fmt = egui::TextFormat {
         font_id: FontId::proportional(base_size),
         color: base_color,
@@ -1893,6 +1938,9 @@ fn render_markdown_inline_rich(
         color: mention_link_color(pal),
         ..Default::default()
     };
+    if !prefix.is_empty() {
+        layout.append_protected(prefix, plain_fmt.clone());
+    }
     let mut first_link: Option<String> = None;
     let mut has_bare_url = false;
     let url_col = url_link_color(pal);
@@ -1909,11 +1957,11 @@ fn render_markdown_inline_rich(
         .1;
     // Asterisks in shortcuts such as `:*` and `8*)` are literal punctuation.
     let emoticon_stars = if text.contains('*') {
-        crate::zalo_emoticons::find(text)
-            .into_iter()
+        let offset = source_offset(source.text, text);
+        source.in_span(offset, text.len())
             .flat_map(|matched| {
-                let start = matched.range.start;
-                text[matched.range]
+                let start = matched.range.start - offset;
+                text[start..matched.range.end - offset]
                     .match_indices('*')
                     .map(move |(i, _)| start + i)
             })
@@ -1960,12 +2008,12 @@ fn render_markdown_inline_rich(
         .flatten()
         .min();
         let Some(pos) = min_pos else {
-            append_inline_plain(&mut job, rest, &plain_fmt, &protected_sections);
+            layout.append_plain(rest, &plain_fmt);
             break;
         };
 
         if pos > 0 {
-            append_inline_plain(&mut job, &rest[..pos], &plain_fmt, &protected_sections);
+            layout.append_plain(&rest[..pos], &plain_fmt);
             rest = &rest[pos..];
             continue;
         }
@@ -1978,10 +2026,8 @@ fn render_markdown_inline_rich(
                     first_link = Some(normalize_bare_url(url_str));
                 }
                 has_bare_url = true;
-                protected_sections.push(job.sections.len());
-                job.append(
+                layout.append_protected(
                     url_str,
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size),
                         color: url_col,
@@ -1998,8 +2044,7 @@ fn render_markdown_inline_rich(
                 if punctuation_len > 0 {
                     // Trailing URL punctuation uses the normal text style but still belongs
                     // to this token for shortcut matching (for example, `http://x.y/;!`).
-                    protected_sections.push(job.sections.len());
-                    job.append(&tail[..punctuation_len], 0.0, plain_fmt.clone());
+                    layout.append_protected(&tail[..punctuation_len], plain_fmt.clone());
                 }
                 rest = &tail[punctuation_len..];
                 continue;
@@ -2012,10 +2057,8 @@ fn render_markdown_inline_rich(
             if first_link.is_none() && (url.starts_with("http://") || url.starts_with("https://")) {
                 first_link = Some(url.to_string());
             }
-            protected_sections.push(job.sections.len());
-            job.append(
+            layout.append_protected(
                 label.trim_matches('*').trim_matches('`'),
-                0.0,
                 egui::TextFormat {
                     font_id: FontId::proportional(base_size),
                     color: pal.primary_hover,
@@ -2036,8 +2079,7 @@ fn render_markdown_inline_rich(
                     .filter(|m| rest.starts_with(m.as_str()))
                     .max_by_key(|m| m.len())
                 {
-                    protected_sections.push(job.sections.len());
-                    job.append(tag, 0.0, mention_fmt.clone());
+                    layout.append_protected(tag, mention_fmt.clone());
                     rest = &rest[tag.len()..];
                     continue;
                 }
@@ -2067,8 +2109,7 @@ fn render_markdown_inline_rich(
                     || matches!(next_char.unwrap(), '.' | ',' | '!' | '?' | ':' | ';')
                 {
                     let mention_text = &rest[..1 + all_len];
-                    protected_sections.push(job.sections.len());
-                    job.append(mention_text, 0.0, mention_fmt.clone());
+                    layout.append_protected(mention_text, mention_fmt.clone());
                     rest = &after[all_len..];
                     continue;
                 }
@@ -2082,8 +2123,7 @@ fn render_markdown_inline_rich(
             {
                 let mention_len = 1 + candidate_name.len();
                 let mention_str = &rest[..mention_len];
-                protected_sections.push(job.sections.len());
-                job.append(mention_str, 0.0, mention_fmt.clone());
+                layout.append_protected(mention_str, mention_fmt.clone());
                 rest = &rest[mention_len..];
                 continue;
             }
@@ -2092,9 +2132,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with("**") {
             let after = &rest[2..];
             if let Some(end_b) = after.find("**") {
-                job.append(
+                layout.append(
                     &after[..end_b],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size + 0.4),
                         color: if pal.is_dark {
@@ -2113,9 +2152,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with("__") {
             let after = &rest[2..];
             if let Some(end_u) = after.find("__") {
-                job.append(
+                layout.append(
                     &after[..end_u],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size),
                         color: base_color,
@@ -2131,9 +2169,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with('_') && !rest.starts_with("__") {
             let after = &rest[1..];
             if let Some(end) = after.find('_').filter(|end| *end > 0) {
-                job.append(
+                layout.append(
                     &after[..end],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size),
                         color: base_color,
@@ -2148,9 +2185,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with("~~") {
             let after = &rest[2..];
             if let Some(end_s) = after.find("~~") {
-                job.append(
+                layout.append(
                     &after[..end_s],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size),
                         color: base_color.linear_multiply(0.75),
@@ -2166,10 +2202,9 @@ fn render_markdown_inline_rich(
             let after = &rest[1..];
             if let Some(end) = markdown_star(after).filter(|&end| end > 0) {
                 let inner = &after[..end];
-                if !single_bold || !append_zalo_bold(&mut job, inner, base_size, pal) {
-                    job.append(
+                if !single_bold || !append_zalo_bold(&mut layout, inner, base_size, pal) {
+                    layout.append(
                         inner,
-                        0.0,
                         egui::TextFormat {
                             font_id: FontId::proportional(base_size),
                             color: base_color,
@@ -2186,10 +2221,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with('`') {
             let after = &rest[1..];
             if let Some(end_c) = after.find('`') {
-                protected_sections.push(job.sections.len());
-                job.append(
+                layout.append_protected(
                     &after[..end_c],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::monospace((base_size - 0.8).max(11.0)),
                         color: pal.primary_hover,
@@ -2204,13 +2237,7 @@ fn render_markdown_inline_rich(
 
         let mut chars = rest.chars();
         if let Some(ch) = chars.next() {
-            let mut buf = [0u8; 4];
-            append_inline_plain(
-                &mut job,
-                ch.encode_utf8(&mut buf),
-                &plain_fmt,
-                &protected_sections,
-            );
+            layout.append_plain(&rest[..ch.len_utf8()], &plain_fmt);
             rest = chars.as_str();
         } else {
             break;
@@ -2222,7 +2249,13 @@ fn render_markdown_inline_rich(
         // styled as a link, but clicking the line should still open it.
         first_link = embedded_url(text);
     }
-    let (job, emoji_marks) = split_emoji_sections(job, textures, loading, &protected_sections);
+    let (job, emoji_marks) = split_emoji_sections(
+        layout.job,
+        textures,
+        loading,
+        source,
+        &layout.section_offsets,
+    );
     let resp = add_emoji_label(
         ui,
         job,
@@ -2287,6 +2320,7 @@ pub(super) fn render_chat_markdown_block(
         .data(|d| d.get_temp::<(bool, bool)>(Id::new("markdown-options")))
         .unwrap_or((true, true))
         .0;
+    let source = SourceEmoticons::new(raw);
     if !enabled {
         let mut job = egui::text::LayoutJob::default();
         job.append(
@@ -2298,7 +2332,7 @@ pub(super) fn render_chat_markdown_block(
                 ..Default::default()
             },
         );
-        let (job, marks) = split_emoji_sections(job, textures, loading, &[]);
+        let (job, marks) = split_emoji_sections(job, textures, loading, &source, &[Some(0)]);
         add_emoji_label(ui, job, &marks, None);
         return;
     }
@@ -2310,7 +2344,7 @@ pub(super) fn render_chat_markdown_block(
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(if lang.is_empty() { "code" } else { &lang });
+                            ui.label(if lang.is_empty() { "code" } else { lang });
                             if ui.small_button("Sao chép").clicked() {
                                 ui.output_mut(|o| o.copied_text = body.clone());
                             }
@@ -2337,8 +2371,8 @@ pub(super) fn render_chat_markdown_block(
                                 for row in rows {
                                     for cell in row {
                                         render_markdown_inline_rich(
-                                            ui, &cell, 13.5, text_col, pal, textures, loading,
-                                            mentions,
+                                            ui, (&source, cell, ""), 13.5, text_col, pal, textures,
+                                            loading, mentions,
                                         );
                                     }
                                     ui.end_row();
@@ -2348,25 +2382,29 @@ pub(super) fn render_chat_markdown_block(
                 });
             }
             MdBlock::Lines(lines) => {
-                if lines
+                if let Some(lang) = lines
                     .first()
-                    .is_some_and(|line| line.trim_start().starts_with("```"))
+                    .and_then(|line| line.trim_start().strip_prefix("```"))
                 {
+                    let opening = format!("```{}", lang.trim());
+                    let mut lines = lines;
+                    lines[0] = &opening;
                     ui.monospace(lines.join("\n"));
                     continue;
                 }
                 for line in lines {
-                    if let Some((num, indent, body)) = parse_ordered_item(&line) {
+                    if let Some((num, indent, body)) = parse_ordered_item(line) {
                         ui.horizontal(|ui| {
                             ui.add_space((indent as f32 * 4.0).min(40.0));
                             ui.label(format!("{num}."));
                             render_markdown_inline_rich(
-                                ui, &body, 15.0, text_col, pal, textures, loading, mentions,
+                                ui, (&source, body, ""), 15.0, text_col, pal, textures, loading,
+                                mentions,
                             );
                         });
                     } else {
-                        render_markdown_lines(
-                            ui, &line, text_col, pal, textures, loading, mentions,
+                        render_markdown_source_lines(
+                            ui, (&source, line), text_col, pal, textures, loading, mentions,
                         );
                     }
                 }
@@ -2384,6 +2422,22 @@ pub(super) fn render_markdown_lines(
     loading: &mut HashSet<String>,
     mentions: Option<&[String]>,
 ) {
+    let source = SourceEmoticons::new(raw);
+    render_markdown_source_lines(
+        ui, (&source, raw), text_col, pal, textures, loading, mentions,
+    );
+}
+
+fn render_markdown_source_lines(
+    ui: &mut egui::Ui,
+    input: (&SourceEmoticons<'_>, &str),
+    text_col: Color32,
+    pal: &ThemePalette,
+    textures: &HashMap<String, TextureHandle>,
+    loading: &mut HashSet<String>,
+    mentions: Option<&[String]>,
+) {
+    let (source, raw) = input;
     let mut in_code_block = false;
     let mut code_lines: Vec<&str> = Vec::new();
 
@@ -2420,11 +2474,17 @@ pub(super) fn render_markdown_lines(
         }
         let t_start = trimmed.trim_start();
         if let Some(h3) = t_start.strip_prefix("### ") {
-            render_markdown_inline_rich(ui, h3, 15.0, text_col, pal, textures, loading, mentions);
+            render_markdown_inline_rich(
+                ui, (source, h3, ""), 15.0, text_col, pal, textures, loading, mentions,
+            );
         } else if let Some(h2) = t_start.strip_prefix("## ") {
-            render_markdown_inline_rich(ui, h2, 16.0, text_col, pal, textures, loading, mentions);
+            render_markdown_inline_rich(
+                ui, (source, h2, ""), 16.0, text_col, pal, textures, loading, mentions,
+            );
         } else if let Some(h1) = t_start.strip_prefix("# ") {
-            render_markdown_inline_rich(ui, h1, 17.0, text_col, pal, textures, loading, mentions);
+            render_markdown_inline_rich(
+                ui, (source, h1, ""), 17.0, text_col, pal, textures, loading, mentions,
+            );
         } else if let Some(quote) = t_start.strip_prefix("> ") {
             ui.horizontal(|ui| {
                 let (bar_r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
@@ -2432,7 +2492,7 @@ pub(super) fn render_markdown_lines(
                     .rect_filled(bar_r, Rounding::same(1.5), pal.primary_hover);
                 render_markdown_inline_rich(
                     ui,
-                    quote,
+                    (source, quote, ""),
                     13.8,
                     text_col.linear_multiply(0.88),
                     pal,
@@ -2445,10 +2505,9 @@ pub(super) fn render_markdown_lines(
             .strip_prefix("- ")
             .or_else(|| t_start.strip_prefix("* "))
         {
-            let bullet_line = format!("• {bullet}");
             render_markdown_inline_rich(
                 ui,
-                &bullet_line,
+                (source, bullet, "• "),
                 15.0,
                 text_col,
                 pal,
@@ -2458,7 +2517,7 @@ pub(super) fn render_markdown_lines(
             );
         } else {
             render_markdown_inline_rich(
-                ui, trimmed, 15.0, text_col, pal, textures, loading, mentions,
+                ui, (source, trimmed, ""), 15.0, text_col, pal, textures, loading, mentions,
             );
         }
     }
@@ -2744,6 +2803,21 @@ impl MessageThumbnail {
     }
 }
 
+fn render_recall_marker(ui: &mut egui::Ui, text: &str) {
+    if text.trim().starts_with("[Đã thu hồi]") {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("{} Đã thu hồi", lucide::BAN))
+                    .color(Color32::from_rgb(239, 68, 68))
+                    .italics()
+                    .strong()
+                    .size(12.0),
+            );
+        });
+        ui.add_space(2.0);
+    }
+}
+
 pub(super) fn render_message_body(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
@@ -2777,18 +2851,7 @@ pub(super) fn render_message_body(
         return None;
     }
 
-    if trimmed_text.starts_with("[Đã thu hồi]") {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{} Đã thu hồi", lucide::BAN))
-                    .color(Color32::from_rgb(239, 68, 68))
-                    .italics()
-                    .strong()
-                    .size(12.0),
-            );
-        });
-        ui.add_space(2.0);
-    }
+    render_recall_marker(ui, trimmed_text);
 
     let sender_label = message_sender_label(msg, thread_name);
 
@@ -4015,6 +4078,7 @@ pub(super) fn render_chat_bubble(
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
                             quote_action = render_quote_block(ui, msg, pal, true, content_width);
                             if let Some(card) = contact_card {
+                                render_recall_marker(ui, &msg.text);
                                 card_action = super::contact_card::render_contact_card(
                                     ui,
                                     card,
@@ -4188,6 +4252,7 @@ pub(super) fn render_chat_bubble(
                             }
                             quote_action = render_quote_block(ui, msg, pal, false, content_width);
                             if let Some(card) = contact_card {
+                                render_recall_marker(ui, &msg.text);
                                 card_action = super::contact_card::render_contact_card(
                                     ui,
                                     card,
@@ -5869,12 +5934,10 @@ mod quote_navigation_tests {
         let mut loading = HashSet::new();
 
         let mut job = egui::text::LayoutJob::default();
-        job.append(
-            &format!("hi 🐧 {family} © 💌"),
-            0.0,
-            egui::TextFormat::default(),
-        );
-        let (out, marks) = split_emoji_sections(job, &textures, &mut loading, &[]);
+        let text = format!("hi 🐧 {family} © 💌");
+        job.append(&text, 0.0, egui::TextFormat::default());
+        let source = SourceEmoticons::new(&text);
+        let (out, marks) = split_emoji_sections(job, &textures, &mut loading, &source, &[Some(0)]);
 
         // 🐧 and the family (collapsed to its first codepoint) are placeholders; © stays text;
         // 💌 has no texture yet so it stays a glyph and is requested from the worker.
@@ -5903,7 +5966,9 @@ mod quote_navigation_tests {
         job.append("@Name :)", 0.0, egui::TextFormat::default());
         let text = job.text.clone();
 
-        let (job, marks) = split_emoji_sections(job, &textures, &mut loading, &[1, 2]);
+        let source = SourceEmoticons::new(&text);
+        let (job, marks) =
+            split_emoji_sections(job, &textures, &mut loading, &source, &[Some(0), None, None]);
         assert_eq!(job.text, "chào 🙂🙂 :D :) @Name :)");
         assert_eq!(marks.len(), 2);
         for mark in &marks {
@@ -5957,6 +6022,45 @@ mod quote_navigation_tests {
             .filter(|shape| matches!(&shape.shape, egui::Shape::Mesh(mesh) if Some(mesh.texture_id) == tile_id))
             .count();
         assert_eq!(tiles, 3);
+    }
+
+    #[test]
+    fn markdown_emoticons_respect_original_message_boundaries() {
+        for (text, expected_tiles) in [
+            ("**hello**:)", 0),
+            ("**hello** :)", 1),
+            (":)**hello**", 0),
+            (":) **hello**", 1),
+            ("**:)**", 0),
+            ("** :) **", 1),
+            ("**hello**\t:)", 0),
+            ("- :)\n1. :)\n# :)\n> :)", 4),
+            ("| a | b |\n| --- | --- |\n|:)| :) |", 1),
+        ] {
+            let ctx = egui::Context::default();
+            let tex = ctx.load_texture("smile", egui::ColorImage::example(), Default::default());
+            let tile_id = tex.id();
+            let textures = HashMap::from([(crate::zalo_emoticons::texture_key(41, 7), tex)]);
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_chat_markdown_block(
+                        ui,
+                        text,
+                        Color32::BLACK,
+                        &ThemePalette::light(),
+                        &textures,
+                        &mut HashSet::new(),
+                        None,
+                    );
+                });
+            });
+            let tiles = output
+                .shapes
+                .iter()
+                .filter(|shape| matches!(&shape.shape, egui::Shape::Mesh(mesh) if mesh.texture_id == tile_id))
+                .count();
+            assert_eq!(tiles, expected_tiles, "{text:?}");
+        }
     }
 
     #[test]
@@ -6107,15 +6211,15 @@ mod md_block_tests {
     fn splits_code_fence_with_lang() {
         let blocks = split_md_blocks("hello\n```rust\nlet x = 1;\nlet y = 2;\n```\nbye");
         assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], MdBlock::Lines(l) if l == &vec!["hello".to_string()]));
+        assert!(matches!(&blocks[0], MdBlock::Lines(l) if l == &["hello"]));
         match &blocks[1] {
             MdBlock::Code { lang, body } => {
-                assert_eq!(lang, "rust");
+                assert_eq!(*lang, "rust");
                 assert!(body.contains("let x = 1;") && body.contains("let y = 2;"));
             }
             other => panic!("expected code, got {other:?}"),
         }
-        assert!(matches!(&blocks[2], MdBlock::Lines(l) if l == &vec!["bye".to_string()]));
+        assert!(matches!(&blocks[2], MdBlock::Lines(l) if l == &["bye"]));
     }
 
     #[test]
@@ -6133,9 +6237,9 @@ mod md_block_tests {
         let good = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
         match &split_md_blocks(good)[..] {
             [MdBlock::Table { headers, rows }] => {
-                assert_eq!(headers, &vec!["a".to_string(), "b".to_string()]);
+                assert_eq!(headers, &["a", "b"]);
                 assert_eq!(rows.len(), 2);
-                assert_eq!(rows[0], vec!["1".to_string(), "2".to_string()]);
+                assert_eq!(rows[0], ["1", "2"]);
             }
             other => panic!("expected table, got {other:?}"),
         }
@@ -6151,11 +6255,11 @@ mod md_block_tests {
     fn parses_ordered_list_items() {
         assert_eq!(
             parse_ordered_item("1. mua sữa"),
-            Some(("1".to_string(), 0, "mua sữa".to_string()))
+            Some(("1", 0, "mua sữa"))
         );
         assert_eq!(
             parse_ordered_item("  12. indent"),
-            Some(("12".to_string(), 2, "indent".to_string()))
+            Some(("12", 2, "indent"))
         );
         assert_eq!(parse_ordered_item("- bullet"), None);
         assert_eq!(parse_ordered_item("1.missing space"), None);
