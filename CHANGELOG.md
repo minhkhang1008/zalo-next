@@ -8,6 +8,10 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-28
+
+Bản cập nhật lớn: **bình chọn nhóm**, **khóa ứng dụng**, **gửi và nhận số tài khoản ngân hàng** (kèm mã VietQR), **định dạng tin nhắn** như Zalo (đậm, nghiêng, màu, cỡ chữ, danh sách), **danh thiếp** và biểu tượng cảm xúc Zalo, cuộc gọi đến dạng **ô nhỏ ở góc màn hình** không chiếm focus, trang **quản lý bộ nhớ**, cùng nhiều sửa lỗi về tin chưa đọc, thông báo, âm thanh cuộc gọi và giao diện.
+
 ### Changed (Thay đổi)
 - **Gửi ảnh HD giờ là cài đặt** (Cài đặt → Tin nhắn → Gửi ảnh chất lượng gốc), mặc định bật; nút **HD** trên khung soạn tin đã bỏ.
 - **Ghi chú phát hành trong Cài đặt → Cập nhật** chia theo nhóm (Tính năng mới, Sửa lỗi, Thay đổi, Bảo mật) có biểu tượng và số mục, bỏ mục trùng; mỗi nhóm hiện 5 mục đầu, cửa sổ cập nhật hiện đủ.
@@ -35,37 +39,38 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Thông báo trên Windows:** tin nhắn mới, nhắc hẹn, bản cập nhật và cuộc gọi đến hiện thông báo của Windows, kèm ảnh đại diện người gửi. Chưa kiểm thử trên máy thật (đặc biệt với bản portable).
 
 ### Fixed (Sửa lỗi)
-- **Tin nhắn mới trong cuộc trò chuyện đang mở được tính là đã đọc** khi bạn đang dùng app và đang xem tin mới nhất (không còn chấm đỏ phải bấm lại vào danh sách). Đang cuộn lên xem tin cũ, đang tìm trong cuộc trò chuyện hoặc lọc tin đánh dấu thì vẫn giữ là chưa đọc. Chưa kiểm thử trên giao diện thật.
-- **Âm thanh cuộc gọi bị rè:** chuyển đổi tần số lấy mẫu giữa micro/loa (ví dụ micro 44,1 kHz) và âm thanh cuộc gọi 16 kHz giờ có lọc chống răng cưa và liền mạch giữa các khối âm thanh (trước đây lấy mẫu gần nhất và bị giật ở mỗi khối, gây tiếng rè). Hàng đợi phát không còn tích trễ quá ~0,4 giây. Chưa kiểm chứng với cuộc gọi thật.
+- **Tin nhắn mới trong cuộc trò chuyện đang mở được tính là đã đọc** khi bạn đang dùng app và đang xem tin mới nhất (không còn chấm đỏ phải bấm lại vào danh sách). Đang cuộn lên xem tin cũ, đang tìm trong cuộc trò chuyện hoặc lọc tin đánh dấu thì vẫn giữ là chưa đọc.
+- **Tin đã đọc không còn hiện lại là chưa đọc sau khi mở lại app:** mốc đã đọc được lưu theo đúng thứ tự và không bao giờ lùi về tin cũ hơn.
+- **Âm thanh cuộc gọi bị rè:** chuyển đổi tần số lấy mẫu giữa micro/loa (ví dụ micro 44,1 kHz) và âm thanh cuộc gọi 16 kHz giờ có lọc chống răng cưa và liền mạch giữa các khối âm thanh (trước đây lấy mẫu gần nhất và bị giật ở mỗi khối, gây tiếng rè). Hàng đợi phát không còn tích trễ quá ~0,4 giây.
 - **"Mở lại thông báo" không có tác dụng:** app gửi sai mã thao tác nên máy chủ Zalo bỏ qua và hội thoại bị tắt thông báo lại ngay. Giờ gửi đúng mã như Zalo Web; nếu máy chủ từ chối thì báo lỗi. Chưa kiểm chứng với máy chủ thật.
-- Biểu tượng tắt thông báo trong danh sách hội thoại to và rõ hơn (chuông gạch chéo); các mục trong menu chuột phải của hội thoại thẳng hàng.
+- **Biểu tượng tắt thông báo rõ hơn, menu chuột phải thẳng hàng:** biểu tượng chuông gạch chéo to hơn trong danh sách hội thoại; các mục trong menu chuột phải của hội thoại thẳng hàng.
 - **Bấm avatar của bạn** giờ luôn mở menu tài khoản (trước đây phần lớn cú bấm bị đóng lại ngay).
 - **Thanh đen ở cạnh danh sách hội thoại** và việc không kéo giãn được danh sách đã được sửa.
 - **Cuộc gọi thoại không còn bị hiện là cuộc gọi video:** loại cuộc gọi giờ chỉ dựa vào trường `callType` của Zalo.
 - **Mở app không còn đổ chuông/thông báo hàng loạt** cho tin cũ tải về lúc khởi động: chỉ tin mới trong 2 phút gần nhất mới thông báo.
-- Tin đã **xóa phía tôi trên thiết bị khác** giờ cũng ẩn ở đây; các dòng tin trống không còn hiện.
+- **Tin đã xóa phía tôi trên thiết bị khác cũng ẩn ở đây:** các dòng tin trống không còn hiện.
 - **Danh sách tin không còn "nhảy"** khi ảnh và video tải xong: khung chờ giữ đúng tỉ lệ ảnh/video ngay từ đầu (theo kích thước Zalo gửi kèm tin). Tin đã lưu từ trước vẫn dùng khung cũ. Chưa kiểm thử trên giao diện thật.
 - **Đồng bộ tin từ điện thoại ngay sau khi mở app** không còn bị "mất lệnh": yêu cầu gửi lúc kết nối chưa đăng nhập xong được giữ lại và gửi ngay khi kết nối sẵn sàng (trước đây bị bỏ, khiến tiến trình đứng yên tới khi hết thời gian chờ). Chưa kiểm chứng với điện thoại thật.
 - **Tô sáng `@tên`** trong tin không có dữ liệu nhắc tên không còn lan sang các chữ thường phía sau (ví dụ "@Hoang Nam dạ anh" chỉ tô "@Hoang Nam").
-- Chế độ giao diện đồ họa bỏ một bộ luồng nền không dùng tới, nên tốn ít luồng hệ thống hơn.
+- **Tốn ít luồng hệ thống hơn:** chế độ giao diện đồ họa bỏ một bộ luồng nền không dùng tới.
 - **`@AI` không tìm được liên kết** đã gửi trong cuộc trò chuyện: trước đây mọi liên kết bị thay bằng `[liên kết]` và thẻ liên kết, tệp, ảnh bị bỏ khỏi ngữ cảnh.
-- Gõ `@AI …` khi đang có ảnh dán hoặc tệp kéo vào khung soạn tin không còn **gửi ảnh/tệp lên Zalo** kèm câu hỏi làm chú thích; trả lời một tin Zalo bằng `@AI` không còn làm mất tin đó.
+- **`@AI` không còn gửi nhầm ảnh/tệp lên Zalo:** gõ `@AI …` khi đang có ảnh dán hoặc tệp kéo vào khung soạn tin không còn gửi chúng kèm câu hỏi làm chú thích; trả lời một tin Zalo bằng `@AI` không còn làm mất tin đó.
 - **Emoji màu trên Windows:** emoji trong tin nhắn và bảng Emoji giờ hiện màu từ phông Segoe UI Emoji (trước đây chỉ macOS có, Windows vẫn hiện emoji trắng đen). Chưa kiểm thử trên máy Windows thật; cờ quốc gia trên Windows vẫn là chữ như mặc định của Segoe UI Emoji. Linux cũng hiện màu với bản Noto Color Emoji dạng vector (COLRv1).
 - **Kéo-thả tệp trên Windows/Linux** (chưa kiểm thử trên máy thật): trước đây vùng thả dựa vào vị trí chuột cũ (trước khi kéo) nên có thể **gửi ngay** dù bạn thả vào ô soạn tin. Windows giờ đọc vị trí chuột thật trong lúc kéo và chỉ gửi ngay khi cả lúc kéo lẫn lúc thả đều ở vùng tin nhắn; Linux luôn đính kèm để xem trước khi gửi.
 - **Tự cập nhật trên Windows:** bản mới chỉ mở sau khi bản cũ đã thoát (trước đây hai bản chạy cùng lúc trên cùng dữ liệu), thay file có hoàn tác khi lỗi, và khi không thay được bản cài (ví dụ cài cho mọi người dùng trong Program Files) thì báo tải bộ cài thay vì mở bản portable trong Downloads. Chưa kiểm thử trên máy thật.
-- Chuyển dữ liệu cũ sang thư mục dữ liệu mới (macOS, Windows) giờ làm trọn một lượt: lỗi giữa chừng không còn để lại lịch sử thiếu.
-- Tệp nhận về có tên trùng tên thiết bị của Windows (`CON`, `NUL.txt`, `COM1.log`…) được đổi thành `_CON`… để lưu được.
-- Phông chữ hệ thống trên Windows được tìm theo thư mục Windows thật (`%WINDIR%`), không mặc định `C:\Windows`. Trên macOS, gợi ý phím tắt dán ảnh/tìm kiếm ghi `Cmd+V`/`Cmd+F` thay vì `Ctrl`.
+- **Chuyển dữ liệu sang thư mục mới làm trọn một lượt** (macOS, Windows): lỗi giữa chừng không còn để lại lịch sử thiếu.
+- **Lưu được tệp có tên trùng tên thiết bị Windows:** tệp như `CON`, `NUL.txt`, `COM1.log`… được đổi thành `_CON`…
+- **Phông chữ hệ thống trên Windows, gợi ý phím tắt trên macOS:** phông được tìm theo thư mục Windows thật (`%WINDIR%`) thay vì mặc định `C:\Windows`; trên macOS gợi ý ghi `Cmd+V`/`Cmd+F` thay vì `Ctrl`.
 
 ### Removed (Gỡ bỏ)
 - **Chụp ảnh màn hình** (nút máy ảnh và phím tắt `Alt+A`, `Cmd/Ctrl+Shift+A`, `Cmd/Ctrl+Shift+X`) đã bỏ. Vẫn dán được ảnh chụp từ bộ nhớ tạm (`⌘V`/`Ctrl+V`). `Cmd/Ctrl+Shift+X` giờ chỉ dùng cho Định dạng tin nhắn.
 
 ### Security (Bảo mật)
-- Vì `@AI` giờ có thể gửi liên kết, ảnh và tệp, các nhóm đã đồng ý chia sẻ (khi trước chỉ gửi văn bản) và tính năng Đọc trước sẽ **hỏi lại một lần**.
+- **`@AI` hỏi lại trước khi chia sẻ thêm:** vì `@AI` giờ có thể gửi liên kết, ảnh và tệp, các nhóm đã đồng ý chia sẻ (khi trước chỉ gửi văn bản) và tính năng Đọc trước sẽ hỏi lại một lần.
 - **Tự cập nhật an toàn hơn:** chỉ cài khi kiểm tra được mã SHA-256 (thiếu mã thì hướng dẫn tải thủ công); chỉ tải từ trang phát hành của repo này, kể cả khi bị chuyển hướng.
 - **Không tự tải ảnh từ máy chủ lạ:** ảnh, album, ảnh bìa video và ảnh xem trước liên kết từ máy chủ ngoài Zalo chỉ hiện khi bạn bấm **Hiện ảnh**. Ảnh từ Zalo vẫn hiện như cũ. Mọi lượt tải ảnh đều có giới hạn dung lượng và không gửi cookie Zalo tới máy chủ khác.
-- Cookie phiên `zpw_sek` không bao giờ được gửi qua kết nối không mã hoá; tệp `threads_cache.json` chỉ chủ máy đọc được (quyền `0600`).
-- Ảnh lỗi không còn bị tải lại liên tục; bấm để thử lại.
+- **Cookie phiên không đi qua kết nối không mã hoá:** `zpw_sek` chỉ gửi qua HTTPS; tệp `threads_cache.json` chỉ chủ máy đọc được (quyền `0600`).
+- **Ảnh lỗi không còn bị tải lại liên tục:** bấm để thử lại.
 
 ## [0.4.0] - 2026-11-17
 

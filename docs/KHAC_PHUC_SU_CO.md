@@ -41,7 +41,7 @@ DailyNotifier) gửi thông báo.
 
 **Điện thoại báo "chưa hỗ trợ gọi video":** cập nhật lên v0.4.0 trở lên (đã sửa cặp tham số `zpw_ver`/`zpw_type`).
 
-**Không thấy cửa sổ cuộc gọi đến:** cập nhật lên v0.4.0 trở lên; cửa sổ đang reo giờ luôn nằm trên cùng.
+**Không thấy cuộc gọi đến:** từ v0.5.0 cuộc gọi đến hiện thành một ô nhỏ ở góc trên bên phải màn hình (luôn nằm trên, không lấy focus) với Nghe máy / Nghe nhưng tắt mic / Không nghe máy; cửa sổ cuộc gọi chỉ mở sau khi nghe máy. Cuộc gọi video đến được trả lời với camera tắt nếu chưa bật **Cho phép gọi video** trong Cài đặt.
 
 **Thông báo mất avatar / nền trong suốt khi chạy `cargo run`:** thiếu helper Swift đã dựng sẵn; chạy `bash native/macos/build-native-helpers.sh`.
 
