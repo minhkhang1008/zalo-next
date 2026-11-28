@@ -1511,3 +1511,22 @@ Entry template:
   work; left `feature/ai-context` and `fix/windows-parity` (older, not created in this session).
 - Verification: cargo check; `cargo test --locked --lib gui::` 158 pass; dmg rebuilt. NOT verified live:
   the panel width after the fix in the real app (a width already persisted at the maximum may need one drag).
+
+## 2026-11-28 — Remove screenshot, HD as a setting, grouped release notes, old branches  (agent: Claude Code, claude-opus-5-5)
+- Request: delete the two old branches; remove screenshot capture (Alt+A); remove the composer HD toggle
+  (always on by default, option moved to Settings); present the changelog in Settings better.
+- Branches: `feature/ai-context` (local) and `fix/windows-parity` (local + origin) deleted; both were merged
+  into main/origin/main. Owner asked explicitly.
+- Changes: screenshot button, hotkeys, `WorkerCmd::TriggerScreenshot`, `capture_screen_interactive`,
+  `GuiEvent::ScreenshotCaptured` and the unused camera icon helper removed (pasting images still works; the
+  old hotkey set also grabbed Cmd/Ctrl+Shift+X, now free for rich text). `send_hd_original` moved from
+  runtime state to `AppSettings` (default true, toggle in Settings → Tin nhắn, saved on change).
+  New `src/gui/changelog_ui.rs`: release body parsed into sections (Tính năng mới / Sửa lỗi / Thay đổi /
+  Bảo mật / Đã bỏ) with icon, count chip, de-dup; Settings shows 5 per section + "+N mục khác", update
+  dialog shows all. Old `extract_concise_changelog` removed. CHANGELOG (Removed section), user guide,
+  `.gitignore` (/log.txt).
+- Review: Codex working-tree review → fixed release-title match (headings containing "và" were swallowed),
+  clearer HD wording + user guide line. Not fixed: settings written via the worker queue can be lost on an
+  immediate quit — applies to every setting, pre-existing.
+- Verification: `cargo test --locked` 644 lib tests pass; python release-notes tests pass; dmg rebuilt.
+  NOT verified live: the new Settings layouts (release notes card, HD toggle).

@@ -115,3 +115,4 @@ ai_secret.json
 /tools/
 
 .sync-runtime/
+/log.txt
