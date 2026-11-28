@@ -1,6 +1,10 @@
 use super::*;
+use std::future::{poll_fn, Future};
+use std::sync::Arc;
+use std::task::Poll;
+use tokio::sync::{watch, Mutex};
 use crate::bank_cards::{Bank, BankAccount, BankCards, DEFAULT_DELETE_ERROR};
-use std::sync::{Arc, Weak};
+use std::sync::Weak;
 use tokio::sync::OnceCell;
 
 /// Thread (id, name, is_group) list the poll timer maps incoming messages onto; the GUI
@@ -13,6 +17,152 @@ const GIF_RESULT_LIMIT: u32 = 30;
 
 fn persist_app_settings(path: &std::path::Path, json: &str) -> std::io::Result<()> {
     std::fs::write(path, json)
+}
+
+async fn run_poll_command(
+    session: &Session,
+    account: &str,
+    poll_id: &str,
+    option_ids: Option<&[String]>,
+) -> Result<PollDetail, String> {
+    if account.is_empty() || session.login.as_ref().map(|login| login.uin.as_str()) != Some(account) {
+        return Err(POLL_ACCOUNT_CHANGED.into());
+    }
+
+    let vote = option_ids.map(|option_ids| crate::chat::vote_poll(session, poll_id, option_ids));
+    poll_command_detail(vote, crate::chat::get_poll_detail(session, poll_id)).await
+}
+
+async fn poll_command_detail(
+    vote: Option<impl Future<Output = anyhow::Result<Option<PollDetail>>>>,
+    fetch_detail: impl Future<Output = anyhow::Result<PollDetail>>,
+) -> Result<PollDetail, String> {
+    let fallback = if let Some(vote) = vote {
+        let details = vote
+            .await
+            .map_err(|error| poll_command_error(error, "Chưa xác nhận được lượt bình chọn."))?;
+        if let Some(details) = details {
+            return Ok(details);
+        }
+        "Đã gửi bình chọn, nhưng không thể tải lại kết quả."
+    } else {
+        "Không thể tải bình chọn."
+    };
+    fetch_detail
+        .await
+        .map_err(|error| poll_command_error(error, fallback))
+}
+
+const POLL_ACCOUNT_CHANGED: &str = "Tài khoản đã thay đổi.";
+
+fn advance_poll_generation(generation: &watch::Sender<u64>) {
+    generation.send_modify(|value| *value = value.wrapping_add(1));
+}
+
+struct PollCommand {
+    account: String,
+    poll_id: String,
+    option_ids: Option<Vec<String>>,
+    generation: u64,
+}
+
+/// Serialize poll requests and take credentials only when the command reaches the front.
+fn spawn_poll_command(
+    session: &Arc<Mutex<Session>>,
+    queue: &Arc<Mutex<()>>,
+    generation: &watch::Sender<u64>,
+    gui_tx: &GuiTx,
+    command: PollCommand,
+) {
+    let mut generation_rx = generation.subscribe();
+    let received_generation = *generation_rx.borrow_and_update();
+    let session = session.clone();
+    let queue = queue.clone();
+    let gui_tx = gui_tx.clone();
+    tokio::spawn(async move {
+        let PollCommand {
+            account,
+            poll_id,
+            option_ids,
+            generation,
+        } = command;
+        let _turn = queue.lock().await;
+        let snapshot = {
+            let current = session.lock().await;
+            (generation == received_generation && generation == *generation_rx.borrow())
+                .then(|| current.clone())
+        };
+        let result = if let Some(snapshot) = snapshot {
+            let operation = run_poll_command(&snapshot, &account, &poll_id, option_ids.as_deref());
+            run_in_poll_generation(&mut generation_rx, generation, operation)
+                .await
+                .map(PollDetail::bounded)
+        } else {
+            Err(POLL_ACCOUNT_CHANGED.into())
+        };
+        // Hold the generation read guard through the event send. The GUI checks it again when
+        // consuming the event in case the account changed while the event was queued.
+        let current_generation = generation_rx.borrow();
+        let result = if generation == *current_generation {
+            result
+        } else {
+            Err(POLL_ACCOUNT_CHANGED.into())
+        };
+        let event = if option_ids.is_some() {
+            GuiEvent::PollVoted {
+                account,
+                poll_id,
+                generation,
+                result,
+            }
+        } else {
+            GuiEvent::PollLoaded {
+                account,
+                poll_id,
+                generation,
+                result,
+            }
+        };
+        let _ = gui_tx.tx.send(event);
+        drop(current_generation);
+        gui_tx.ctx.request_repaint();
+    });
+}
+
+async fn run_in_poll_generation(
+    generation_rx: &mut watch::Receiver<u64>,
+    generation: u64,
+    operation: impl Future<Output = Result<PollDetail, String>>,
+) -> Result<PollDetail, String> {
+    let active_generation = generation_rx.clone();
+    tokio::pin!(operation);
+    let current_operation = poll_fn(|cx| {
+        // Serialize each poll of the request with generation changes without holding a
+        // guard while the request is suspended.
+        let current = active_generation.borrow();
+        if generation == *current {
+            operation.as_mut().poll(cx)
+        } else {
+            Poll::Ready(Err(POLL_ACCOUNT_CHANGED.into()))
+        }
+    });
+    tokio::select! {
+        biased;
+        _ = generation_rx.changed() => Err(POLL_ACCOUNT_CHANGED.into()),
+        result = current_operation => result,
+    }
+}
+
+fn poll_command_error(error: anyhow::Error, fallback: &str) -> String {
+    if let Some(unavailable) = error.downcast_ref::<crate::chat::PollUnavailable>() {
+        unavailable.to_string()
+    } else if error.downcast_ref::<crate::media_resources::MediaError>()
+        == Some(&crate::media_resources::MediaError::TooLarge)
+    {
+        crate::session::GROUP_POLL_BODY_TOO_LARGE.to_owned()
+    } else {
+        fallback.to_owned()
+    }
 }
 
 async fn run_storage_task<T: Send + 'static>(
@@ -172,6 +322,18 @@ async fn load_bank_logo(session: &Session, url: &str) -> Option<egui::ColorImage
 }
 
 pub enum WorkerCmd {
+    AppLockTryPasscode {
+        config: app_lock::Config,
+        candidate: String,
+        now_unix: i64,
+    },
+    AppLockSetPasscode {
+        config: app_lock::Config,
+        passcode: String,
+    },
+    AppLockSave {
+        config: app_lock::Config,
+    },
     LoadBankAccounts {
         request: BankRequest,
     },
@@ -245,6 +407,19 @@ pub enum WorkerCmd {
         generation: u64,
         url: String,
         name: String,
+    },
+    FetchPoll {
+        account: String,
+        generation: u64,
+        thread_id: String,
+        poll_id: String,
+    },
+    VotePoll {
+        account: String,
+        generation: u64,
+        thread_id: String,
+        poll_id: String,
+        option_ids: Vec<String>,
     },
     Productivity {
         account: String,
@@ -420,6 +595,11 @@ pub enum WorkerCmd {
     RasterizeEmoji {
         key: String,
         cluster: String,
+    },
+    /// Crop one tile from the shared Zalo emoticon sprite.
+    FetchZaloEmojiTile {
+        col: u8,
+        row: u8,
     },
     FetchStickerStore,
     FetchStickerPack {
@@ -745,6 +925,43 @@ fn use_session_for_sticker_image(fetch_url: &str) -> bool {
     crate::session::is_trusted_zalo_url(fetch_url)
 }
 
+/// Keep the session's cookies and proxy for Zalo avatars, and check each redirect target.
+fn avatar_image_client(session: &Session) -> Result<reqwest::Client, reqwest::Error> {
+    use reqwest::header::{HeaderMap, HeaderValue, ORIGIN, REFERER};
+    use reqwest::redirect::Policy;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(REFERER, HeaderValue::from_static("https://chat.zalo.me/"));
+    headers.insert(ORIGIN, HeaderValue::from_static("https://chat.zalo.me"));
+    let mut builder = reqwest::Client::builder()
+        .cookie_provider(session.jar.clone())
+        .default_headers(headers)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
+        )
+        .redirect(Policy::custom(|attempt| {
+            if attempt.url().scheme() == "https"
+                && crate::session::is_trusted_zalo_url(attempt.url().as_str())
+            {
+                Policy::default().redirect(attempt)
+            } else {
+                attempt.stop()
+            }
+        }));
+    if let Some(proxy_url) = &session.proxy_url {
+        let mut proxy = reqwest::Proxy::all(proxy_url)?;
+        if let Ok(url) = reqwest::Url::parse(proxy_url) {
+            if !url.username().is_empty() {
+                proxy = proxy.basic_auth(url.username(), url.password().unwrap_or_default());
+            }
+        }
+        builder = builder.proxy(proxy);
+    }
+    builder.build()
+}
+
 /// Full-resolution originals opened in the image viewer (`hd_` keys) can be much larger than
 /// grid thumbnails, so they get their own, still bounded, body limit.
 const ORIGINAL_IMAGE_LIMIT: usize = 64 * 1024 * 1024;
@@ -761,7 +978,12 @@ fn sticker_image_body_limit(key: &str) -> usize {
     }
 }
 
-pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: egui::Context) {
+pub(super) fn spawn_session_worker(
+    session: Session,
+    gui_tx: GuiTx,
+    egui_ctx: egui::Context,
+    poll_generation: watch::Sender<u64>,
+) {
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let _ = WORKER_TX.set(cmd_tx);
 
@@ -1196,9 +1418,57 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                 let video_requests = crate::media_resources::RequestGeneration::default();
                 let voice_playback_requests = crate::media_resources::RequestGeneration::default();
                 let storage_operation = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                // Poll commands run in order (an earlier fetch must not overwrite a vote's result)
+                // without holding up the command loop; tokio's Mutex grants the lock FIFO.
+                let poll_queue = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                let zalo_emoji_sprite = std::sync::Arc::new(tokio::sync::OnceCell::new());
                 let mut bank_catalogue = BankCatalogue::default();
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        // Hashing takes a noticeable time (PBKDF2): run off the command loop.
+                        WorkerCmd::AppLockTryPasscode { mut config, candidate, now_unix } => {
+                            let gui_tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                let attempt = config.try_passcode(&candidate, now_unix);
+                                let save_error = app_lock::save(std::path::Path::new("."), &config)
+                                    .err()
+                                    .map(|_| "Không lưu được cấu hình khóa ứng dụng.".into());
+                                GuiEvent::AppLockAttempt { config, attempt, save_error }
+                            })
+                            .await;
+                            let _ = gui_tx.send(result.unwrap_or(GuiEvent::AppLockAttemptFailed));
+                            });
+                        }
+                        WorkerCmd::AppLockSetPasscode { mut config, passcode } => {
+                            let gui_tx = gui_tx.clone();
+                            tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || -> Result<_, &'static str> {
+                                config.set_passcode(&passcode)
+                                    .map_err(|_| "Không đặt được mã khóa.")?;
+                                config.enabled = true;
+                                app_lock::save(std::path::Path::new("."), &config)
+                                    .map_err(|_| "Không lưu được cấu hình khóa ứng dụng.")?;
+                                Ok(config)
+                            })
+                            .await;
+                            let (config, error) = match result {
+                                Ok(Ok(config)) => (Some(config), None),
+                                Ok(Err(error)) => (None, Some(error.into())),
+                                Err(_) => (None, Some("Không đặt được mã khóa.".into())),
+                            };
+                            let _ = gui_tx.send(GuiEvent::AppLockSaved { config, error });
+                            });
+                        }
+                        WorkerCmd::AppLockSave { config } => {
+                            let result = tokio::task::spawn_blocking(move || {
+                                app_lock::save(std::path::Path::new("."), &config)
+                            })
+                            .await;
+                            let error = (!matches!(result, Ok(Ok(()))))
+                                .then(|| "Không lưu được cấu hình khóa ứng dụng.".into());
+                            let _ = gui_tx.send(GuiEvent::AppLockSaved { config: None, error });
+                        }
                         command @ (WorkerCmd::LoadBankAccounts { .. }
                         | WorkerCmd::CreateBankAccount { .. }
                         | WorkerCmd::UpdateBankAccount { .. }
@@ -1630,6 +1900,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             }
                         }
                         WorkerCmd::Logout => {
+                            advance_poll_generation(&poll_generation);
                             bank_catalogue = BankCatalogue::default();
                             if let Some((_,control,cancelled))=voice_control.take(){cancelled.store(true,std::sync::atomic::Ordering::Relaxed);let _=control.send(true);}
                             crate::history_sync::PHONE_SYNC_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1661,6 +1932,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             egui_ctx.request_repaint();
                         }
                         WorkerCmd::SwitchAccount { target_uin } => {
+                            advance_poll_generation(&poll_generation);
                             if let Some((_,control,cancelled))=voice_control.take(){cancelled.store(true,std::sync::atomic::Ordering::Relaxed);let _=control.send(true);}
                             crate::history_sync::PHONE_SYNC_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                             crate::history_sync::REFRESH_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1675,7 +1947,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 egui_ctx.request_repaint();
                             } else {
                                 let mut s = session.lock().await;
-                                if s.load_from_file("session.json").is_ok() {
+                                let mut next = s.clone();
+                                next.logout();
+                                if next.load_from_file("session.json").is_ok() {
+                                    *s = next;
                                     bank_catalogue = BankCatalogue::default();
                                     let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
                                     let name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_default();
@@ -1877,12 +2152,14 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             }
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
 
                             let handle = tokio::spawn(async move {
                                 {
                                     let mut s = session_clone.lock().await;
+                                    advance_poll_generation(&poll_generation);
                                     s.logout();
                                 }
                                 {
@@ -1967,6 +2244,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                     }
                                                     if let Ok(resp) = confirm_res {
                                                         let mut s = session_clone.lock().await;
+                                                        advance_poll_generation(&poll_generation);
                                                         if let Some(sek) =
                                                             crate::qr::extract_zpw_sek(&resp)
                                                         {
@@ -2148,6 +2426,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let manual = matches!(cmd, WorkerCmd::RefreshThreadsManual);
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
@@ -2160,6 +2439,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             // readable until a new login replaces the file (#21).
                                             {
                                                 let mut sl = session_clone.lock().await;
+                                                advance_poll_generation(&poll_generation);
                                                 sl.mark_expired();
                                                 let _ = sl.save_to_file("session.json");
                                                 sl.logout();
@@ -2192,6 +2472,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         {
                                             let mut sl = session_clone.lock().await;
                                             if let Some(ref mut li) = sl.login {
+                                                if li.uin != uid {
+                                                    advance_poll_generation(&poll_generation);
+                                                }
                                                 li.uin = uid.clone();
                                                 if !name.is_empty() {
                                                     li.display_name = name.clone();
@@ -2332,6 +2615,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
 
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
@@ -2441,6 +2725,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             {
                                                 {
                                                     let mut sl = session_clone.lock().await;
+                                                    advance_poll_generation(&poll_generation);
                                                     sl.mark_expired();
                                                     let _ = sl.save_to_file("session.json");
                                                     sl.logout();
@@ -2766,6 +3051,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             mentions,
                         } => {
                             let session_clone = session.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
@@ -2892,6 +3178,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         {
                                             {
                                                 let mut sl = session_clone.lock().await;
+                                                advance_poll_generation(&poll_generation);
                                                 sl.mark_expired();
                                                 let _ = sl.save_to_file("session.json");
                                                 sl.logout();
@@ -3309,6 +3596,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             is_group,
                         } => {
                             let session_clone = session.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             if cate_id == AMI_FAT_CAT_CATE_ID {
@@ -3425,6 +3713,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         {
                                             {
                                                 let mut sl = session_clone.lock().await;
+                                                advance_poll_generation(&poll_generation);
                                                 sl.mark_expired();
                                                 let _ = sl.save_to_file("session.json");
                                                 sl.logout();
@@ -3504,7 +3793,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     } else {
                                         let fetch_url = crate::store::jxl_to_jpg_url(&url);
                                         let client = if use_session_for_sticker_image(&fetch_url) {
-                                            Ok(session_clone.lock().await.http.clone())
+                                            let session = session_clone.lock().await;
+                                            if key.starts_with("ava_") {
+                                                avatar_image_client(&session)
+                                            } else {
+                                                Ok(session.http.clone())
+                                            }
                                         } else {
                                             crate::media_resources::credential_free_client()
                                         };
@@ -3625,6 +3919,34 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 };
                                 let _ = gui_tx_clone.send(event);
                                 ctx_clone.request_repaint();
+                            });
+                        }
+                        WorkerCmd::FetchZaloEmojiTile { col, row } => {
+                            let gui_tx = gui_tx.clone();
+                            let sprite = zalo_emoji_sprite.clone();
+                            tokio::spawn(async move {
+                                use crate::zalo_emoticons;
+
+                                let key = zalo_emoticons::texture_key(col, row);
+                                let tile = sprite
+                                    .get_or_init(zalo_emoticons::load_sprite_with_retry)
+                                    .await
+                                    .as_ref()
+                                    .and_then(|image| zalo_emoticons::crop_tile(image, col, row));
+                                let event = match tile {
+                                    Some(tile) => {
+                                        let edge = zalo_emoticons::TILE_SIZE as usize;
+                                        GuiEvent::StickerImageReady {
+                                            key,
+                                            image: egui::ColorImage::from_rgba_unmultiplied(
+                                                [edge, edge],
+                                                tile.as_raw(),
+                                            ),
+                                        }
+                                    }
+                                    None => GuiEvent::StickerImageFailed { key },
+                                };
+                                let _ = gui_tx.send(event);
                             });
                         }
                         WorkerCmd::FetchStickerStore => {
@@ -4111,6 +4433,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                         WorkerCmd::LoginPassword { phone, pass } => {
                             let session_clone = session.clone();
                             let poll_clone = poll_state.clone();
+                            let poll_generation = poll_generation.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
@@ -4119,11 +4442,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 ));
                                 ctx_clone.request_repaint();
                                 let mut s = session_clone.lock().await;
-                                match crate::login::login_by_password(&mut s, &phone, &pass, "VN")
-                                    .await
-                                {
+                                advance_poll_generation(&poll_generation);
+                                let login = crate::login::login_by_password(&mut s, &phone, &pass, "VN").await;
+                                match login {
                                     Ok(_) => {
-                                        if let Ok(info) = crate::login::get_login_info(&s).await {
+                                        let info = crate::login::get_login_info(&s).await;
+                                        advance_poll_generation(&poll_generation);
+                                        if let Ok(info) = info {
                                             if let Some(cfg) = info.get("data") {
                                                 crate::login::apply_login_config(&mut s, cfg);
                                                 s.apply_server_info(cfg);
@@ -4520,6 +4845,14 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let result = match update { Ok(Ok(result)) => Ok(result), _ => Err("Không thể cập nhật dữ liệu cá nhân trên máy. Hãy thử lại.".to_owned()) };
                             let _ = gui_tx.send(GuiEvent::Productivity { account, update:result });
                             egui_ctx.request_repaint();
+                        }
+                        WorkerCmd::FetchPoll { account, poll_id, generation, .. } => {
+                            let command = PollCommand { account, poll_id, option_ids: None, generation };
+                            spawn_poll_command(&session, &poll_queue, &poll_generation, &gui_tx, command);
+                        }
+                        WorkerCmd::VotePoll { account, poll_id, option_ids, generation, .. } => {
+                            let command = PollCommand { account, poll_id, option_ids: Some(option_ids), generation };
+                            spawn_poll_command(&session, &poll_queue, &poll_generation, &gui_tx, command);
                         }
                         WorkerCmd::FetchDocPreview { account, generation, url, name } => {
                             let snapshot=session.lock().await.clone();
@@ -5555,6 +5888,93 @@ async fn resolve_ai_extras(
 mod tests {
     use super::prepare_avatar_texture;
     use image::{DynamicImage, Rgba, RgbaImage};
+
+    #[tokio::test]
+    async fn poll_vote_acknowledgement_fetches_detail() {
+        use super::*;
+
+        let refetched = PollDetail {
+            poll_id: Some("poll-1".into()),
+            joined: Some(true),
+            ..Default::default()
+        };
+        let result = poll_command_detail(Some(async { Ok(None) }), async { Ok(refetched.clone()) })
+            .await
+            .unwrap();
+        assert_eq!(result, refetched);
+    }
+
+    #[tokio::test]
+    async fn poll_commands_reject_an_account_that_is_no_longer_active() {
+        let mut session = crate::session::Session::new(false, false, false).unwrap();
+        session.login = Some(crate::session::LoginInfo {
+            uin: "active-account".into(),
+            ..Default::default()
+        });
+        let options = ["option-1".to_owned()];
+        for option_ids in [None, Some(options.as_slice())] {
+            assert_eq!(
+                super::run_poll_command(&session, "previous-account", "poll-1", option_ids).await,
+                Err(super::POLL_ACCOUNT_CHANGED.into())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_poll_vote_is_skipped_after_the_same_account_relogs_in() {
+        use super::*;
+
+        let mut session = Session::new(false, false, false).unwrap();
+        // With no key or cookies, even a regression cannot send this synthetic vote.
+        session.login = Some(crate::session::LoginInfo {
+            uin: "user-1".into(),
+            ..Default::default()
+        });
+        let session = Arc::new(Mutex::new(session));
+        let queue = Arc::new(Mutex::new(()));
+        let turn = queue.lock().await;
+        let (generation, _generation_rx) = watch::channel(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_poll_command(
+            &session,
+            &queue,
+            &generation,
+            &GuiTx::new(tx, egui::Context::default()),
+            PollCommand {
+                account: "user-1".into(),
+                poll_id: "poll-1".into(),
+                option_ids: Some(vec!["option-1".into()]),
+                generation: 0,
+            },
+        );
+        advance_poll_generation(&generation);
+        drop(turn);
+
+        let event = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(2)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            GuiEvent::PollVoted { account, poll_id, generation: 0, result: Err(error) }
+                if account == "user-1" && poll_id == "poll-1" && error == POLL_ACCOUNT_CHANGED
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_poll_vote_future_is_never_polled() {
+        use super::*;
+
+        let (generation, mut generation_rx) = watch::channel(0);
+        advance_poll_generation(&generation);
+        // Simulate a change observed immediately before the request gets its first poll.
+        let _ = *generation_rx.borrow_and_update();
+        let result = run_in_poll_generation(&mut generation_rx, 0, async {
+            panic!("stale vote must never start");
+        })
+        .await;
+        assert_eq!(result, Err(POLL_ACCOUNT_CHANGED.into()));
+    }
 
     #[test]
     fn original_images_get_a_larger_but_bounded_body_limit() {

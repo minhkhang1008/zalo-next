@@ -2223,6 +2223,20 @@ enum CallEngineCmd {
     ControlEvent(Value),
 }
 
+/// Whether an incoming call request is a video call.
+///
+/// `extendData.callType` is 0 for voice and 1 for video (the same field this client sends when
+/// calling out). `video.enable` and the video codec list are capabilities present in every
+/// request, voice calls included, so they must not decide it. Without `extendData`, fall back to
+/// the legacy media `callType` (3 = video, 6 = group video).
+fn incoming_is_video(call_type: u64, ext_call_type: i64) -> bool {
+    if ext_call_type >= 0 {
+        ext_call_type == 1
+    } else {
+        call_type == 3 || call_type == 6
+    }
+}
+
 pub struct CallBridge {
     cmd_tx: mpsc::UnboundedSender<CallEngineCmd>,
 }
@@ -4451,21 +4465,7 @@ impl CallBridge {
                                     .get("callType")
                                     .and_then(Value::as_i64)
                                     .unwrap_or(-1);
-                                let is_video = call_type == 3
-                                    || call_type == 6
-                                    || ext_call_type == 1
-                                    || ext_parsed.get("video").is_some()
-                                    || media
-                                        .get("zrtc_config")
-                                        .and_then(|z| z.get("video"))
-                                        .and_then(|v| v.get("enable"))
-                                        .and_then(Value::as_i64)
-                                        == Some(1)
-                                    || data
-                                        .get("video")
-                                        .and_then(|v| v.get("enable"))
-                                        .and_then(Value::as_i64)
-                                        == Some(1);
+                                let is_video = incoming_is_video(call_type, ext_call_type);
                                 let is_group = act == "group_request" || call_type >= 5;
                                 let group_id_str = data
                                     .get("groupId")
@@ -4736,6 +4736,15 @@ impl CallBridge {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incoming_video_follows_extend_data_call_type() {
+        // Every request advertises video capability; only extendData.callType decides.
+        assert!(!super::incoming_is_video(1, 0));
+        assert!(super::incoming_is_video(1, 1));
+        assert!(super::incoming_is_video(3, -1));
+        assert!(!super::incoming_is_video(1, -1));
+    }
+
     #[test]
     fn incoming_answer_is_claimed_once_before_network_setup() {
         let mut claimed = false;

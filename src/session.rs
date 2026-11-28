@@ -13,10 +13,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::crypto;
+use crate::media_resources::{read_bounded_response, MediaError};
 
 pub const ZPW_VER: &str = "694";
 pub const ZPW_TYPE: &str = "30";
 pub const CONFIG_DOMAIN: &str = "zaloapp.com";
+
+const GROUP_POLL_BODY_LIMIT: usize = 1024 * 1024;
+pub(crate) const GROUP_POLL_BODY_TOO_LARGE: &str = "Phản hồi bình chọn quá lớn.";
+
+async fn read_group_poll_body(response: reqwest::Response) -> Result<String> {
+    let status = response.status();
+    if !status.is_success() {
+        bail!("HTTP {status} from {}", redact_url(response.url().as_str()));
+    }
+    let bytes = read_bounded_response(response, GROUP_POLL_BODY_LIMIT)
+        .await
+        .map_err(|error| match error {
+            MediaError::TooLarge => anyhow::Error::new(error).context(GROUP_POLL_BODY_TOO_LARGE),
+            _ => error.into(),
+        })?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
 
 /// Return whether an absolute URL uses a secure transport and a trusted Zalo domain.
 pub fn is_trusted_zalo_url(url: &str) -> bool {
@@ -134,7 +152,7 @@ pub fn is_url_blocked_by_privacy(url: &str) -> bool {
 /// hands out the stale `*.zaloapp.com` flavour for `friend`/`profile` (#22).
 ///
 /// Only the hosts with no verified entry — `lp_chat`, `lp_control`, `ws`,
-/// `cloud_msg` — are taken from the login payload on each run.
+/// `cloud_msg`, `group_poll` — are taken from the login payload on each run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Domains {
     /// `wpa.zaloapp.com` — `reqqr`, password login.
@@ -158,6 +176,9 @@ pub struct Domains {
     /// `zpw_service_map_v3.profile[0]` — `getprofiles`, `me-v2`.
     pub profile: String,
     pub group: String,
+    /// `zpw_service_map_v3.group_poll[0]` — group poll endpoints.
+    #[serde(default)]
+    pub group_poll: String,
     pub file: String,
     /// `zpw_service_map_v3.group_cloud_message[0]` — `/api/cm/getoldv2`, `/api/cm/getrecentv2`.
     #[serde(default = "default_cloud_msg")]
@@ -239,6 +260,7 @@ impl Default for Domains {
             convers_api: "https://tt-convers-wpa.chat.zalo.me".into(),
             profile: "https://tt-profile-wpa.chat.zalo.me".into(),
             group: "https://tt-group-wpa.zaloapp.com".into(),
+            group_poll: String::new(),
             file: "https://tt-files-wpa.zaloapp.com".into(),
             cloud_msg: default_cloud_msg(),
             voice_call: default_voice_call(),
@@ -312,6 +334,7 @@ impl Domains {
             ("friend", &mut self.friend),
             ("profile", &mut self.profile),
             ("group", &mut self.group),
+            ("group_poll", &mut self.group_poll),
             ("file", &mut self.file),
             ("voice_call", &mut self.voice_call),
             ("sticker", &mut self.sticker),
@@ -335,6 +358,7 @@ impl Domains {
             ("conversation", &mut self.convers_api),
             ("profile", &mut self.profile),
             ("group", &mut self.group),
+            ("group_poll", &mut self.group_poll),
             ("file", &mut self.file),
             ("group_cloud_message", &mut self.cloud_msg),
             ("voice_call", &mut self.voice_call),
@@ -371,6 +395,7 @@ impl Domains {
             "conversation" | "convers_api" => &self.convers_api,
             "profile" => &self.profile,
             "group" => &self.group,
+            "group_poll" => &self.group_poll,
             "file" => &self.file,
             "group_cloud_message" | "cloud_msg" => &self.cloud_msg,
             "voice_call" => &self.voice_call,
@@ -387,7 +412,7 @@ impl Domains {
     /// 2. Verified constant from [`crate::endpoints::SERVICE_MAP_V3`] (or primary slot)
     /// 3. Hosts returned by `zpw_service_map_v3`
     /// 4. Host loaded from `session.json` before healing
-    /// 5. For `friend`, fallback to `profile` host if distinct
+    /// 5. For `friend`, fallback to `profile`; for `group_poll`, use `group` last
     /// 6. For `zinstant_msg`, keep only trusted HTTPS origins and append the Web fallback
     pub fn candidates(&self, endpoint: &str) -> Vec<String> {
         let canonical = if endpoint == "convers_api" {
@@ -421,6 +446,12 @@ impl Domains {
         }
         if canonical == "friend" {
             push_unique_host(&mut list, &self.profile);
+        }
+        if canonical == "group_poll" {
+            let fallback = self.group.trim().trim_end_matches('/');
+            list.retain(|host| host != fallback);
+            push_unique_host(&mut list, fallback);
+            list.retain(|host| is_trusted_zalo_url(host));
         }
         if canonical == "zinstant_msg" {
             list.retain(|url| is_zinstant_msg_host(url));
@@ -1150,7 +1181,27 @@ impl Session {
         &self,
         endpoint: &str,
         path_and_query: &str,
+        send_fn: F,
+    ) -> Result<Value>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = Result<Value>>,
+    {
+        self.request_with_candidate_policy(
+            endpoint,
+            path_and_query,
+            send_fn,
+            Self::should_failover_candidate,
+        )
+        .await
+    }
+
+    async fn request_with_candidate_policy<F, Fut>(
+        &self,
+        endpoint: &str,
+        path_and_query: &str,
         mut send_fn: F,
+        should_failover: impl Fn(&anyhow::Error) -> bool,
     ) -> Result<Value>
     where
         F: FnMut(String) -> Fut,
@@ -1171,7 +1222,7 @@ impl Session {
                     return Ok(val);
                 }
                 Err(e) => {
-                    if !Self::should_failover_candidate(&e) {
+                    if !should_failover(&e) {
                         return Err(e);
                     }
                     crate::logger::log_error(
@@ -1191,6 +1242,39 @@ impl Session {
         self.request_with_candidates(endpoint, path_and_query, |url| async move {
             self.get(&url).await
         })
+        .await
+    }
+
+    /// Poll hosts come from the service map, and a vote must not follow a redirect or replay after
+    /// a transport failure. An explicit HTTP 404 can still fall back to the next candidate.
+    pub(crate) async fn get_group_poll(&self, path_and_query: &str, is_vote: bool) -> Result<Value> {
+        let client = http_client_builder(self.proxy_url.as_deref())?
+            .cookie_provider(Arc::clone(&self.jar))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()?;
+        let client = &client;
+        self.request_with_candidate_policy(
+            "group_poll",
+            path_and_query,
+            |url| async move {
+                if !is_trusted_zalo_url(&url) {
+                    bail!("Refusing authenticated poll request to an untrusted Zalo URL");
+                }
+                self.send_with_client(client, Method::GET, &url, None, true).await
+            },
+            |error| {
+                if is_vote {
+                    error.to_string().starts_with("HTTP 404 ")
+                } else {
+                    Self::should_failover_candidate(error)
+                        || matches!(
+                            error.downcast_ref::<MediaError>(),
+                            Some(MediaError::Offline | MediaError::Timeout)
+                        )
+                }
+            },
+        )
         .await
     }
 
@@ -1283,6 +1367,17 @@ impl Session {
     }
 
     async fn send(&self, m: Method, url: &str, body: Option<String>) -> Result<Value> {
+        self.send_with_client(&self.http, m, url, body, false).await
+    }
+
+    async fn send_with_client(
+        &self,
+        client: &Client,
+        m: Method,
+        url: &str,
+        body: Option<String>,
+        bounded_poll_body: bool,
+    ) -> Result<Value> {
         let start = std::time::Instant::now();
         if is_url_blocked_by_privacy(url) {
             let method = m.as_str().to_string();
@@ -1316,7 +1411,7 @@ impl Session {
             }
         }
         let method = m.as_str().to_string();
-        let mut rb = self.http.request(m, url);
+        let mut rb = client.request(m, url);
         if let Some(ref sek) = self.zpw_sek {
             if !sek.is_empty() {
                 if is_trusted_zalo_url(url) {
@@ -1352,7 +1447,11 @@ impl Session {
         };
 
         let status = resp.status();
-        let text = resp.text().await?;
+        let text = if bounded_poll_body {
+            read_group_poll_body(resp).await?
+        } else {
+            resp.text().await?
+        };
         if self.verbose {
             eprintln!("← {status} {}", truncate(&text, 400));
         }
@@ -1909,6 +2008,70 @@ mod tests {
                 SessionStatus::Unreachable,
                 "{msg} must not expire the session"
             );
+        }
+    }
+
+    #[test]
+    fn group_poll_defaults_to_the_group_host_for_legacy_sessions() {
+        let mut saved = serde_json::to_value(Domains::default()).unwrap();
+        saved.as_object_mut().unwrap().remove("group_poll");
+        let domains: Domains = serde_json::from_value(saved).unwrap();
+        assert!(domains.group_poll.is_empty());
+        assert_eq!(domains.candidates("group_poll"), vec![domains.group]);
+    }
+
+    #[test]
+    fn group_poll_service_map_keeps_the_group_fallback_last() {
+        let mut session = Session::new(false, false, false).unwrap();
+        let group = session.domains.group.clone();
+        session.apply_server_info(&serde_json::json!({
+            "zpw_service_map_v3": {
+                "group_poll": ["https://poll-one.zalo.me/", "https://poll-two.zalo.me", group]
+            }
+        }));
+        session.domains.heal_from_verified();
+        assert_eq!(session.domains.group_poll, "https://poll-one.zalo.me");
+        session.domains.remember_winner("group_poll", &group);
+        assert_eq!(
+            session.domains.candidates("group_poll"),
+            [
+                "https://poll-one.zalo.me",
+                "https://poll-two.zalo.me",
+                group.as_str()
+            ]
+        );
+    }
+
+    #[test]
+    fn group_poll_never_uses_an_untrusted_service_map_host() {
+        let mut domains = Domains::default();
+        domains.apply_service_map(&serde_json::json!({
+            "group_poll": "https://evil.example"
+        }));
+        assert!(!is_trusted_zalo_url(&domains.group_poll));
+        assert_eq!(domains.candidates("group_poll"), [domains.group.as_str()]);
+        domains.group = "https://also-untrusted.example".into();
+        assert!(domains.candidates("group_poll").is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_poll_body_rejects_responses_larger_than_one_mib() {
+        use tokio_tungstenite::tungstenite::http::Response;
+
+        for (status, size, expected_error) in [
+            (200, GROUP_POLL_BODY_LIMIT, None),
+            (200, GROUP_POLL_BODY_LIMIT + 1, Some(GROUP_POLL_BODY_TOO_LARGE)),
+            (404, GROUP_POLL_BODY_LIMIT + 1, Some("HTTP 404 ")),
+        ] {
+            let response = Response::builder()
+                .status(status)
+                .body(vec![b'a'; size])
+                .unwrap();
+            let result = read_group_poll_body(response.into()).await;
+            match expected_error {
+                Some(error) => assert!(result.unwrap_err().to_string().starts_with(error)),
+                None => assert_eq!(result.unwrap().len(), size),
+            }
         }
     }
 

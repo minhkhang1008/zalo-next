@@ -1404,3 +1404,56 @@ Entry template:
 - NOT verified: any live poll detail/vote (owner must vote on a real group), Touch ID/password prompt, lock
   screen, auto-lock after sleep, ringing call while locked, passcode flow on Windows/Linux.
 - Status: waiting for Codex adversarial reviews and the owner's live checks before merging either branch.
+
+## 2026-11-28 — Owner test build, review fixes, contact cards and Zalo emoticons  (agent: Claude Code, claude-opus-5-5 (orchestrator) + Codex (worker, reviewer))
+- Request: build an app to test everything; owner picks nothing on licences (Claude chose an in-app viewer:
+  Settings → Giao diện → Giấy phép phông chữ, 4aba180 on main). Then: contact cards and Zalo text emoticons.
+- Branches: `test/upstream-port` (checked out in the main dir) merges main + `feature/group-polls` +
+  `feature/app-lock` + `feature/emoticons-contact-card`. Nothing merged into main, nothing pushed.
+- Owner-found bugs fixed on the test branch: Settings tabs laid out in one row (8361b80; the storage page's
+  ScrollArea dropped the vertical layout); albums older than the 20 cached messages split after restart
+  (2ad4d62; pre-existing: album params and mention spans now kept in raw_json). Both still need to reach main.
+- Mandatory adversarial reviews (Codex was over its limit earlier, rerun after reset): App Lock 6 findings fixed
+  (b8b7b35: TUI refuses a locked data dir, macOS fails closed on an unreadable config, notifications re-check the
+  lock, only a connected call defers locking, settings count once saved, 15 s sleep jump); polls 5 findings fixed
+  (24dae54: session generation for queued votes, voter privacy, 1 MiB/size caps, ack refetch, stale cards).
+  Claude also fixed a Windows-only type error in the toast code (not compiled here).
+- New: re-notes/51 (Zalo Web bundle: emojiRC table, sprite URL + SHA-256, xp5P matching rule; contact card
+  `recommened.user` fields). Emoticons e578f0b (cookie-less pinned sprite download, tile textures, selection
+  copies the shortcut); contact cards 2d56ab6; review fixes 5677cf8 (redirect-checked avatar client for all
+  `ava_` loads, Nhắn tin uses the sidebar open path, recall marker, `+` kept, cross-section boundaries,
+  URL in endpoints.rs).
+- Verification: `cargo test --locked` 586 passed on the test branch; dmg built
+  (dist/zalo-next-0.4.0-macos-arm64.dmg).
+- NOT verified: everything live (owner testing): polls voting, App Lock prompts/sleep/calls, contact card
+  actions, emoticon rendering and selection copy, storage clearing, account switching after the cookie-jar
+  change, Windows/Linux builds.
+
+## 2026-11-28 — Bank accounts: save and send ("Gửi số tài khoản")  (agent: Claude Code, claude-opus-5-5 (orchestrator, finished it) + Codex (worker, ran out of quota at the end))
+- Request: Zalo's saved bank accounts + send bank card; no transfer button; right-click copy number / show
+  VietQR, click QR to enlarge. Owner chose the Zalo-server list (shared with the phone).
+- Evidence: re-notes/52 (Zalo Web lazy chunks: /api/transfer/{conf,list,create,update,delete,card} on the
+  `zinstant_msg` host, fallback zimsg.chat.zalo.me; params, response fields, validation regexes; VietQR payload
+  built locally).
+- Branch `feature/bank-cards` (2c4de8b): src/bank_cards.rs (client with no redirects/retries, failover only on
+  404, bounded responses, no logging of numbers/names), `zinstant_msg` service-map slot restricted to trusted
+  HTTPS origins, worker commands with account-scoped terminal events, src/gui/bank_cards_ui.rs (composer button,
+  list, add/edit with searchable bank picker, delete with Zalo's default rule, right-click copy / VietQR, QR
+  enlarge). Codex hit its usage limit during the final verification; Claude re-ran check/tests/fmt/clippy and
+  reviewed the diff. Merged into test/upstream-port (31708de; conflicts with polls/app-lock in gui.rs,
+  worker.rs, session.rs resolved by hand: one http_client_builder(proxy) for both).
+- Verification: test branch `cargo test --locked` 595 passed; dmg rebuilt.
+- NOT verified: anything live (list/add/edit/delete/send against Zalo, how the phone shows the card, logos),
+  received bank cards are NOT rendered yet (zinstant layout, no sample; waits for the owner's BrowserSkill).
+- Pending: mandatory adversarial review of feature/bank-cards (Codex quota resets 16:08).
+
+## 2026-11-28 — Owner feedback round 2 (partial) and session handoff  (agent: Claude Code, claude-opus-5-5)
+- Done on `feature/owner-feedback-2` (../zalo-next-fb, not yet merged into test/upstream-port): voice/video
+  incoming call detection by extendData.callType (d668ced), fresh-only notifications (9e9c714), mark all read +
+  chat.delete handling + blank rows hidden (43fda1a), contact card without call button (89396bc). 596 tests pass.
+- App Lock: Touch ID prompt only on click, app activated before asking (56fdd35, merged into test branch).
+- Zalo Web inspected via BrowserSkill (Bo's chat only, nothing sent): received bank card = zinstant.bankcard,
+  data at zinst-stc.zadn.vn (re-notes/54, redacted fixture). Formatting toolbar layout confirmed.
+- NOT done / pending: received bank card rendering, add-account redesign, call popup + optional video,
+  phone-number cards, rich text, bank-cards adversarial review. Full plan in
+  `.agents/handoff/HANDOFF-2026-11-28.md` (briefs saved next to it).

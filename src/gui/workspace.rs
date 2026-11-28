@@ -1,6 +1,48 @@
 use super::*;
 
+/// Height of one composer text row at the 15 px composer font.
+const COMPOSER_ROW_H: f32 = 20.0;
+
 impl ZaloGuiApp {
+    fn request_group_poll(
+        &mut self,
+        thread_id: &str,
+        owner_message_id: &str,
+        poll_id: String,
+        option_ids: Option<Vec<String>>,
+    ) {
+        let state = self.group_polls.get(&poll_id).map(|cached| &cached.state);
+        let refreshing = matches!(state, Some(PollState::Loaded(_)));
+        let command = match option_ids {
+            None if !matches!(state, Some(PollState::Loading { .. })) => WorkerCmd::FetchPoll {
+                account: self.user_uin.clone(),
+                generation: self.group_poll_generation,
+                thread_id: thread_id.to_owned(),
+                poll_id: poll_id.clone(),
+            },
+            Some(option_ids) if refreshing => WorkerCmd::VotePoll {
+                account: self.user_uin.clone(),
+                generation: self.group_poll_generation,
+                thread_id: thread_id.to_owned(),
+                poll_id: poll_id.clone(),
+                option_ids,
+            },
+            _ => return,
+        };
+        let state = if WORKER_TX.get().is_some_and(|tx| tx.send(command).is_ok()) {
+            PollState::Loading { refreshing }
+        } else {
+            PollState::Error("Không thể kết nối với tiến trình xử lý bình chọn.".to_owned())
+        };
+        self.group_polls.insert(
+            poll_id,
+            CachedPoll {
+                owner_message_id: owner_message_id.to_owned(),
+                state,
+            },
+        );
+    }
+
     /// Start loading the full-resolution texture the image viewer shows. Message bubbles and
     /// the media grid keep a 480 px copy; the `hd_` key keeps this one (and its disk cache) apart.
     pub(super) fn request_hd_texture(&mut self, full_url: &str) -> Option<String> {
@@ -145,6 +187,129 @@ impl ZaloGuiApp {
             self.sticker_textures.remove(&key);
             if self.loading_stickers.contains(&key) {
                 self.discard_textures.insert(key);
+            }
+        }
+    }
+
+    fn start_voice_call(&mut self, partner_id: String, partner_name: String, is_group: bool) {
+        self.active_call = Some(ActiveCallOverlay {
+            partner_id: partner_id.clone(),
+            partner_name: partner_name.clone(),
+            is_video: false,
+            is_group,
+            state_label: if is_group {
+                "Đang gọi nhóm Zavi…".into()
+            } else {
+                "Đang kết nối cuộc gọi thoại…".into()
+            },
+            started_at: std::time::Instant::now(),
+            mic_muted: false,
+            cam_enabled: false,
+            is_incoming_ringing: false,
+            is_connected: false,
+            error_code: None,
+            error_reason: None,
+            speaker_view: false,
+            pinned_tile_idx: 0,
+            call_page: 0,
+            members_popover_open: false,
+            invite_search_query: String::new(),
+        });
+        if let Some(tx) = WORKER_TX.get() {
+            let _ = tx.send(WorkerCmd::StartCall {
+                partner_id,
+                partner_name,
+                partner_avatar: None,
+                is_video: false,
+                is_group,
+            });
+        }
+    }
+
+    /// Clear every unread badge and move each thread's read point to its last message. Local only:
+    /// no seen receipts are sent for conversations the user did not open.
+    fn mark_all_read(&mut self, ctx: &egui::Context) {
+        let mut read_points = Vec::new();
+        for tid in self.unread_counts.keys() {
+            if let Some(thread) = self.threads.iter_mut().find(|t| &t.id == tid) {
+                if let Some(last) = thread.messages.last().filter(|m| !m.id.is_empty()) {
+                    thread.unread.last_seen_id = Some(last.id.clone());
+                    read_points.push((tid.clone(), last.id.clone()));
+                }
+            }
+        }
+        let count = self.unread_counts.len();
+        self.unread_counts.clear();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            crate::APP_DISPLAY_NAME.to_string(),
+        ));
+        if !read_points.is_empty() {
+            let uin = self.user_uin.clone();
+            std::thread::spawn(move || {
+                let db = crate::store::db_path_for_account(&uin);
+                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                    for (tid, mid) in read_points {
+                        let _ = store.set_thread_read(&tid, &mid);
+                    }
+                }
+            });
+        }
+        self.show_toast(format!("Đã đánh dấu {count} cuộc trò chuyện là đã đọc"));
+    }
+
+    fn open_conversation(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(thread) = self.threads.get(index) else {
+            return;
+        };
+        let tid = thread.id.clone();
+        let is_group = thread.is_group;
+        let is_cloud = thread.name.contains("Cloud của tôi");
+        let last_mid = thread.messages.last().map(|last| last.id.clone());
+        if self.selected_thread_index != index {
+            self.cancel_reply();
+            self.filter_starred_only = false;
+            self.force_scroll_to_bottom = true;
+            self.chat_render_window = (tid.clone(), CHAT_RENDER_STEP);
+            ctx.request_repaint();
+        }
+        self.selected_thread_index = index;
+        if self.unread_counts.remove(&tid).is_some() {
+            let total_unread: usize = self.unread_counts.values().sum();
+            let title = if total_unread > 0 {
+                format!("({total_unread}) {}", crate::APP_DISPLAY_NAME)
+            } else {
+                crate::APP_DISPLAY_NAME.to_string()
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+        // Persist the read-point so reopening the app does not recount read messages (#119).
+        if let Some(last_mid) = last_mid {
+            self.threads[index].unread.last_seen_id = Some(last_mid.clone());
+            let mid = last_mid.clone();
+            let tid_c = tid.clone();
+            let uin_c = self.user_uin.clone();
+            std::thread::spawn(move || {
+                let db = crate::store::db_path_for_account(&uin_c);
+                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                    let _ = store.set_thread_read(&tid_c, &mid);
+                }
+            });
+            if !self.settings.block_seen && !last_mid.is_empty() {
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.send(WorkerCmd::SendSeen {
+                        thread_id: tid,
+                        is_group,
+                        last_msg_id: last_mid,
+                    });
+                }
+            }
+        } else if is_group || is_cloud {
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::LoadGroupHistory {
+                    group_id: tid,
+                    is_group,
+                    have: 0,
+                });
             }
         }
     }
@@ -813,6 +978,22 @@ impl ZaloGuiApp {
                                     }
                                 }
                                 self.render_sidebar_label_filter(ui, pal);
+                                if !self.unread_counts.is_empty() {
+                                    let mark_all = ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(lucide::CHECK_CHECK)
+                                                    .size(15.0)
+                                                    .color(pal.text_secondary),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text("Đánh dấu tất cả đã đọc");
+                                    if mark_all.clicked() {
+                                        self.mark_all_read(ctx);
+                                    }
+                                }
                             });
                         }
                     });
@@ -993,7 +1174,7 @@ impl ZaloGuiApp {
                     }
                 };
 
-                let mut clicked_thread: Option<(usize, String, bool)> = None;
+                let mut clicked_thread: Option<(usize, String)> = None;
                 let mut clicked_msg_hit: Option<(usize, String)> = None;
                 #[derive(Clone)]
                 enum ThreadCtxAction {
@@ -1573,7 +1754,7 @@ impl ZaloGuiApp {
                             });
 
                             if row_resp.clicked() {
-                                clicked_thread = Some((i, t.id.clone(), t.is_group));
+                                clicked_thread = Some((i, t.id.clone()));
                             }
                         }
 
@@ -1673,74 +1854,9 @@ impl ZaloGuiApp {
                     self.in_chat_search_focus_pending = true;
                     self.in_chat_search_query = q_str;
                 }
-                if let Some((idx, tid, is_group)) = clicked_thread {
-                    let resolved_idx = self.threads.iter().position(|t| t.id == tid).unwrap_or(idx);
-                    if self.selected_thread_index != resolved_idx {
-                        self.cancel_reply();
-                        self.filter_starred_only = false;
-                        self.force_scroll_to_bottom = true;
-                        self.chat_render_window = (tid.clone(), CHAT_RENDER_STEP);
-                    }
-                    self.selected_thread_index = resolved_idx;
-                    if self.unread_counts.remove(&tid).is_some() {
-                        let total_unread: usize = self.unread_counts.values().sum();
-                        let title = if total_unread > 0 {
-                            format!("({total_unread}) {}", crate::APP_DISPLAY_NAME)
-                        } else {
-                            crate::APP_DISPLAY_NAME.to_string()
-                        };
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
-                    }
-                    // Persist the read-point so reopening the app does not recount read messages (#119).
-                    if let Some(t) = self.threads.get_mut(resolved_idx) {
-                        if let Some(last) = t.messages.last() {
-                            let mid = last.id.clone();
-                            t.unread.last_seen_id = Some(mid.clone());
-                            let tid_c = tid.clone();
-                            let uin_c = self.user_uin.clone();
-                            std::thread::spawn(move || {
-                                let db = crate::store::db_path_for_account(&uin_c);
-                                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
-                                    let _ = store.set_thread_read(&tid_c, &mid);
-                                }
-                            });
-                        }
-                    }
-                    if !self.settings.block_seen {
-                        let last_mid = self
-                            .threads
-                            .get(resolved_idx)
-                            .and_then(|t| t.messages.last())
-                            .map(|m| m.id.clone())
-                            .unwrap_or_default();
-                        if !last_mid.is_empty() {
-                            if let Some(tx) = WORKER_TX.get() {
-                                let _ = tx.send(WorkerCmd::SendSeen {
-                                    thread_id: tid.clone(),
-                                    is_group,
-                                    last_msg_id: last_mid,
-                                });
-                            }
-                        }
-                    }
-                    let is_cloud = self
-                        .threads
-                        .get(resolved_idx)
-                        .map(|t| t.name.contains("Cloud của tôi"))
-                        .unwrap_or(false);
-                    let needs_history = self
-                        .threads
-                        .get(resolved_idx)
-                        .map_or(true, |t| t.messages.is_empty());
-                    if (is_group || is_cloud) && needs_history {
-                        if let Some(tx) = WORKER_TX.get() {
-                            let _ = tx.send(WorkerCmd::LoadGroupHistory {
-                                group_id: tid,
-                                is_group,
-                                have: 0,
-                            });
-                        }
-                    }
+                if let Some((idx, tid)) = clicked_thread {
+                    let index = self.threads.iter().position(|t| t.id == tid).unwrap_or(idx);
+                    self.open_conversation(ctx, index);
                 }
                 if let Some(act) = pending_ctx_action {
                     match act {
@@ -2534,6 +2650,7 @@ impl ZaloGuiApp {
         // -------------------------------------------------------------------
         // 4. CENTRAL CHAT AREA (Clean Header, Messages Stream, Icon Toolbar)
         // -------------------------------------------------------------------
+        let mut open_contact_thread = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(pal.bg_chat_canvas))
             .show(ctx, |ui| {
@@ -2909,6 +3026,7 @@ impl ZaloGuiApp {
                                             mic_muted: false,
                                             cam_enabled: can_cam,
                                             is_incoming_ringing: false,
+                                            is_connected: false,
                                             error_code: None,
                                             error_reason: None,
                                             speaker_view: false,
@@ -2960,37 +3078,11 @@ impl ZaloGuiApp {
                                         })
                                         .clicked()
                                     {
-                                        self.active_call = Some(ActiveCallOverlay {
-                                            partner_id: thread_id.clone(),
-                                            partner_name: thread_name.clone(),
-                                            is_video: false,
+                                        self.start_voice_call(
+                                            thread_id.clone(),
+                                            thread_name.clone(),
                                             is_group,
-                                            state_label: if is_group {
-                                                "Đang gọi nhóm Zavi…".into()
-                                            } else {
-                                                "Đang kết nối cuộc gọi thoại…".into()
-                                            },
-                                            started_at: std::time::Instant::now(),
-                                            mic_muted: false,
-                                            cam_enabled: false,
-                                            is_incoming_ringing: false,
-                                            error_code: None,
-                                            error_reason: None,
-                                            speaker_view: false,
-                                            pinned_tile_idx: 0,
-                                            call_page: 0,
-                                            members_popover_open: false,
-                                            invite_search_query: String::new(),
-                                        });
-                                        if let Some(tx) = WORKER_TX.get() {
-                                            let _ = tx.send(WorkerCmd::StartCall {
-                                                partner_id: thread_id.clone(),
-                                                partner_name: thread_name.clone(),
-                                                partner_avatar: None,
-                                                is_video: false,
-                                                is_group,
-                                            });
-                                        }
+                                        );
                                     }
                                     // Search Messages in Conversation Button (`Ctrl+F`)
                                     let (srch_rect, srch_resp) = ui.allocate_exact_size(
@@ -3743,6 +3835,7 @@ impl ZaloGuiApp {
                         })
                         + (if self.pending_drop_files.is_empty() { 0.0 } else { PENDING_DROP_STRIP_H }) };
                     let mut pending_action: Option<(usize, BubbleAction)> = None;
+                    let mut pending_poll_fetches = Vec::new();
                     let mut load_older_clicked = false;
                     let mut custom_toast: Option<String> = None;
                     // each frame, so a 2 000-message group re-laid out 2 000 galleys per repaint.
@@ -3926,12 +4019,15 @@ impl ZaloGuiApp {
                                                 String::new()
                                             };
                                             let in_chat_folded = fold_vn_search(&in_chat_q);
+                                            let deleted_ids =
+                                                crate::chat::deleted_message_ids(&thread.messages);
                                             let visible_indices: Vec<usize> = thread
                                                 .messages
                                                 .iter()
                                                 .enumerate()
                                                 .filter(|(_, m)| {
-                                                    (!only_starred || m.is_starred)
+                                                    crate::chat::is_visible_message(m, &deleted_ids)
+                                                        && (!only_starred || m.is_starred)
                                                         && (in_chat_q.is_empty()
                                                             || matches_vn_query(
                                                                 &m.text,
@@ -3978,6 +4074,11 @@ impl ZaloGuiApp {
                                                     m.is_outgoing && !is_system_notice_message(m)
                                                 })
                                                 .map(|(i, _)| i);
+                                            let poll_card_owners = if is_group {
+                                                poll_card::card_owners(&thread.messages)
+                                            } else {
+                                                HashSet::new()
+                                            };
 
                                             // Local Assistant dialogue lives outside `thread.messages` (INV-5) and is drawn between
                                             // the real messages by timestamp.
@@ -4054,7 +4155,9 @@ impl ZaloGuiApp {
                                                 }
 
                                                 let row = ui.scope(|ui| {
-                                                    if is_system_notice_message(msg) {
+                                                    let poll_id = msg.poll_id.as_deref().filter(|_| is_group);
+                                                    let owns_poll_card = poll_id.is_some() && poll_card_owners.contains(&idx);
+                                                    if !owns_poll_card && (poll_id.is_some() || is_system_notice_message(msg)) {
                                                         render_system_notice_pill(ui, msg, pal);
                                                         ui.add_space(6.0);
                                                         return;
@@ -4096,19 +4199,25 @@ impl ZaloGuiApp {
                                                     } else {
                                                         &thread_name
                                                     };
-                                                    // Reactor id -> display name for the reaction-pill tooltip.
-                                                    let reactor_name = |id: &str| -> String {
+                                                    let member_name = |id: &str| -> Option<&str> {
                                                         if id == "0" || (!self.user_uin.is_empty() && id == self.user_uin) {
-                                                            return "Bạn".to_string();
+                                                            Some("Bạn")
+                                                        } else {
+                                                            member_name_by_uid.get(id).map(String::as_str)
                                                         }
-                                                        if let Some(name) = member_name_by_uid.get(id) {
-                                                            return name.clone();
-                                                        }
-                                                        if !is_group {
-                                                            return thread_name.to_string();
-                                                        }
-                                                        "Người dùng Zalo".to_string()
                                                     };
+                                                    let reactor_name = |id: &str| {
+                                                        member_name(id)
+                                                            .unwrap_or(if is_group { "Người dùng Zalo" } else { &thread_name })
+                                                            .to_owned()
+                                                    };
+                                                    let poll_card = poll_id.filter(|_| owns_poll_card).map(|poll_id| poll_card::PollCard {
+                                                        poll_id,
+                                                        cached: self.group_polls.get(poll_id),
+                                                        user_uin: &self.user_uin,
+                                                        voter_name: &member_name,
+                                                        selecting_messages: self.multi_select.is_some(),
+                                                    });
                                                     if let Some(action) = render_chat_bubble(
                                                         ui,
                                                         msg,
@@ -4126,8 +4235,15 @@ impl ZaloGuiApp {
                                                         idx,
                                                         &reactor_name,
                                                         album_members.as_deref(),
+                                                        poll_card.as_ref(),
+                                                        &self.threads,
+                                                        &self.user_uin,
                                                     ) {
-                                                        pending_action = Some((idx, action));
+                                                        if matches!(action, BubbleAction::FetchPoll { .. }) {
+                                                            pending_poll_fetches.push((idx, action));
+                                                        } else {
+                                                            pending_action = Some((idx, action));
+                                                        }
                                                     }
                                                     ui.add_space(if next_same_sender {
                                                         2.5
@@ -4238,7 +4354,7 @@ impl ZaloGuiApp {
                     } else if load_older_clicked {
                         self.show_toast("Đang kiểm tra tin nhắn cũ từ máy chủ Zalo…");
                     }
-                    if let Some((idx, action)) = pending_action {
+                    for (idx, action) in pending_poll_fetches.into_iter().chain(pending_action) {
                         let target = self
                             .threads
                             .get(self.selected_thread_index)
@@ -4246,6 +4362,14 @@ impl ZaloGuiApp {
                             .cloned();
                         if let Some(m) = target {
                             match action {
+                                BubbleAction::FetchPoll { poll_id } => {
+                                    self.request_group_poll(&thread_id, &m.id, poll_id, None);
+                                    ctx.request_repaint();
+                                }
+                                BubbleAction::VotePoll { poll_id, option_ids } => {
+                                    self.request_group_poll(&thread_id, &m.id, poll_id, Some(option_ids));
+                                    ctx.request_repaint();
+                                }
                                 BubbleAction::Reply => {
                                     let tag = if is_group && !m.is_outgoing {
                                         reply_mention_for(&m, &member_name_by_uid, &self.user_uin)
@@ -4373,6 +4497,23 @@ impl ZaloGuiApp {
                                     }
                                 }
                                 BubbleAction::ScheduleReminder => { self.open_local_reminder(thread_id.clone(), m); }
+                                BubbleAction::MessageContact => {
+                                    if let Some(card) = m.contact_card {
+                                        open_contact_thread = self
+                                            .threads
+                                            .iter()
+                                            .position(|thread| thread.id == card.uid);
+                                    }
+                                }
+                                BubbleAction::CopyContactPhone => {
+                                    if let Some(phone) = m.contact_card.and_then(|card| card.phone) {
+                                        let number = super::contact_card::phone_for_clipboard(&phone);
+                                        if number.bytes().any(|byte| byte.is_ascii_digit()) {
+                                            ctx.copy_text(number);
+                                            self.show_toast("Đã sao chép số điện thoại vào bộ nhớ tạm");
+                                        }
+                                    }
+                                }
                                 BubbleAction::CallAgain { is_video } => {
                                     self.active_call = Some(ActiveCallOverlay {
                                         partner_id: thread_id.clone(),
@@ -4388,6 +4529,7 @@ impl ZaloGuiApp {
                                         mic_muted: false,
                                         cam_enabled: is_video,
                                         is_incoming_ringing: false,
+                                        is_connected: false,
                                         error_code: None,
                                         error_reason: None,
                                         speaker_view: false,
@@ -5199,17 +5341,53 @@ impl ZaloGuiApp {
 
                                             self.bank_cards_toolbar(ui, pal, &thread_id, is_group);
 
-                                            let is_multiline = self.input_message.contains('\n');
+                                            let send_btn_w =
+                                                if is_narrow_w { 52.0 } else { 76.0 };
+                                            let sched_btn_w = 34.0;
+                                            // The separator below takes 8 px of the row.
+                                            let input_w = (ui.available_width()
+                                                - 8.0
+                                                - send_btn_w
+                                                - sched_btn_w
+                                                - 16.0)
+                                                .max(50.0);
+                                            // Paint picked @tags blue inside the composer, like sent bubbles.
+                                            let mention_names: Vec<String> = self
+                                                .composer_mentions
+                                                .iter()
+                                                .map(|p| p.name.clone())
+                                                .collect();
+                                            let composer_text_col = pal.text_primary;
+                                            let composer_tag_col =
+                                                super::messages::mention_link_color(pal);
+                                            // Grow with the text, wrapped lines included, up to about a third
+                                            // of the window; past that the box scrolls.
+                                            let text_rows = if self.input_message.is_empty() {
+                                                1
+                                            } else {
+                                                let mut job = composer_mention_layout_job(
+                                                    &self.input_message,
+                                                    &mention_names,
+                                                    composer_text_col,
+                                                    composer_tag_col,
+                                                );
+                                                // TextEdit margin (6 px each side) plus a little slack.
+                                                job.wrap.max_width = (input_w - 22.0).max(20.0);
+                                                ui.fonts(|f| f.layout_job(job)).rows.len().max(1)
+                                            };
+                                            let max_rows = ((ui.ctx().screen_rect().height() * 0.35)
+                                                / COMPOSER_ROW_H)
+                                                .floor()
+                                                .clamp(5.0, 14.0)
+                                                as usize;
+                                            let is_multiline = text_rows > 1;
                                             let vis_lines = if is_multiline {
-                                                self.input_message
-                                                    .split('\n')
-                                                    .count()
-                                                    .clamp(2, 5)
+                                                text_rows.clamp(2, max_rows)
                                             } else {
                                                 1
                                             };
                                             let box_h = if is_multiline {
-                                                14.0 + (vis_lines as f32 * 20.0)
+                                                14.0 + (vis_lines as f32 * COMPOSER_ROW_H)
                                             } else {
                                                 34.0
                                             };
@@ -5224,27 +5402,10 @@ impl ZaloGuiApp {
                                                 Stroke::new(1.0_f32, pal.border),
                                             );
 
-                                            let send_btn_w =
-                                                if is_narrow_w { 52.0 } else { 76.0 };
-                                            let sched_btn_w = 34.0;
-                                            let input_w = (ui.available_width()
-                                                - send_btn_w
-                                                - sched_btn_w
-                                                - 16.0)
-                                                .max(50.0);
                                             let hint_str = format!(
                                                 "Nhập tin nhắn tới {}...",
                                                 truncate_chars(&thread_name, 18)
                                             );
-                                            // Paint picked @tags blue inside the composer, like sent bubbles.
-                                            let mention_names: Vec<String> = self
-                                                .composer_mentions
-                                                .iter()
-                                                .map(|p| p.name.clone())
-                                                .collect();
-                                            let composer_text_col = pal.text_primary;
-                                            let composer_tag_col =
-                                                super::messages::mention_link_color(pal);
                                             let mut composer_layouter =
                                                 |ui: &egui::Ui, text: &str, wrap_width: f32| {
                                                     let mut job = composer_mention_layout_job(
@@ -5855,6 +6016,10 @@ impl ZaloGuiApp {
                     });
                 }
             });
+
+        if let Some(index) = open_contact_thread {
+            self.open_conversation(ctx, index);
+        }
 
         self.render_profile_popover(ctx, pal);
         self.render_wipe_confirm(ctx, pal);

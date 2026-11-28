@@ -1121,6 +1121,9 @@ pub(super) fn render_date_divider(ui: &mut egui::Ui, msg: &ChatMessage, pal: &Th
 
 /// Detect whether `msg` is a system/event notification rather than a user speech bubble.
 pub(super) fn is_system_notice_message(msg: &ChatMessage) -> bool {
+    if msg.contact_card.is_some() {
+        return false;
+    }
     if msg.id.starts_with("sys_") {
         return true;
     }
@@ -1159,11 +1162,18 @@ pub(super) fn render_system_notice_pill(ui: &mut egui::Ui, msg: &ChatMessage, pa
             .rounding(Rounding::same(12.0))
             .inner_margin(Margin::symmetric(12.0, 4.0))
             .show(ui, |ui| {
-                ui.label(
-                    RichText::new(format!("{} {text}", lucide::SPARKLES))
-                        .size(12.0)
-                        .color(pal.text_secondary),
-                );
+                if msg.poll_id.is_some() {
+                    ui.set_max_width((pill_w - 24.0).max(0.0));
+                    let label = RichText::new(text).size(12.0).color(pal.text_secondary);
+                    ui.add(egui::Label::new(label).truncate())
+                        .on_hover_text(text);
+                } else {
+                    ui.label(
+                        RichText::new(format!("{} {text}", lucide::SPARKLES))
+                            .size(12.0)
+                            .color(pal.text_secondary),
+                    );
+                }
             });
     });
 }
@@ -1403,6 +1413,21 @@ pub(super) fn emoji_only_clusters(text: &str) -> Option<Vec<String>> {
     Some(ranges.into_iter().map(|r| text[r].to_string()).collect())
 }
 
+fn zalo_emoji_only_matches(text: &str) -> Option<Vec<crate::zalo_emoticons::Match>> {
+    let matches = crate::zalo_emoticons::find(text);
+    if matches.is_empty() || matches.len() > EMOJI_ONLY_MAX {
+        return None;
+    }
+    let mut cursor = 0;
+    for matched in &matches {
+        if !text[cursor..matched.range.start].trim().is_empty() {
+            return None;
+        }
+        cursor = matched.range.end;
+    }
+    text[cursor..].trim().is_empty().then_some(matches)
+}
+
 /// BMP characters whose default presentation is emoji (Unicode `Emoji_Presentation`).
 const BMP_EMOJI_PRESENTATION: &[char] = &[
     '⌚', '⌛', '⏩', '⏪', '⏫', '⏬', '⏰', '⏳', '◽', '◾', '☔', '☕', '♈', '♉', '♊', '♋',
@@ -1444,20 +1469,89 @@ pub(super) fn system_emoji_texture<'a>(
     None
 }
 
+fn zalo_emoji_texture<'a>(
+    matched: &crate::zalo_emoticons::Match,
+    textures: &'a HashMap<String, TextureHandle>,
+    loading: &mut HashSet<String>,
+) -> Option<&'a TextureHandle> {
+    let crate::zalo_emoticons::Match { col, row, .. } = *matched;
+    let key = crate::zalo_emoticons::texture_key(col, row);
+    if let Some(tex) = textures.get(&key) {
+        return Some(tex);
+    }
+    if loading.insert(key) {
+        if let Some(tx) = WORKER_TX.get() {
+            let _ = tx.send(WorkerCmd::FetchZaloEmojiTile { col, row });
+        }
+    }
+    None
+}
+
+struct EmojiMark {
+    section_index: u32,
+    texture: TextureHandle,
+    shortcut: Option<String>,
+}
+
+struct SourceEmoticons<'a> {
+    text: &'a str,
+    matches: Vec<crate::zalo_emoticons::Match>,
+}
+
+impl<'a> SourceEmoticons<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            matches: crate::zalo_emoticons::find(text),
+        }
+    }
+
+    fn in_span(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> impl Iterator<Item = &crate::zalo_emoticons::Match> {
+        let first = self.matches.partition_point(|m| m.range.start < start);
+        self.matches[first..]
+            .iter()
+            .take_while(move |m| m.range.end <= start + len)
+    }
+}
+
+// The Markdown parser passes borrowed substrings, including when parsing table cells and lists.
+fn source_offset(source: &str, span: &str) -> usize {
+    if span.is_empty() {
+        0
+    } else {
+        span.as_ptr().addr() - source.as_ptr().addr()
+    }
+}
+
 /// Rebuild `job` so every inline emoji with a ready colour texture becomes its own transparent
-/// placeholder section (first codepoint only, so ZWJ sequences take one cell). Returns the
-/// section indices to overdraw with their textures.
+/// placeholder section. The returned marks identify the textures and original Zalo shortcuts.
 fn split_emoji_sections(
     job: egui::text::LayoutJob,
     textures: &HashMap<String, TextureHandle>,
     loading: &mut HashSet<String>,
-) -> (egui::text::LayoutJob, Vec<(u32, TextureHandle)>) {
+    source: &SourceEmoticons<'_>,
+    section_offsets: &[Option<usize>],
+) -> (egui::text::LayoutJob, Vec<EmojiMark>) {
     let mut out = job.clone();
     out.text.clear();
     out.sections.clear();
     let mut marks = Vec::new();
-    for section in &job.sections {
+    for (section, &source_start) in job.sections.iter().zip(section_offsets) {
         let text = &job.text[section.byte_range.clone()];
+        let mut replacements = Vec::new();
+        if let Some(start) = source_start {
+            for matched in source.in_span(start, text.len()) {
+                if let Some(tex) = zalo_emoji_texture(matched, textures, loading) {
+                    let range = matched.range.start - start..matched.range.end - start;
+                    let shortcut = &text[range.clone()];
+                    replacements.push((range, "🙂", tex, Some(shortcut)));
+                }
+            }
+        }
         let mut leading = section.leading_space;
         let mut cursor = 0;
         for r in scan_emoji_clusters(text) {
@@ -1468,18 +1562,26 @@ fn split_emoji_sections(
             let Some(tex) = system_emoji_texture(cluster, textures, loading) else {
                 continue;
             };
+            let placeholder_len = cluster.chars().next().map_or(0, char::len_utf8);
+            replacements.push((r, &cluster[..placeholder_len], tex, None));
+        }
+        replacements.sort_unstable_by_key(|(r, ..)| r.start);
+        for (r, placeholder, tex, shortcut) in replacements {
             if cursor < r.start {
                 out.append(&text[cursor..r.start], leading, section.format.clone());
                 leading = 0.0;
             }
-            let placeholder_len = cluster.chars().next().map_or(0, char::len_utf8);
             let mut fmt = section.format.clone();
             fmt.color = Color32::TRANSPARENT;
             fmt.underline = Stroke::NONE;
             fmt.strikethrough = Stroke::NONE;
-            out.append(&cluster[..placeholder_len], leading, fmt);
+            out.append(placeholder, leading, fmt);
             leading = 0.0;
-            marks.push(((out.sections.len() - 1) as u32, tex.clone()));
+            marks.push(EmojiMark {
+                section_index: (out.sections.len() - 1) as u32,
+                texture: tex.clone(),
+                shortcut: shortcut.map(str::to_owned),
+            });
             cursor = r.end;
         }
         if cursor < text.len() {
@@ -1493,23 +1595,60 @@ fn split_emoji_sections(
     }
 }
 
+/// Keep egui's text selection byte and character offsets aligned with the original shortcut.
+/// The glyph mesh and the allotted cell width still come from the single placeholder.
+fn restore_emoji_shortcut_text(galley: &mut std::sync::Arc<egui::Galley>, marks: &[EmojiMark]) {
+    if !marks.iter().any(|mark| mark.shortcut.is_some()) {
+        return;
+    }
+    let shortcut_at = |index| {
+        let i = marks.binary_search_by_key(&index, |mark| mark.section_index).ok()?;
+        marks[i].shortcut.as_deref()
+    };
+    let galley = std::sync::Arc::make_mut(galley);
+    let job = std::sync::Arc::make_mut(&mut galley.job);
+    let placeholders = std::mem::take(&mut job.text);
+    for (index, section) in job.sections.iter_mut().enumerate() {
+        let text = shortcut_at(index as u32).unwrap_or(&placeholders[section.byte_range.clone()]);
+        let start = job.text.len();
+        job.text.push_str(text);
+        section.byte_range = start..job.text.len();
+    }
+    for row in &mut galley.rows {
+        let glyphs = std::mem::take(&mut row.glyphs);
+        for mut glyph in glyphs {
+            if let Some(shortcut) = shortcut_at(glyph.section_index) {
+                glyph.advance_width /= shortcut.len() as f32;
+                for ch in shortcut.chars() {
+                    glyph.chr = ch;
+                    row.glyphs.push(glyph);
+                    glyph.pos.x += glyph.advance_width;
+                }
+            } else {
+                row.glyphs.push(glyph);
+            }
+        }
+    }
+}
+
 /// Paint colour emoji textures over their transparent placeholder glyphs.
 fn paint_emoji_marks(
     ui: &egui::Ui,
     galley: &egui::Galley,
     origin: Pos2,
-    marks: &[(u32, TextureHandle)],
+    marks: &[EmojiMark],
 ) {
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     for row in &galley.rows {
         for glyph in &row.glyphs {
-            let Some((_, tex)) = marks.iter().find(|(idx, _)| *idx == glyph.section_index) else {
+            let Ok(index) = marks.binary_search_by_key(&glyph.section_index, |mark| mark.section_index)
+            else {
                 continue;
             };
             let cell = glyph.logical_rect().translate(origin.to_vec2());
             let side = glyph.font_height.min(cell.height());
             let rect = Rect::from_center_size(cell.center(), Vec2::splat(side));
-            ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
+            ui.painter().image(marks[index].texture.id(), rect, uv, Color32::WHITE);
         }
     }
 }
@@ -1527,27 +1666,21 @@ fn emoji_texture_key_exact(e: &str) -> Option<&'static str> {
     }
 }
 
-/// Render an emoji-only message large: system colour emoji first, then the bundled reaction
-/// PNG, then the monochrome font glyph.
-fn render_emoji_only(
+/// Render an emoji-only message with large texture cells or text glyphs.
+fn render_emoji_only<'a>(
     ui: &mut egui::Ui,
-    clusters: &[String],
+    cells: impl IntoIterator<Item = (&'a str, Option<&'a TextureHandle>)>,
     text_col: Color32,
-    sticker_textures: &HashMap<String, TextureHandle>,
-    loading_stickers: &mut HashSet<String>,
-    emoji_textures: &HashMap<String, TextureHandle>,
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = EMOJI_ONLY_GAP;
-        for e in clusters {
-            let tex = system_emoji_texture(e, sticker_textures, loading_stickers)
-                .or_else(|| emoji_texture_key_exact(e).and_then(|k| emoji_textures.get(k)));
+        for (text, tex) in cells {
             match tex {
                 Some(tex) => {
                     ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::splat(EMOJI_ONLY_SIZE)));
                 }
                 None => {
-                    ui.label(RichText::new(e).size(EMOJI_ONLY_SIZE).color(text_col));
+                    ui.label(RichText::new(text).size(EMOJI_ONLY_SIZE).color(text_col));
                 }
             }
         }
@@ -1603,25 +1736,23 @@ pub(super) fn message_copy_text(msg: &ChatMessage) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum MdBlock {
+enum MdBlock<'a> {
     Code {
-        lang: String,
+        lang: &'a str,
         body: String,
     },
     Table {
-        headers: Vec<String>,
-        rows: Vec<Vec<String>>,
+        headers: Vec<&'a str>,
+        rows: Vec<Vec<&'a str>>,
     },
-    Lines(Vec<String>),
+    Lines(Vec<&'a str>),
 }
 
-fn split_md_blocks(raw: &str) -> Vec<MdBlock> {
-    let mut out: Vec<MdBlock> = Vec::new();
-    let mut pending: Vec<String> = Vec::new();
-    let mut in_code = false;
-    let mut code_lang = String::new();
-    let mut code_body: Vec<String> = Vec::new();
-    let flush = |pending: &mut Vec<String>, out: &mut Vec<MdBlock>| {
+fn split_md_blocks(raw: &str) -> Vec<MdBlock<'_>> {
+    let mut out = Vec::new();
+    let mut pending = Vec::new();
+    let mut code_start = None;
+    let flush = |pending: &mut Vec<_>, out: &mut Vec<_>| {
         if !pending.is_empty() {
             out.push(MdBlock::Lines(std::mem::take(pending)));
         }
@@ -1631,31 +1762,27 @@ fn split_md_blocks(raw: &str) -> Vec<MdBlock> {
     while i < lines.len() {
         let line = lines[i];
         let t = line.trim_end();
-        if in_code {
+        if let Some((start, lang)) = code_start {
             if t.trim_start().starts_with("```") {
-                in_code = false;
+                code_start = None;
                 out.push(MdBlock::Code {
-                    lang: std::mem::take(&mut code_lang),
-                    body: code_body.join("\n"),
+                    lang,
+                    body: lines[start + 1..i].join("\n"),
                 });
-                code_body.clear();
-            } else {
-                code_body.push(line.to_string());
             }
             i += 1;
             continue;
         }
         if let Some(lang) = t.trim_start().strip_prefix("```") {
             flush(&mut pending, &mut out);
-            in_code = true;
-            code_lang = lang.trim().to_string();
+            code_start = Some((i, lang.trim()));
             i += 1;
             continue;
         }
         if is_table_header(t) && i + 1 < lines.len() && is_table_separator(lines[i + 1].trim_end())
         {
             let headers = split_table_row(t);
-            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut rows = Vec::new();
             let mut j = i + 2;
             let mut ok = false;
             while j < lines.len() {
@@ -1678,17 +1805,13 @@ fn split_md_blocks(raw: &str) -> Vec<MdBlock> {
                 continue;
             }
         }
-        pending.push(line.to_string());
+        pending.push(line);
         i += 1;
     }
-    if in_code {
-        let mut all = vec![format!("```{}", code_lang)];
-        all.extend(code_body);
-        pending.extend(all);
-        flush(&mut pending, &mut out);
-    } else {
-        flush(&mut pending, &mut out);
+    if let Some((start, _)) = code_start {
+        pending.extend_from_slice(&lines[start..]);
     }
+    flush(&mut pending, &mut out);
     out
 }
 
@@ -1712,53 +1835,43 @@ fn is_table_separator(line: &str) -> bool {
     })
 }
 
-fn split_table_row(line: &str) -> Vec<String> {
+fn split_table_row(line: &str) -> Vec<&str> {
     line.trim()
         .trim_matches('|')
         .split('|')
-        .map(|c| c.trim().to_string())
+        .map(str::trim)
         .collect()
 }
 
-fn parse_ordered_item(line: &str) -> Option<(String, usize, String)> {
+fn parse_ordered_item(line: &str) -> Option<(&str, usize, &str)> {
     let indent = line.bytes().take_while(|&b| b == b' ').count().min(12);
     let t = line.trim_start();
     let dot = t.find(". ")?;
     let (num, _) = t.split_at(dot);
     if !num.is_empty() && num.len() <= 3 && num.chars().all(|c| c.is_ascii_digit()) {
-        Some((num.to_string(), indent, t[dot + 2..].to_string()))
+        Some((num, indent, &t[dot + 2..]))
     } else {
         None
     }
 }
 
-fn consume_zalo_bold(
-    job: &mut egui::text::LayoutJob,
-    rest: &str,
+fn append_zalo_bold(
+    layout: &mut MarkdownLayout<'_>,
+    inner: &str,
     base_size: f32,
-    base_color: Color32,
     pal: &ThemePalette,
-) -> Option<usize> {
-    if !rest.starts_with('*') || rest.starts_with("**") {
-        return None;
-    }
-    let after = &rest[1..];
-    let end = after.find('*')?;
-    if end == 0 || end > 120 {
-        return None;
-    }
-    let inner = &after[..end];
-    if inner.starts_with(char::is_whitespace)
+) -> bool {
+    if inner.len() > 120
+        || inner.starts_with(char::is_whitespace)
         || inner.ends_with(char::is_whitespace)
         || inner.contains('\n')
         || inner.contains("http")
         || inner.contains('@')
     {
-        return None;
+        return false;
     }
-    job.append(
+    layout.append(
         inner,
-        0.0,
         egui::TextFormat {
             font_id: FontId::proportional(base_size + 0.4),
             color: if pal.is_dark {
@@ -1769,13 +1882,46 @@ fn consume_zalo_bold(
             ..Default::default()
         },
     );
-    let _ = base_color;
-    Some(1 + end + 1)
+    true
+}
+
+struct MarkdownLayout<'a> {
+    job: egui::text::LayoutJob,
+    source: &'a str,
+    // Each section maps to an offset in the original text, unless it is protected or synthetic.
+    section_offsets: Vec<Option<usize>>,
+}
+
+impl MarkdownLayout<'_> {
+    fn append(&mut self, text: &str, format: egui::TextFormat) {
+        self.section_offsets
+            .push(Some(source_offset(self.source, text)));
+        self.job.append(text, 0.0, format);
+    }
+
+    fn append_protected(&mut self, text: &str, format: egui::TextFormat) {
+        self.section_offsets.push(None);
+        self.job.append(text, 0.0, format);
+    }
+
+    fn append_plain(&mut self, text: &str, format: &egui::TextFormat) {
+        let offset = source_offset(self.source, text);
+        if let (Some(last), Some(Some(previous))) =
+            (self.job.sections.last_mut(), self.section_offsets.last())
+        {
+            if &last.format == format && previous + last.byte_range.len() == offset {
+                self.job.text.push_str(text);
+                last.byte_range.end = self.job.text.len();
+                return;
+            }
+        }
+        self.append(text, format.clone());
+    }
 }
 
 fn render_markdown_inline_rich(
     ui: &mut egui::Ui,
-    text: &str,
+    input: (&SourceEmoticons<'_>, &str, &str),
     base_size: f32,
     base_color: Color32,
     pal: &ThemePalette,
@@ -1783,12 +1929,25 @@ fn render_markdown_inline_rich(
     loading: &mut HashSet<String>,
     mentions: Option<&[String]>,
 ) {
-    let mut job = egui::text::LayoutJob::default();
+    let (source, text, prefix) = input;
+    let mut layout = MarkdownLayout {
+        job: egui::text::LayoutJob::default(),
+        source: source.text,
+        section_offsets: Vec::new(),
+    };
+    let plain_fmt = egui::TextFormat {
+        font_id: FontId::proportional(base_size),
+        color: base_color,
+        ..Default::default()
+    };
     let mention_fmt = egui::TextFormat {
         font_id: FontId::proportional(base_size),
         color: mention_link_color(pal),
         ..Default::default()
     };
+    if !prefix.is_empty() {
+        layout.append_protected(prefix, plain_fmt.clone());
+    }
     let mut first_link: Option<String> = None;
     let mut has_bare_url = false;
     let url_col = url_link_color(pal);
@@ -1798,6 +1957,32 @@ fn render_markdown_inline_rich(
         .ctx()
         .data(|d| d.get_temp::<bool>(hover_id))
         .unwrap_or(false);
+    let single_bold = ui
+        .ctx()
+        .data(|d| d.get_temp::<(bool, bool)>(Id::new("markdown-options")))
+        .unwrap_or((true, true))
+        .1;
+    // Asterisks in shortcuts such as `:*` and `8*)` are literal punctuation.
+    let emoticon_stars = if text.contains('*') {
+        let offset = source_offset(source.text, text);
+        source.in_span(offset, text.len())
+            .flat_map(|matched| {
+                let start = matched.range.start - offset;
+                text[start..matched.range.end - offset]
+                    .match_indices('*')
+                    .map(move |(i, _)| start + i)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let markdown_star = |suffix: &str| {
+        let offset = text.len() - suffix.len();
+        suffix
+            .match_indices('*')
+            .map(|(i, _)| i)
+            .find(|&i| emoticon_stars.binary_search(&(offset + i)).is_err())
+    };
     let mut rest = text;
 
     while !rest.is_empty() {
@@ -1805,7 +1990,7 @@ fn render_markdown_inline_rich(
         let next_under = rest.find("__");
         let next_strike = rest.find("~~");
         let next_code = rest.find('`');
-        let next_italic = rest.find('*').filter(|&i| rest.get(i..i + 2) != Some("**"));
+        let next_italic = markdown_star(rest).filter(|&i| rest.get(i..i + 2) != Some("**"));
         let next_link = rest.find('[').and_then(|lb| {
             let after_lb = &rest[lb + 1..];
             let rb = after_lb.find("](")?;
@@ -1830,28 +2015,12 @@ fn render_markdown_inline_rich(
         .flatten()
         .min();
         let Some(pos) = min_pos else {
-            job.append(
-                rest,
-                0.0,
-                egui::TextFormat {
-                    font_id: FontId::proportional(base_size),
-                    color: base_color,
-                    ..Default::default()
-                },
-            );
+            layout.append_plain(rest, &plain_fmt);
             break;
         };
 
         if pos > 0 {
-            job.append(
-                &rest[..pos],
-                0.0,
-                egui::TextFormat {
-                    font_id: FontId::proportional(base_size),
-                    color: base_color,
-                    ..Default::default()
-                },
-            );
+            layout.append_plain(&rest[..pos], &plain_fmt);
             rest = &rest[pos..];
             continue;
         }
@@ -1864,9 +2033,8 @@ fn render_markdown_inline_rich(
                     first_link = Some(normalize_bare_url(url_str));
                 }
                 has_bare_url = true;
-                job.append(
+                layout.append_protected(
                     url_str,
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size),
                         color: url_col,
@@ -1878,7 +2046,14 @@ fn render_markdown_inline_rich(
                         ..Default::default()
                     },
                 );
-                rest = &rest[len..];
+                let tail = &rest[len..];
+                let punctuation_len = tail.find(char::is_whitespace).unwrap_or(tail.len());
+                if punctuation_len > 0 {
+                    // Trailing URL punctuation uses the normal text style but still belongs
+                    // to this token for shortcut matching (for example, `http://x.y/;!`).
+                    layout.append_protected(&tail[..punctuation_len], plain_fmt.clone());
+                }
+                rest = &tail[punctuation_len..];
                 continue;
             }
         }
@@ -1889,9 +2064,8 @@ fn render_markdown_inline_rich(
             if first_link.is_none() && (url.starts_with("http://") || url.starts_with("https://")) {
                 first_link = Some(url.to_string());
             }
-            job.append(
+            layout.append_protected(
                 label.trim_matches('*').trim_matches('`'),
-                0.0,
                 egui::TextFormat {
                     font_id: FontId::proportional(base_size),
                     color: pal.primary_hover,
@@ -1912,7 +2086,7 @@ fn render_markdown_inline_rich(
                     .filter(|m| rest.starts_with(m.as_str()))
                     .max_by_key(|m| m.len())
                 {
-                    job.append(tag, 0.0, mention_fmt.clone());
+                    layout.append_protected(tag, mention_fmt.clone());
                     rest = &rest[tag.len()..];
                     continue;
                 }
@@ -1942,7 +2116,7 @@ fn render_markdown_inline_rich(
                     || matches!(next_char.unwrap(), '.' | ',' | '!' | '?' | ':' | ';')
                 {
                     let mention_text = &rest[..1 + all_len];
-                    job.append(mention_text, 0.0, mention_fmt.clone());
+                    layout.append_protected(mention_text, mention_fmt.clone());
                     rest = &after[all_len..];
                     continue;
                 }
@@ -1956,7 +2130,7 @@ fn render_markdown_inline_rich(
             {
                 let mention_len = 1 + candidate_name.len();
                 let mention_str = &rest[..mention_len];
-                job.append(mention_str, 0.0, mention_fmt.clone());
+                layout.append_protected(mention_str, mention_fmt.clone());
                 rest = &rest[mention_len..];
                 continue;
             }
@@ -1965,9 +2139,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with("**") {
             let after = &rest[2..];
             if let Some(end_b) = after.find("**") {
-                job.append(
+                layout.append(
                     &after[..end_b],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size + 0.4),
                         color: if pal.is_dark {
@@ -1986,9 +2159,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with("__") {
             let after = &rest[2..];
             if let Some(end_u) = after.find("__") {
-                job.append(
+                layout.append(
                     &after[..end_u],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size),
                         color: base_color,
@@ -2004,9 +2176,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with('_') && !rest.starts_with("__") {
             let after = &rest[1..];
             if let Some(end) = after.find('_').filter(|end| *end > 0) {
-                job.append(
+                layout.append(
                     &after[..end],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size),
                         color: base_color,
@@ -2021,9 +2192,8 @@ fn render_markdown_inline_rich(
         if rest.starts_with("~~") {
             let after = &rest[2..];
             if let Some(end_s) = after.find("~~") {
-                job.append(
+                layout.append(
                     &after[..end_s],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(base_size),
                         color: base_color.linear_multiply(0.75),
@@ -2035,24 +2205,13 @@ fn render_markdown_inline_rich(
                 continue;
             }
         }
-        let single_bold = ui
-            .ctx()
-            .data(|d| d.get_temp::<(bool, bool)>(Id::new("markdown-options")))
-            .unwrap_or((true, true))
-            .1;
-        if single_bold {
-            if let Some(used) = consume_zalo_bold(&mut job, rest, base_size, base_color, pal) {
-                rest = &rest[used..];
-                continue;
-            }
-        }
         if rest.starts_with('*') && !rest.starts_with("**") {
             let after = &rest[1..];
-            if let Some(end_i) = after.find('*') {
-                if end_i > 0 {
-                    job.append(
-                        &after[..end_i],
-                        0.0,
+            if let Some(end) = markdown_star(after).filter(|&end| end > 0) {
+                let inner = &after[..end];
+                if !single_bold || !append_zalo_bold(&mut layout, inner, base_size, pal) {
+                    layout.append(
+                        inner,
                         egui::TextFormat {
                             font_id: FontId::proportional(base_size),
                             color: base_color,
@@ -2060,18 +2219,17 @@ fn render_markdown_inline_rich(
                             ..Default::default()
                         },
                     );
-                    rest = &after[end_i + 1..];
-                    continue;
                 }
+                rest = &after[end + 1..];
+                continue;
             }
         }
 
         if rest.starts_with('`') {
             let after = &rest[1..];
             if let Some(end_c) = after.find('`') {
-                job.append(
+                layout.append_protected(
                     &after[..end_c],
-                    0.0,
                     egui::TextFormat {
                         font_id: FontId::monospace((base_size - 0.8).max(11.0)),
                         color: pal.primary_hover,
@@ -2086,16 +2244,7 @@ fn render_markdown_inline_rich(
 
         let mut chars = rest.chars();
         if let Some(ch) = chars.next() {
-            let mut buf = [0u8; 4];
-            job.append(
-                ch.encode_utf8(&mut buf),
-                0.0,
-                egui::TextFormat {
-                    font_id: FontId::proportional(base_size),
-                    color: base_color,
-                    ..Default::default()
-                },
-            );
+            layout.append_plain(&rest[..ch.len_utf8()], &plain_fmt);
             rest = chars.as_str();
         } else {
             break;
@@ -2107,25 +2256,19 @@ fn render_markdown_inline_rich(
         // styled as a link, but clicking the line should still open it.
         first_link = embedded_url(text);
     }
-    let (job, emoji_marks) = split_emoji_sections(job, textures, loading);
-    let add_label = |ui: &mut egui::Ui, label: egui::Label| {
-        if first_link.is_some() {
-            ui.add(label.sense(Sense::click()))
-        } else {
-            ui.add(label)
-        }
-    };
-    let resp = if emoji_marks.is_empty() {
-        add_label(ui, egui::Label::new(job).wrap())
-    } else {
-        // Lay out here (instead of inside `Label`) to know where each placeholder glyph lands.
-        let mut job = job;
-        job.wrap.max_width = ui.available_width();
-        let galley = ui.fonts(|f| f.layout_job(job));
-        let resp = add_label(ui, egui::Label::new(galley.clone()));
-        paint_emoji_marks(ui, &galley, resp.rect.min, &emoji_marks);
-        resp
-    };
+    let (job, emoji_marks) = split_emoji_sections(
+        layout.job,
+        textures,
+        loading,
+        source,
+        &layout.section_offsets,
+    );
+    let resp = add_emoji_label(
+        ui,
+        job,
+        &emoji_marks,
+        first_link.as_ref().map(|_| Sense::click()),
+    );
     if let Some(url) = first_link {
         if has_bare_url && resp.hovered() != url_hovered {
             let hovered = resp.hovered();
@@ -2139,6 +2282,34 @@ fn render_markdown_inline_rich(
         {
             open_external_url(&url);
         }
+    }
+}
+
+fn add_emoji_label(
+    ui: &mut egui::Ui,
+    job: egui::text::LayoutJob,
+    marks: &[EmojiMark],
+    sense: Option<Sense>,
+) -> egui::Response {
+    let add_label = |ui: &mut egui::Ui, label: egui::Label| {
+        if let Some(sense) = sense {
+            ui.add(label.sense(sense))
+        } else {
+            ui.add(label)
+        }
+    };
+    if marks.is_empty() {
+        add_label(ui, egui::Label::new(job).wrap())
+    } else {
+        // Lay out here (instead of inside `Label`) to know where each placeholder glyph lands.
+        let mut job = job;
+        job.wrap.max_width = ui.available_width();
+        let galley = ui.fonts(|f| f.layout_job(job));
+        let mut selectable_galley = galley.clone();
+        restore_emoji_shortcut_text(&mut selectable_galley, marks);
+        let resp = add_label(ui, egui::Label::new(selectable_galley));
+        paint_emoji_marks(ui, &galley, resp.rect.min, marks);
+        resp
     }
 }
 
@@ -2156,12 +2327,20 @@ pub(super) fn render_chat_markdown_block(
         .data(|d| d.get_temp::<(bool, bool)>(Id::new("markdown-options")))
         .unwrap_or((true, true))
         .0;
+    let source = SourceEmoticons::new(raw);
     if !enabled {
-        ui.add(
-            egui::Label::new(RichText::new(raw).color(text_col))
-                .selectable(true)
-                .wrap(),
+        let mut job = egui::text::LayoutJob::default();
+        job.append(
+            raw,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::TextStyle::Body.resolve(ui.style()),
+                color: text_col,
+                ..Default::default()
+            },
         );
+        let (job, marks) = split_emoji_sections(job, textures, loading, &source, &[Some(0)]);
+        add_emoji_label(ui, job, &marks, None);
         return;
     }
     for block in split_md_blocks(raw) {
@@ -2172,7 +2351,7 @@ pub(super) fn render_chat_markdown_block(
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(if lang.is_empty() { "code" } else { &lang });
+                            ui.label(if lang.is_empty() { "code" } else { lang });
                             if ui.small_button("Sao chép").clicked() {
                                 ui.output_mut(|o| o.copied_text = body.clone());
                             }
@@ -2199,8 +2378,8 @@ pub(super) fn render_chat_markdown_block(
                                 for row in rows {
                                     for cell in row {
                                         render_markdown_inline_rich(
-                                            ui, &cell, 13.5, text_col, pal, textures, loading,
-                                            mentions,
+                                            ui, (&source, cell, ""), 13.5, text_col, pal, textures,
+                                            loading, mentions,
                                         );
                                     }
                                     ui.end_row();
@@ -2210,25 +2389,29 @@ pub(super) fn render_chat_markdown_block(
                 });
             }
             MdBlock::Lines(lines) => {
-                if lines
+                if let Some(lang) = lines
                     .first()
-                    .is_some_and(|line| line.trim_start().starts_with("```"))
+                    .and_then(|line| line.trim_start().strip_prefix("```"))
                 {
+                    let opening = format!("```{}", lang.trim());
+                    let mut lines = lines;
+                    lines[0] = &opening;
                     ui.monospace(lines.join("\n"));
                     continue;
                 }
                 for line in lines {
-                    if let Some((num, indent, body)) = parse_ordered_item(&line) {
+                    if let Some((num, indent, body)) = parse_ordered_item(line) {
                         ui.horizontal(|ui| {
                             ui.add_space((indent as f32 * 4.0).min(40.0));
                             ui.label(format!("{num}."));
                             render_markdown_inline_rich(
-                                ui, &body, 15.0, text_col, pal, textures, loading, mentions,
+                                ui, (&source, body, ""), 15.0, text_col, pal, textures, loading,
+                                mentions,
                             );
                         });
                     } else {
-                        render_markdown_lines(
-                            ui, &line, text_col, pal, textures, loading, mentions,
+                        render_markdown_source_lines(
+                            ui, (&source, line), text_col, pal, textures, loading, mentions,
                         );
                     }
                 }
@@ -2246,6 +2429,22 @@ pub(super) fn render_markdown_lines(
     loading: &mut HashSet<String>,
     mentions: Option<&[String]>,
 ) {
+    let source = SourceEmoticons::new(raw);
+    render_markdown_source_lines(
+        ui, (&source, raw), text_col, pal, textures, loading, mentions,
+    );
+}
+
+fn render_markdown_source_lines(
+    ui: &mut egui::Ui,
+    input: (&SourceEmoticons<'_>, &str),
+    text_col: Color32,
+    pal: &ThemePalette,
+    textures: &HashMap<String, TextureHandle>,
+    loading: &mut HashSet<String>,
+    mentions: Option<&[String]>,
+) {
+    let (source, raw) = input;
     let mut in_code_block = false;
     let mut code_lines: Vec<&str> = Vec::new();
 
@@ -2282,11 +2481,17 @@ pub(super) fn render_markdown_lines(
         }
         let t_start = trimmed.trim_start();
         if let Some(h3) = t_start.strip_prefix("### ") {
-            render_markdown_inline_rich(ui, h3, 15.0, text_col, pal, textures, loading, mentions);
+            render_markdown_inline_rich(
+                ui, (source, h3, ""), 15.0, text_col, pal, textures, loading, mentions,
+            );
         } else if let Some(h2) = t_start.strip_prefix("## ") {
-            render_markdown_inline_rich(ui, h2, 16.0, text_col, pal, textures, loading, mentions);
+            render_markdown_inline_rich(
+                ui, (source, h2, ""), 16.0, text_col, pal, textures, loading, mentions,
+            );
         } else if let Some(h1) = t_start.strip_prefix("# ") {
-            render_markdown_inline_rich(ui, h1, 17.0, text_col, pal, textures, loading, mentions);
+            render_markdown_inline_rich(
+                ui, (source, h1, ""), 17.0, text_col, pal, textures, loading, mentions,
+            );
         } else if let Some(quote) = t_start.strip_prefix("> ") {
             ui.horizontal(|ui| {
                 let (bar_r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
@@ -2294,7 +2499,7 @@ pub(super) fn render_markdown_lines(
                     .rect_filled(bar_r, Rounding::same(1.5), pal.primary_hover);
                 render_markdown_inline_rich(
                     ui,
-                    quote,
+                    (source, quote, ""),
                     13.8,
                     text_col.linear_multiply(0.88),
                     pal,
@@ -2307,10 +2512,9 @@ pub(super) fn render_markdown_lines(
             .strip_prefix("- ")
             .or_else(|| t_start.strip_prefix("* "))
         {
-            let bullet_line = format!("• {bullet}");
             render_markdown_inline_rich(
                 ui,
-                &bullet_line,
+                (source, bullet, "• "),
                 15.0,
                 text_col,
                 pal,
@@ -2320,7 +2524,7 @@ pub(super) fn render_markdown_lines(
             );
         } else {
             render_markdown_inline_rich(
-                ui, trimmed, 15.0, text_col, pal, textures, loading, mentions,
+                ui, (source, trimmed, ""), 15.0, text_col, pal, textures, loading, mentions,
             );
         }
     }
@@ -2606,6 +2810,21 @@ impl MessageThumbnail {
     }
 }
 
+fn render_recall_marker(ui: &mut egui::Ui, text: &str) {
+    if text.trim().starts_with("[Đã thu hồi]") {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("{} Đã thu hồi", lucide::BAN))
+                    .color(Color32::from_rgb(239, 68, 68))
+                    .italics()
+                    .strong()
+                    .size(12.0),
+            );
+        });
+        ui.add_space(2.0);
+    }
+}
+
 pub(super) fn render_message_body(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
@@ -2639,18 +2858,7 @@ pub(super) fn render_message_body(
         return None;
     }
 
-    if trimmed_text.starts_with("[Đã thu hồi]") {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{} Đã thu hồi", lucide::BAN))
-                    .color(Color32::from_rgb(239, 68, 68))
-                    .italics()
-                    .strong()
-                    .size(12.0),
-            );
-        });
-        ui.add_space(2.0);
-    }
+    render_recall_marker(ui, trimmed_text);
 
     let sender_label = message_sender_label(msg, thread_name);
 
@@ -3139,15 +3347,26 @@ pub(super) fn render_message_body(
 
     if !trimmed_text.starts_with("[Đã thu hồi]") {
         if let Some(clusters) = emoji_only_clusters(trimmed_text) {
-            render_emoji_only(
-                ui,
-                &clusters,
-                text_col,
-                sticker_textures,
-                loading_stickers,
-                emoji_textures,
-            );
+            let cells = clusters.iter().map(|cluster| {
+                let tex = system_emoji_texture(cluster, sticker_textures, loading_stickers)
+                    .or_else(|| emoji_texture_key_exact(cluster).and_then(|k| emoji_textures.get(k)));
+                (cluster.as_str(), tex)
+            });
+            render_emoji_only(ui, cells, text_col);
             return None;
+        }
+        if let Some(matches) = zalo_emoji_only_matches(&msg.text) {
+            let cells: Vec<_> = matches
+                .iter()
+                .filter_map(|matched| {
+                    let tex = zalo_emoji_texture(matched, sticker_textures, loading_stickers)?;
+                    Some((&msg.text[matched.range.clone()], Some(tex)))
+                })
+                .collect();
+            if cells.len() == matches.len() {
+                render_emoji_only(ui, cells, text_col);
+                return None;
+            }
         }
     }
 
@@ -3551,20 +3770,37 @@ pub(super) fn render_chat_bubble(
     idx: usize,
     reactor_name: &dyn Fn(&str) -> String,
     album: Option<&[&ChatMessage]>,
+    poll_card: Option<&super::poll_card::PollCard<'_>>,
+    threads: &[Thread],
+    current_uid: &str,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
     let max_text_width = (max_bubble_width - 24.0).max(90.0);
-    let has_sticker = is_sticker_message(msg).is_some();
-    let call_card_opt = extract_call_card_view(msg);
+    let contact_card = msg.contact_card.as_ref();
+    let is_contact_card = contact_card.is_some();
+    let has_sticker = !is_contact_card && is_sticker_message(msg).is_some();
+    let call_card_opt = if is_contact_card {
+        None
+    } else {
+        extract_call_card_view(msg)
+    };
     let is_call_card = call_card_opt.is_some();
-    let is_photo_card = !has_sticker && is_zalo_photo_message(msg);
-    let has_voice_card = !has_sticker && is_voice_message(msg);
-    let is_file_card = !has_sticker && is_zalo_file_or_video_message(msg);
-    let has_link_card =
-        !has_sticker && !is_photo_card && !is_file_card && extract_message_link_view(msg).is_some();
-    let has_interactive_card =
-        is_call_card || has_link_card || is_photo_card || has_voice_card || is_file_card;
+    let is_photo_card = !is_contact_card && !has_sticker && is_zalo_photo_message(msg);
+    let has_voice_card = !is_contact_card && !has_sticker && is_voice_message(msg);
+    let is_file_card = !is_contact_card && !has_sticker && is_zalo_file_or_video_message(msg);
+    let has_link_card = !is_contact_card
+        && !has_sticker
+        && !is_photo_card
+        && !is_file_card
+        && extract_message_link_view(msg).is_some();
+    let has_interactive_card = poll_card.is_some()
+        || is_contact_card
+        || is_call_card
+        || has_link_card
+        || is_photo_card
+        || has_voice_card
+        || is_file_card;
 
     let show_timestamp = !msg.time.is_empty()
         && (!next_same_sender
@@ -3591,7 +3827,11 @@ pub(super) fn render_chat_bubble(
 
     // Pre-measure exact content width for both outgoing and incoming bubbles so every bubble,
     // photo, and call card hugs its content tightly without horizontal overflow or inner/outer frame mismatch.
-    let content_width = if has_sticker {
+    let content_width = if poll_card.is_some() {
+        max_text_width.min(320.0)
+    } else if is_contact_card {
+        max_text_width.min(300.0)
+    } else if has_sticker {
         116.0_f32
     } else if is_call_card {
         max_text_width.min(256.0)
@@ -3706,6 +3946,13 @@ pub(super) fn render_chat_bubble(
                 .map(|e| emoji_only_cell_width(ui, e, sticker_textures, emoji_textures))
                 .sum();
             cells + gaps
+        } else if let Some(matches) = zalo_emoji_only_matches(&msg.text).filter(|matches| {
+            matches.iter().all(|matched| {
+                sticker_textures
+                    .contains_key(&crate::zalo_emoticons::texture_key(matched.col, matched.row))
+            })
+        }) {
+            matches.len() as f32 * EMOJI_ONLY_SIZE + (matches.len() - 1) as f32 * EMOJI_ONLY_GAP
         } else {
             ui.fonts(|f| {
                 f.layout(
@@ -3841,7 +4088,20 @@ pub(super) fn render_chat_bubble(
                         ui.set_max_width(content_width);
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
                             quote_action = render_quote_block(ui, msg, pal, true, content_width);
-                            if let Some(card) = &call_card_opt {
+                            if let Some(card) = poll_card {
+                                card_action = card.render(ui, msg, pal);
+                            } else if let Some(card) = contact_card {
+                                render_recall_marker(ui, &msg.text);
+                                card_action = super::contact_card::render_contact_card(
+                                    ui,
+                                    card,
+                                    pal,
+                                    sticker_textures,
+                                    loading_stickers,
+                                    threads,
+                                    current_uid,
+                                );
+                            } else if let Some(card) = &call_card_opt {
                                 card_action = render_call_card_widget(ui, card, pal, content_width);
                             } else if !render_sticker_widget(
                                 ui,
@@ -3895,7 +4155,9 @@ pub(super) fn render_chat_bubble(
                         });
                     });
                 if let Some(selecting) = multi_select_overlay(ui, &fr.response, msg, pal) {
-                    return selecting;
+                    return selecting.or_else(|| {
+                        card_action.filter(|action| matches!(action, BubbleAction::FetchPoll { .. }))
+                    });
                 }
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
@@ -4004,7 +4266,20 @@ pub(super) fn render_chat_bubble(
                                 ui.add_space(4.0);
                             }
                             quote_action = render_quote_block(ui, msg, pal, false, content_width);
-                            if let Some(card) = &call_card_opt {
+                            if let Some(card) = poll_card {
+                                card_action = card.render(ui, msg, pal);
+                            } else if let Some(card) = contact_card {
+                                render_recall_marker(ui, &msg.text);
+                                card_action = super::contact_card::render_contact_card(
+                                    ui,
+                                    card,
+                                    pal,
+                                    sticker_textures,
+                                    loading_stickers,
+                                    threads,
+                                    current_uid,
+                                );
+                            } else if let Some(card) = &call_card_opt {
                                 card_action = render_call_card_widget(ui, card, pal, content_width);
                             } else if !render_sticker_widget(
                                 ui,
@@ -4043,7 +4318,9 @@ pub(super) fn render_chat_bubble(
                         });
                     });
                 if let Some(selecting) = multi_select_overlay(ui, &fr.response, msg, pal) {
-                    return selecting;
+                    return selecting.or_else(|| {
+                        card_action.filter(|action| matches!(action, BubbleAction::FetchPoll { .. }))
+                    });
                 }
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
@@ -4075,6 +4352,13 @@ pub(super) fn render_chat_bubble(
 
 #[derive(Clone, PartialEq)]
 pub(super) enum BubbleAction {
+    FetchPoll {
+        poll_id: String,
+    },
+    VotePoll {
+        poll_id: String,
+        option_ids: Vec<String>,
+    },
     Reply,
     /// Enter multi-select mode with this message selected.
     StartMultiSelect,
@@ -4097,6 +4381,8 @@ pub(super) enum BubbleAction {
     CallAgain {
         is_video: bool,
     },
+    MessageContact,
+    CopyContactPhone,
     OpenImagePopup {
         /// The photo message, so the viewer opens exactly the clicked one even when two messages
         /// share a thumbnail.
@@ -5324,6 +5610,9 @@ mod quote_navigation_tests {
                                 0,
                                 &|id: &str| id.to_string(),
                                 None,
+                                None,
+                                &[],
+                                "",
                             );
                         });
                     },
@@ -5671,26 +5960,141 @@ mod quote_navigation_tests {
         let mut loading = HashSet::new();
 
         let mut job = egui::text::LayoutJob::default();
-        job.append(
-            &format!("hi 🐧 {family} © 💌"),
-            0.0,
-            egui::TextFormat::default(),
-        );
-        let (out, marks) = split_emoji_sections(job, &textures, &mut loading);
+        let text = format!("hi 🐧 {family} © 💌");
+        job.append(&text, 0.0, egui::TextFormat::default());
+        let source = SourceEmoticons::new(&text);
+        let (out, marks) = split_emoji_sections(job, &textures, &mut loading, &source, &[Some(0)]);
 
         // 🐧 and the family (collapsed to its first codepoint) are placeholders; © stays text;
         // 💌 has no texture yet so it stays a glyph and is requested from the worker.
         assert_eq!(out.text, "hi 🐧 👨 © 💌");
         assert_eq!(marks.len(), 2);
-        for (idx, _) in &marks {
+        for mark in &marks {
             assert_eq!(
-                out.sections[*idx as usize].format.color,
+                out.sections[mark.section_index as usize].format.color,
                 Color32::TRANSPARENT
             );
         }
         assert!(loading.contains(&crate::emoji_raster::texture_key("💌")));
         assert!(!is_inline_emoji_cluster("©"));
         assert!(is_inline_emoji_cluster("❤\u{FE0F}"));
+    }
+
+    #[test]
+    fn zalo_emoji_sections_use_ready_tiles_and_keep_shortcuts_selectable() {
+        let ctx = egui::Context::default();
+        let tex = ctx.load_texture("smile", egui::ColorImage::example(), Default::default());
+        let textures = HashMap::from([(crate::zalo_emoticons::texture_key(41, 7), tex)]);
+        let mut loading = HashSet::new();
+        let mut job = egui::text::LayoutJob::default();
+        job.append("chào :):) :D ", 0.0, egui::TextFormat::default());
+        job.append(":) ", 0.0, egui::TextFormat::default());
+        job.append("@Name :)", 0.0, egui::TextFormat::default());
+        let text = job.text.clone();
+
+        let source = SourceEmoticons::new(&text);
+        let (job, marks) =
+            split_emoji_sections(job, &textures, &mut loading, &source, &[Some(0), None, None]);
+        assert_eq!(job.text, "chào 🙂🙂 :D :) @Name :)");
+        assert_eq!(marks.len(), 2);
+        for mark in &marks {
+            assert_eq!(mark.shortcut.as_deref(), Some(":)"));
+            assert_eq!(job.sections[mark.section_index as usize].format.color, Color32::TRANSPARENT);
+        }
+        assert_eq!(
+            loading,
+            HashSet::from([crate::zalo_emoticons::texture_key(41, 0)])
+        );
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let mut galley = ctx.fonts(|fonts| fonts.layout_job(job.clone()));
+            let original_size = galley.size();
+            restore_emoji_shortcut_text(&mut galley, &marks);
+            assert_eq!(galley.text(), text);
+            assert_eq!(galley.rows[0].text(), text);
+            assert_eq!(galley.size(), original_size);
+        });
+    }
+
+    #[test]
+    fn markdown_only_draws_zalo_tiles_outside_protected_sections() {
+        let ctx = egui::Context::default();
+        let mut tile_id = None;
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            let tex = ctx.load_texture("emoticon", egui::ColorImage::example(), Default::default());
+            tile_id = Some(tex.id());
+            let textures = [":)", ":*", "_()_", ";!"]
+                .into_iter()
+                .map(|shortcut| {
+                    let matched = crate::zalo_emoticons::find(shortcut).remove(0);
+                    (crate::zalo_emoticons::texture_key(matched.col, matched.row), tex.clone())
+                })
+                .collect();
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_chat_markdown_block(
+                    ui,
+                    ":* _()_ `:)` [:) ](https://example.com) @Name :) http://x.y/:) http://x.y/;! :)\n```\n:)\n```",
+                    Color32::BLACK,
+                    &ThemePalette::light(),
+                    &textures,
+                    &mut HashSet::new(),
+                    Some(&["@Name :)".to_owned()]),
+                );
+            });
+        });
+        let tiles = output
+            .shapes
+            .iter()
+            .filter(|shape| matches!(&shape.shape, egui::Shape::Mesh(mesh) if Some(mesh.texture_id) == tile_id))
+            .count();
+        assert_eq!(tiles, 3);
+    }
+
+    #[test]
+    fn markdown_emoticons_respect_original_message_boundaries() {
+        for (text, expected_tiles) in [
+            ("**hello**:)", 0),
+            ("**hello** :)", 1),
+            (":)**hello**", 0),
+            (":) **hello**", 1),
+            ("**:)**", 0),
+            ("** :) **", 1),
+            ("**hello**\t:)", 0),
+            ("- :)\n1. :)\n# :)\n> :)", 4),
+            ("| a | b |\n| --- | --- |\n|:)| :) |", 1),
+        ] {
+            let ctx = egui::Context::default();
+            let tex = ctx.load_texture("smile", egui::ColorImage::example(), Default::default());
+            let tile_id = tex.id();
+            let textures = HashMap::from([(crate::zalo_emoticons::texture_key(41, 7), tex)]);
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_chat_markdown_block(
+                        ui,
+                        text,
+                        Color32::BLACK,
+                        &ThemePalette::light(),
+                        &textures,
+                        &mut HashSet::new(),
+                        None,
+                    );
+                });
+            });
+            let tiles = output
+                .shapes
+                .iter()
+                .filter(|shape| matches!(&shape.shape, egui::Shape::Mesh(mesh) if mesh.texture_id == tile_id))
+                .count();
+            assert_eq!(tiles, expected_tiles, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn zalo_emoji_only_requires_shortcuts_throughout() {
+        assert_eq!(zalo_emoji_only_matches(" :) :D\n_()_ ").unwrap().len(), 3);
+        assert!(zalo_emoji_only_matches("chào :)").is_none());
+        assert!(zalo_emoji_only_matches("a:)b").is_none());
+        assert!(zalo_emoji_only_matches(&":)".repeat(EMOJI_ONLY_MAX + 1)).is_none());
     }
 
     #[test]
@@ -5833,15 +6237,15 @@ mod md_block_tests {
     fn splits_code_fence_with_lang() {
         let blocks = split_md_blocks("hello\n```rust\nlet x = 1;\nlet y = 2;\n```\nbye");
         assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], MdBlock::Lines(l) if l == &vec!["hello".to_string()]));
+        assert!(matches!(&blocks[0], MdBlock::Lines(l) if l == &["hello"]));
         match &blocks[1] {
             MdBlock::Code { lang, body } => {
-                assert_eq!(lang, "rust");
+                assert_eq!(*lang, "rust");
                 assert!(body.contains("let x = 1;") && body.contains("let y = 2;"));
             }
             other => panic!("expected code, got {other:?}"),
         }
-        assert!(matches!(&blocks[2], MdBlock::Lines(l) if l == &vec!["bye".to_string()]));
+        assert!(matches!(&blocks[2], MdBlock::Lines(l) if l == &["bye"]));
     }
 
     #[test]
@@ -5859,9 +6263,9 @@ mod md_block_tests {
         let good = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
         match &split_md_blocks(good)[..] {
             [MdBlock::Table { headers, rows }] => {
-                assert_eq!(headers, &vec!["a".to_string(), "b".to_string()]);
+                assert_eq!(headers, &["a", "b"]);
                 assert_eq!(rows.len(), 2);
-                assert_eq!(rows[0], vec!["1".to_string(), "2".to_string()]);
+                assert_eq!(rows[0], ["1", "2"]);
             }
             other => panic!("expected table, got {other:?}"),
         }
@@ -5877,11 +6281,11 @@ mod md_block_tests {
     fn parses_ordered_list_items() {
         assert_eq!(
             parse_ordered_item("1. mua sữa"),
-            Some(("1".to_string(), 0, "mua sữa".to_string()))
+            Some(("1", 0, "mua sữa"))
         );
         assert_eq!(
             parse_ordered_item("  12. indent"),
-            Some(("12".to_string(), 2, "indent".to_string()))
+            Some(("12", 2, "indent"))
         );
         assert_eq!(parse_ordered_item("- bullet"), None);
         assert_eq!(parse_ordered_item("1.missing space"), None);

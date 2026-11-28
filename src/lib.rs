@@ -5,6 +5,7 @@
 pub const APP_DISPLAY_NAME: &str = "Zalo-next";
 
 pub mod account_manager;
+pub mod app_lock;
 pub mod ai;
 pub mod audio;
 pub mod bank_cards;
@@ -25,6 +26,7 @@ pub mod message_model;
 /// Exact quoted-message references in loaded conversations.
 pub mod message_navigation;
 pub mod param_cipher;
+pub mod poll;
 pub mod qr;
 pub mod quick_messages;
 pub mod reactions;
@@ -41,6 +43,8 @@ pub mod unread;
 pub mod video_player;
 pub mod video_tools;
 pub mod voip_log;
+mod zalo_emoticon_table;
+pub mod zalo_emoticons;
 pub mod zproto_host;
 
 /// Local HTTP REST API, MCP JSON-RPC 2.0 server, and auto-reply rules (#35).
