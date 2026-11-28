@@ -1558,3 +1558,29 @@ Entry template:
   is shown optimistically.
 - Verification: `cargo test --locked --lib` 646 pass; dmg rebuilt. NOT verified live: unmute on the real
   server, notification delivery after unmute, icon and menu visuals.
+
+## 2026-11-28 — Open chat not auto-read; crackly call audio once the mic is allowed  (agent: Claude Code, claude-opus-5-5 + Codex (reviewer))
+- Request: new messages in the conversation being viewed still show a red badge until the row is clicked;
+  a call sounded "rè" (crackly) after granting mic permission (fine while only listening).
+- Root cause (unread): only `open_conversation` (row click) cleared the badge and moved the read point;
+  incoming messages in the selected thread were counted unread whenever egui's `focused` was false, and even
+  when not counted the read point / seen receipt never advanced.
+- Root cause (audio, inferred from code + device list, not measured): src/media.rs converted rates by
+  picking the nearest sample with no low-pass and restarted the read index in every cpal callback. The
+  owner's mic is "Micrô MacBook Air" at 44.1 kHz (system_profiler), so capture → 16 kHz aliased and jumped at
+  each callback boundary (periodic click = buzz). Speakers at 48 kHz had the same per-callback phase reset.
+  RTP stats in voip.log showed no receive loss, so the network is not the cause. No echo cancellation exists.
+- Changes: src/resample.rs (`StreamResampler`: fractional phase kept across chunks, linear interpolation,
+  2× biquad low-pass at 0.45 × the lower rate, NaN guard; tests for length, chunk continuity, aliasing,
+  upsampling); media.rs capture uses it in the input callback, playback resamples where decoded frames are
+  queued and the callback only copies; playback queue capped (~400 ms → keep 120 ms).
+  gui: `user_is_present` (egui focus or input in the last 15 s, reset on WindowFocused(false)),
+  `mark_open_conversation_read` each frame (not in contacts view / starred filter / in-chat search, list
+  near the bottom, newest incoming id > read point) → `open_conversation`; the ThreadsUpdated badge logic
+  uses `user_is_present`.
+- Review: Codex working-tree review → fixed: focus-loss reset, visibility conditions, manual "mark unread"
+  kept, newest incoming (not last row), forward-only cursor, NaN guard. Not fixed (pre-existing): the
+  read-point write runs on a detached thread and can race a queued PersistThreads snapshot.
+- Verification: `cargo test --locked --lib` 650 pass; dmg rebuilt. NOT verified: any live call (whether the
+  crackle is gone, and whether it was heard by the owner or the friend — acoustic echo without AEC is
+  another possible source), auto-read behaviour in the real GUI.
