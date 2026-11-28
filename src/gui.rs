@@ -27,6 +27,7 @@ mod album;
 mod appearance;
 mod background;
 mod clipboard_write;
+mod contact_card;
 mod doc_preview_ui;
 #[cfg(target_os = "macos")]
 mod macos_clipboard;
