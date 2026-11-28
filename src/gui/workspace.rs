@@ -5150,6 +5150,8 @@ impl ZaloGuiApp {
                                     > = None;
                                     let composer_id =
                                         Id::new(("chat_composer_input", &thread_id));
+                                    self.rich_composer.sync(&self.input_message, None);
+                                    self.rich_composer.render_toolbar(ui, composer_id);
 
                                     let response = ui
                                         .horizontal(|ui| {
@@ -5365,6 +5367,7 @@ impl ZaloGuiApp {
                                             }
 
                                             self.bank_cards_toolbar(ui, pal, &thread_id, is_group);
+                                            self.rich_composer.toggle_button(ui, composer_id);
 
                                             let send_btn_w =
                                                 if is_narrow_w { 52.0 } else { 76.0 };
@@ -5382,19 +5385,17 @@ impl ZaloGuiApp {
                                                 .iter()
                                                 .map(|p| p.name.clone())
                                                 .collect();
-                                            let composer_text_col = pal.text_primary;
-                                            let composer_tag_col =
-                                                super::messages::mention_link_color(pal);
                                             // Grow with the text, wrapped lines included, up to about a third
                                             // of the window; past that the box scrolls.
                                             let text_rows = if self.input_message.is_empty() {
                                                 1
                                             } else {
                                                 let mut job = composer_mention_layout_job(
+                                                    ui,
                                                     &self.input_message,
                                                     &mention_names,
-                                                    composer_text_col,
-                                                    composer_tag_col,
+                                                    &self.rich_composer.styles,
+                                                    pal,
                                                 );
                                                 // TextEdit margin (6 px each side) plus a little slack.
                                                 job.wrap.max_width = (input_w - 22.0).max(20.0);
@@ -5431,18 +5432,24 @@ impl ZaloGuiApp {
                                                 "Nhập tin nhắn tới {}...",
                                                 truncate_chars(&thread_name, 18)
                                             );
+                                            let mut edit_hint = self.rich_composer.edit_hint(ui.ctx(), composer_id);
+                                            let mut initial_layout = true;
+                                            let composer = &mut self.rich_composer;
                                             let mut composer_layouter =
                                                 |ui: &egui::Ui, text: &str, wrap_width: f32| {
+                                                    let hint = if std::mem::take(&mut initial_layout) {
+                                                        None
+                                                    } else {
+                                                        edit_hint.take()
+                                                    };
+                                                    composer.sync(text, hint);
                                                     let mut job = composer_mention_layout_job(
-                                                        text,
-                                                        &mention_names,
-                                                        composer_text_col,
-                                                        composer_tag_col,
+                                                        ui, text, &mention_names, &composer.styles, pal,
                                                     );
                                                     job.wrap.max_width = wrap_width;
                                                     ui.fonts(|f| f.layout_job(job))
                                                 };
-                                            let resp = if is_multiline {
+                                            let output = if is_multiline {
                                                 ui.allocate_ui_with_layout(
                                                     Vec2::new(input_w, box_h),
                                                     Layout::top_down(Align::Min),
@@ -5450,22 +5457,15 @@ impl ZaloGuiApp {
                                                         ui.set_min_size(Vec2::new(input_w, box_h));
                                                         ui.set_max_size(Vec2::new(input_w, box_h));
                                                         egui::ScrollArea::vertical()
-                                                            .id_salt((
-                                                                "composer_fixed_scroll",
-                                                                &thread_id,
-                                                            ))
+                                                            .id_salt(("composer_fixed_scroll", &thread_id))
                                                             .max_width(input_w)
                                                             .max_height(box_h)
                                                             .auto_shrink([false, false])
                                                             .stick_to_bottom(true)
                                                             .show(ui, |ui| {
-                                                                ui.add(
-                                                                    egui::TextEdit::multiline(
-                                                                        &mut self.input_message,
-                                                                    )
+                                                                egui::TextEdit::multiline(&mut self.input_message)
                                                                     .id(composer_id)
-                                                                    // Tab must pick a suggestion, not move focus (egui reads Tab
-                                                                    // at frame start, before the key is consumed above).
+                                                                    // Tab must pick a suggestion before moving focus.
                                                                     .lock_focus(
                                                                         quick_message_mode
                                                                             || !mention_candidates.is_empty(),
@@ -5473,39 +5473,37 @@ impl ZaloGuiApp {
                                                                     .desired_rows(vis_lines)
                                                                     .frame(false)
                                                                     .hint_text(hint_str)
-                                                                    .font(FontId::proportional(15.0))
+                                                                    .font(FontId::proportional(COMPOSER_FONT_SIZE))
                                                                     .layouter(&mut composer_layouter)
-                                                                    .margin(Margin::symmetric(
-                                                                        6.0, 6.0,
-                                                                    ))
-                                                                    .desired_width(input_w - 10.0),
-                                                                )
+                                                                    .margin(Margin::symmetric(6.0, 6.0))
+                                                                    .desired_width(input_w - 10.0)
+                                                                    .show(ui)
                                                             })
                                                             .inner
                                                     },
                                                 )
                                                 .inner
                                             } else {
-                                                ui.add_sized(
-                                                    [input_w, 34.0],
-                                                    egui::TextEdit::singleline(
-                                                        &mut self.input_message,
-                                                    )
+                                                egui::TextEdit::singleline(&mut self.input_message)
                                                     .id(composer_id)
-                                                    // Tab must pick a suggestion, not move focus (egui reads Tab
-                                                    // at frame start, before the key is consumed above).
                                                     .lock_focus(
                                                         quick_message_mode
                                                             || !mention_candidates.is_empty(),
                                                     )
                                                     .frame(false)
                                                     .hint_text(hint_str)
-                                                    .font(FontId::proportional(15.0))
+                                                    .font(FontId::proportional(COMPOSER_FONT_SIZE))
                                                     .layouter(&mut composer_layouter)
                                                     .margin(Margin::symmetric(6.0, 7.0))
-                                                    .desired_width(input_w),
-                                                )
+                                                    .desired_width(input_w - 12.0)
+                                                    .min_size(Vec2::new(input_w, 34.0))
+                                                    .show(ui)
                                             };
+                                            super::rich_composer::paint_prefixes(
+                                                ui, &output, &self.rich_composer,
+                                                pal.text_primary, COMPOSER_FONT_SIZE,
+                                            );
+                                            let resp = output.response;
                                             if resp.changed()
                                                 && !self.input_message.trim().is_empty()
                                                 && !self.settings.block_typing
@@ -5653,6 +5651,7 @@ impl ZaloGuiApp {
                                                 .map(|(i, _)| i)
                                                 .unwrap_or(self.input_message.len());
                                             self.input_message.insert(byte_idx, '\n');
+                                            self.rich_composer.sync(&self.input_message, Some(byte_idx));
                                             let next_c = egui::text::CCursor::new(char_idx + 1);
                                             st.cursor.set_char_range(Some(
                                                 egui::text::CCursorRange::one(next_c),
@@ -5663,6 +5662,8 @@ impl ZaloGuiApp {
                                         }
                                         response.request_focus();
                                     }
+                                    self.rich_composer.sync(&self.input_message, None);
+                                    self.rich_composer.caret_changed(ui.ctx(), composer_id);
                                     if response.changed() {
                                         ensure_cjk_font(
                                             ui.ctx(),
@@ -5841,6 +5842,7 @@ impl ZaloGuiApp {
                                         );
                                         let mut cap = self.input_message.trim().to_string();
                                         self.input_message.clear();
+                                        self.rich_composer.clear();
                                         self.dismissed_sticker_suggest_for.clear();
                                         self.composer_sticker_selected = None;
                                         response.request_focus();
@@ -5857,8 +5859,15 @@ impl ZaloGuiApp {
                                             }
                                         }
                                     } else if (send_clicked || enter_pressed) && can_send {
-                                        let text = self.input_message.trim().to_string();
+                                        self.rich_composer.sync(&self.input_message, None);
+                                        let text_styles = std::mem::take(&mut self.rich_composer.styles);
+                                        let text = if text_styles.is_empty() {
+                                            self.input_message.trim().to_string()
+                                        } else {
+                                            std::mem::take(&mut self.input_message)
+                                        };
                                         self.input_message.clear();
+                                        self.rich_composer.clear();
                                         self.dismissed_sticker_suggest_for.clear();
                                         self.composer_sticker_selected = None;
                                         response.request_focus();
@@ -5874,6 +5883,7 @@ impl ZaloGuiApp {
                                                 let _ = tx.send(WorkerCmd::SendQuote {
                                                     to_id: thread_id.clone(),
                                                     text,
+                                                    text_styles,
                                                     quoted,
                                                     is_group,
                                                     mentions: if is_group {
@@ -5886,6 +5896,7 @@ impl ZaloGuiApp {
                                                 let _ = tx.send(WorkerCmd::SendMessage {
                                                     to_id: thread_id.clone(),
                                                     text,
+                                                    text_styles,
                                                     is_group,
                                                     mentions: if is_group {
                                                         std::mem::take(&mut self.composer_mentions)
@@ -6137,29 +6148,17 @@ pub(crate) fn composer_mention_spans(text: &str, names: &[String]) -> Vec<std::o
     spans
 }
 
-/// Layout job for the composer: plain text with picked `@Name` tags in the mention colour.
+/// Keep the editable text intact while highlighting mentions and applying formatting spans.
 fn composer_mention_layout_job(
+    ui: &egui::Ui,
     text: &str,
     names: &[String],
-    text_col: Color32,
-    tag_col: Color32,
+    styles: &[crate::chat::TextStyle],
+    pal: &ThemePalette,
 ) -> egui::text::LayoutJob {
-    let font = FontId::proportional(COMPOSER_FONT_SIZE);
-    let plain = egui::TextFormat::simple(font.clone(), text_col);
-    let tag = egui::TextFormat::simple(font, tag_col);
-    let mut job = egui::text::LayoutJob::default();
-    let mut cursor = 0;
-    for span in composer_mention_spans(text, names) {
-        if span.start > cursor {
-            job.append(&text[cursor..span.start], 0.0, plain.clone());
-        }
-        job.append(&text[span.clone()], 0.0, tag.clone());
-        cursor = span.end;
-    }
-    if cursor < text.len() || text.is_empty() {
-        job.append(&text[cursor..], 0.0, plain);
-    }
-    job
+    super::rich_composer::composer_job(
+        ui, text, styles, &composer_mention_spans(text, names), pal, COMPOSER_FONT_SIZE,
+    )
 }
 
 /// Maximum words after `@` that are still treated as a name query.
@@ -7830,15 +7829,20 @@ mod quote_navigation_tests {
         // Longest name wins; `mail@Sơn` has no word boundary; unpicked `@Khác` stays plain.
         assert_eq!(got, vec!["@Sơn Hoàng", "@Sơn"]);
 
-        let job = composer_mention_layout_job(text, &names, Color32::WHITE, Color32::BLUE);
-        assert_eq!(job.text, text);
-        let blue: Vec<&str> = job
-            .sections
-            .iter()
-            .filter(|s| s.format.color == Color32::BLUE)
-            .map(|s| &job.text[s.byte_range.clone()])
-            .collect();
-        assert_eq!(blue, vec!["@Sơn Hoàng", "@Sơn"]);
+        let ctx = egui::Context::default();
+        let pal = ThemePalette::dark();
+        let tag_col = super::super::messages::mention_link_color(&pal);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let job = composer_mention_layout_job(ui, text, &names, &[], &pal);
+                assert_eq!(job.text, text);
+                let blue: Vec<&str> = job.sections.iter()
+                    .filter(|s| s.format.color == tag_col)
+                    .map(|s| &job.text[s.byte_range.clone()])
+                    .collect();
+                assert_eq!(blue, vec!["@Sơn Hoàng", "@Sơn"]);
+            });
+        });
         assert!(composer_mention_spans("", &names).is_empty());
     }
 

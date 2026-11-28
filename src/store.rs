@@ -573,6 +573,7 @@ impl MessageStore {
                 let mut link_thumb = None;
                 let mut link_src = None;
                 let mut media_size = None;
+                let mut text_styles = Vec::new();
                 let mut wire_fields = std::collections::BTreeMap::new();
                 let mut poll_id = None;
                 let mut contact_card = None;
@@ -652,6 +653,12 @@ impl MessageStore {
                             .get("link_src")
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
+                        if let Some(spans) = val.get("text_styles").and_then(|v| v.as_array()) {
+                            text_styles = spans.iter().take(crate::chat::MAX_TEXT_STYLES)
+                                .filter_map(|span| serde_json::from_value(span.clone()).ok())
+                                .collect();
+                            crate::chat::validate_text_styles(&sm.text, &mut text_styles);
+                        }
                         media_size = val
                             .get("media_size")
                             .and_then(|value| <(u32, u32)>::deserialize(value).ok())
@@ -703,6 +710,7 @@ impl MessageStore {
                     link_thumb,
                     link_src,
                     media_size,
+                    text_styles,
                     poll_id,
                     wire_ref: crate::message_model::WireMessageRef {
                         fields: wire_fields,
@@ -727,6 +735,7 @@ impl MessageStore {
                                     && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
                     if existing.id == cm.id {
+                        existing.merge_text_styles(&cm);
                         if existing.media_size.is_none() {
                             existing.media_size = cm.media_size;
                         }
@@ -763,7 +772,7 @@ impl MessageStore {
                         existing.link_desc = cm.link_desc;
                         existing.link_thumb = cm.link_thumb;
                         existing.link_src = cm.link_src;
-                        if !cm.text.is_empty() {
+                        if !cm.text.is_empty() && existing.text_styles.is_empty() {
                             existing.text = cm.text;
                         }
                     }
@@ -931,6 +940,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if let Some(lsrc) = &m.link_src {
             meta.insert("link_src".into(), serde_json::json!(lsrc));
+        }
+        if !m.text_styles.is_empty() {
+            meta.insert("text_styles".into(), serde_json::json!(m.text_styles));
         }
         if let Some((width, height)) = m.media_size {
             meta.insert("media_size".into(), serde_json::json!([width, height]));
@@ -2038,6 +2050,42 @@ mod tests {
         assert_eq!(store.hydrate_threads(&mut hydrated, 10).unwrap(), 2);
         assert_eq!(hydrated[0].messages[0].media_size, Some((1280, 960)));
         assert_eq!(hydrated[0].messages[1].media_size, None);
+    }
+
+    #[test]
+    fn formatted_messages_round_trip_through_raw_json() {
+        use crate::chat::{ListKind, TextStyle, TextStyleFormat};
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let styles = vec![TextStyle {
+            start: 3,
+            end: 7,
+            format: TextStyleFormat {
+                bold: true,
+                size: Some(20),
+                color: Some([0xdb, 0x34, 0x2e]),
+                list: Some(ListKind::Bullet),
+                indent: 2,
+                ..Default::default()
+            },
+        }];
+        let thread = Thread {
+            id: "thread-1".into(),
+            messages: vec![ChatMessage {
+                id: "message-1".into(),
+                text: "ế😀".into(),
+                text_styles: styles.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(persist_threads(&mut store, &[thread]).unwrap(), 1);
+        let rows = store.messages_for("thread-1", 10).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&rows[0].raw_json).unwrap();
+        assert_eq!(raw["text_styles"], serde_json::json!(styles));
+        let mut hydrated = Vec::new();
+        store.hydrate_threads(&mut hydrated, 10).unwrap();
+        assert_eq!(hydrated[0].messages[0].text_styles, styles);
+        assert_eq!(hydrated[0].messages[0].text, "ế😀");
     }
 
     fn row(thread: &str, id: &str, ts: i64, text: &str, raw_json: &str) -> StoredMessage {

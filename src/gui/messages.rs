@@ -10,6 +10,9 @@ pub(super) fn is_sticker_message(msg: &ChatMessage) -> Option<(u64, u64)> {
             return Some((sid, msg.sticker_cate_id.unwrap_or(0)));
         }
     }
+    if !msg.text_styles.is_empty() {
+        return None;
+    }
     let check_ami = |s: &str| -> Option<(u64, u64)> {
         let pos = s.find("ami_fat_cat_")?;
         let num_str = s.get(pos + 12..pos + 14)?;
@@ -1231,7 +1234,8 @@ pub(super) fn message_mention_texts(msg: &ChatMessage) -> Option<Vec<String>> {
             .map(|n| n as usize)
             .or_else(|| v.as_str().and_then(|t| t.trim().parse().ok()))
     };
-    let units: Vec<u16> = msg.text.encode_utf16().collect();
+    let text = msg.text.strip_prefix("[Đã thu hồi] ").unwrap_or(&msg.text);
+    let units: Vec<u16> = text.encode_utf16().collect();
     let mut out: Vec<String> = Vec::new();
     for m in entries {
         let (Some(pos), Some(len)) = (as_usize(m.get("pos")), as_usize(m.get("len"))) else {
@@ -1714,6 +1718,9 @@ fn emoji_only_cell_width(
 /// Text placed on the clipboard by "Copy tin nhắn": the original URL for link shares
 /// (plus the sender's own comment, if any) instead of the preview title/description.
 pub(super) fn message_copy_text(msg: &ChatMessage) -> String {
+    if !msg.text_styles.is_empty() {
+        return msg.text.clone();
+    }
     let is_media = is_sticker_message(msg).is_some()
         || is_zalo_photo_message(msg)
         || is_zalo_file_or_video_message(msg);
@@ -1919,6 +1926,192 @@ impl MarkdownLayout<'_> {
     }
 }
 
+/// Metadata takes precedence over the fallback used for untagged message text.
+fn inline_mention_len(text: &str, mentions: Option<&[String]>) -> Option<usize> {
+    let after = text.strip_prefix('@')?;
+    if let Some(mentions) = mentions {
+        return mentions.iter()
+            .filter(|tag| text.starts_with(tag.as_str()))
+            .map(String::len)
+            .max();
+    }
+    for all in ["All", "all", "ALL", "Tất cả", "tất cả", "Tat ca", "tat ca"] {
+        if let Some(tail) = after.strip_prefix(all) {
+            if tail.chars().next().is_none_or(|ch| {
+                ch.is_whitespace() || matches!(ch, '.' | ',' | '!' | '?' | ':' | ';')
+            }) {
+                return Some(1 + all.len());
+            }
+        }
+    }
+    let len = guessed_mention_name_len(after);
+    after[..len].starts_with(char::is_alphanumeric).then_some(1 + len)
+}
+
+struct FormattedLine {
+    job: egui::text::LayoutJob,
+    section_offsets: Vec<Option<usize>>,
+    link: Option<String>,
+}
+
+struct FormattedMessage<'a> {
+    source: SourceEmoticons<'a>,
+    lines: Vec<FormattedLine>,
+}
+
+impl<'a> FormattedMessage<'a> {
+    fn new(msg: &'a ChatMessage, pal: &ThemePalette) -> Option<Self> {
+        if msg.text_styles.is_empty() {
+            return None;
+        }
+        let text = msg.text.strip_prefix("[Đã thu hồi] ").unwrap_or(&msg.text);
+        let offset = msg.text.len() - text.len();
+        let styles: Vec<_> = msg.text_styles.iter().map(|span| crate::chat::TextStyle {
+            start: span.start.saturating_sub(offset),
+            end: span.end.saturating_sub(offset),
+            format: span.format,
+        }).collect();
+        let runs = super::rich_composer::style_runs(text, &styles);
+        let source = SourceEmoticons::new(text);
+        let mentions = message_mention_texts(msg);
+        let lines = super::rich_composer::paragraphs(text, &runs).into_iter()
+            .map(|line| formatted_message_line(&source, line, &runs, mentions.as_deref(), pal, msg.is_outgoing))
+            .collect();
+        Some(Self { source, lines })
+    }
+
+    fn width(&self, ui: &egui::Ui, limit: f32) -> f32 {
+        ui.fonts(|fonts| {
+            self.lines.iter().map(|line| {
+                let mut job = line.job.clone();
+                job.wrap.max_width = limit;
+                fonts.layout_job(job).size().x
+            }).fold(0.0, f32::max)
+        })
+    }
+
+    fn show(
+        self,
+        ui: &mut egui::Ui,
+        textures: &HashMap<String, TextureHandle>,
+        loading: &mut HashSet<String>,
+    ) {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for FormattedLine { job, section_offsets, link } in self.lines {
+                let (job, marks) = split_emoji_sections(job, textures, loading, &self.source, &section_offsets);
+                let response = add_emoji_label(ui, job, &marks, link.as_ref().map(|_| Sense::click()));
+                if let Some(url) = link {
+                    if response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(&url).clicked() {
+                        open_external_url(&url);
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FormattedToken {
+    Link,
+    Mention,
+    Emoji,
+}
+
+fn formatted_message_line(
+    source: &SourceEmoticons<'_>,
+    line: super::rich_composer::Paragraph,
+    runs: &[crate::chat::TextStyle],
+    mentions: Option<&[String]>,
+    pal: &ThemePalette,
+    outgoing: bool,
+) -> FormattedLine {
+    use super::rich_composer::{runs_in, text_format, INDENT_WIDTH};
+
+    let text = &source.text[line.range.clone()];
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let offset = line.range.start;
+    let (ink, bg) = if outgoing {
+        (pal.bubble_out_text, pal.bubble_out_bg)
+    } else {
+        (pal.bubble_in_text, pal.bubble_in_bg)
+    };
+    let base = egui::TextFormat::simple(FontId::proportional(15.0), ink);
+    let bold_ink = if pal.is_dark { Color32::WHITE } else { pal.text_primary };
+    let mut job = egui::text::LayoutJob { first_row_min_height: 15.0, ..Default::default() };
+    let mut section_offsets = Vec::new();
+    let mut leading = f32::from(line.indent) * INDENT_WIDTH;
+    if let Some(prefix) = line.prefix {
+        job.append(&prefix, std::mem::take(&mut leading), base.clone());
+        section_offsets.push(None);
+    }
+
+    let mut tokens = Vec::new();
+    let mut link = None;
+    let mut from = 0;
+    while let Some(start) = find_bare_url_start(&text[from..]).map(|start| from + start) {
+        let len = bare_url_len(&text[start..]);
+        let end = start + len;
+        if len >= 8 {
+            link.get_or_insert_with(|| normalize_bare_url(&text[start..end]));
+            tokens.push((start..end, FormattedToken::Link));
+        }
+        from = start + len.max(1);
+    }
+    from = 0;
+    while let Some(start) = find_mention_start(&text[from..]).map(|start| from + start) {
+        if let Some(len) = inline_mention_len(&text[start..], mentions) {
+            tokens.push((start..start + len, FormattedToken::Mention));
+            from = start + len;
+        } else {
+            from = start + 1;
+        }
+    }
+    // A style boundary can fall inside a multi-character emoji or shortcut.
+    tokens.extend(source.in_span(offset, text.len()).map(|matched| {
+        (matched.range.start - offset..matched.range.end - offset, FormattedToken::Emoji)
+    }));
+    tokens.extend(scan_emoji_clusters(text).into_iter()
+        .filter(|range| is_inline_emoji_cluster(&text[range.clone()]))
+        .map(|range| (range, FormattedToken::Emoji)));
+    tokens.sort_by_key(|(range, _)| range.start);
+
+    let mut append = |range: std::ops::Range<usize>, token: Option<FormattedToken>| {
+        let start = offset + range.start;
+        let end = offset + range.end;
+        for run in runs_in(runs, start..end) {
+            let accent = match token {
+                Some(FormattedToken::Link) => Some(url_link_color(pal)),
+                Some(FormattedToken::Mention) => Some(mention_link_color(pal)),
+                _ => None,
+            };
+            let format = text_format(run.format, &base, pal.is_dark.then_some(bg), bold_ink, accent);
+            let atomic = matches!(token, Some(FormattedToken::Emoji));
+            let end = if atomic { end } else { run.end };
+            job.append(&source.text[run.start..end], std::mem::take(&mut leading), format);
+            section_offsets.push(accent.is_none().then_some(run.start));
+            if atomic {
+                break;
+            }
+        }
+    };
+    let mut cursor = 0;
+    for (range, token) in tokens {
+        if range.start < cursor {
+            continue;
+        }
+        append(cursor..range.start, None);
+        cursor = range.end;
+        append(range, Some(token));
+    }
+    append(cursor..text.len(), None);
+    if job.sections.is_empty() {
+        job.append("", leading, base);
+        section_offsets.push(None);
+    }
+    FormattedLine { job, section_offsets, link: link.or_else(|| embedded_url(text)) }
+}
+
 fn render_markdown_inline_rich(
     ui: &mut egui::Ui,
     input: (&SourceEmoticons<'_>, &str, &str),
@@ -2077,63 +2270,10 @@ fn render_markdown_inline_rich(
             continue;
         }
 
-        // Tags: exact `@Name` spans from the message's `mentions` metadata win; without
-        // metadata, fall back to guessing `@All` / `@Name` from the text.
-        if rest.starts_with('@') {
-            if let Some(list) = mentions {
-                if let Some(tag) = list
-                    .iter()
-                    .filter(|m| rest.starts_with(m.as_str()))
-                    .max_by_key(|m| m.len())
-                {
-                    layout.append_protected(tag, mention_fmt.clone());
-                    rest = &rest[tag.len()..];
-                    continue;
-                }
-            }
-        }
-        if rest.starts_with('@') && mentions.is_none() {
-            let after = &rest[1..];
-            let is_all = after.starts_with("All")
-                || after.starts_with("all")
-                || after.starts_with("ALL")
-                || after.starts_with("Tất cả")
-                || after.starts_with("tất cả")
-                || after.starts_with("Tat ca")
-                || after.starts_with("tat ca");
-            if is_all {
-                let all_len = if after.starts_with("Tất cả") || after.starts_with("tất cả")
-                {
-                    "Tất cả".len()
-                } else if after.starts_with("Tat ca") || after.starts_with("tat ca") {
-                    6
-                } else {
-                    3
-                };
-                let next_char = after[all_len..].chars().next();
-                if next_char.is_none()
-                    || next_char.unwrap().is_whitespace()
-                    || matches!(next_char.unwrap(), '.' | ',' | '!' | '?' | ':' | ';')
-                {
-                    let mention_text = &rest[..1 + all_len];
-                    layout.append_protected(mention_text, mention_fmt.clone());
-                    rest = &after[all_len..];
-                    continue;
-                }
-            }
-
-            let candidate_name = &after[..guessed_mention_name_len(after)];
-            if candidate_name
-                .chars()
-                .next()
-                .is_some_and(char::is_alphanumeric)
-            {
-                let mention_len = 1 + candidate_name.len();
-                let mention_str = &rest[..mention_len];
-                layout.append_protected(mention_str, mention_fmt.clone());
-                rest = &rest[mention_len..];
-                continue;
-            }
+        if let Some(len) = inline_mention_len(rest, mentions) {
+            layout.append_protected(&rest[..len], mention_fmt.clone());
+            rest = &rest[len..];
+            continue;
         }
 
         if rest.starts_with("**") {
@@ -2825,12 +2965,11 @@ fn render_recall_marker(ui: &mut egui::Ui, text: &str) {
     }
 }
 
-pub(super) fn render_message_body(
+fn render_message_body(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
     thread_name: &str,
     pal: &ThemePalette,
-    outgoing: bool,
     max_text_width: f32,
     media_max_width: f32,
     sticker_textures: &HashMap<String, TextureHandle>,
@@ -2838,7 +2977,9 @@ pub(super) fn render_message_body(
     failed_message_thumbnails: &HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
     album: Option<&[&ChatMessage]>,
+    formatted: Option<FormattedMessage<'_>>,
 ) -> Option<BubbleAction> {
+    let outgoing = msg.is_outgoing;
     let mut body_action = None;
     let mention_texts = message_mention_texts(msg);
     let (text_col, meta_col) = if outgoing {
@@ -2859,6 +3000,10 @@ pub(super) fn render_message_body(
     }
 
     render_recall_marker(ui, trimmed_text);
+    if let Some(formatted) = formatted {
+        formatted.show(ui, sticker_textures, loading_stickers);
+        return None;
+    }
 
     let sender_label = message_sender_label(msg, thread_name);
 
@@ -3777,10 +3922,11 @@ pub(super) fn render_chat_bubble(
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
     let max_text_width = (max_bubble_width - 24.0).max(90.0);
+    let mut formatted = FormattedMessage::new(msg, pal);
     let contact_card = msg.contact_card.as_ref();
     let is_contact_card = contact_card.is_some();
     let has_sticker = !is_contact_card && is_sticker_message(msg).is_some();
-    let call_card_opt = if is_contact_card {
+    let call_card_opt = if is_contact_card || formatted.is_some() {
         None
     } else {
         extract_call_card_view(msg)
@@ -3789,7 +3935,8 @@ pub(super) fn render_chat_bubble(
     let is_photo_card = !is_contact_card && !has_sticker && is_zalo_photo_message(msg);
     let has_voice_card = !is_contact_card && !has_sticker && is_voice_message(msg);
     let is_file_card = !is_contact_card && !has_sticker && is_zalo_file_or_video_message(msg);
-    let has_link_card = !is_contact_card
+    let has_link_card = formatted.is_none()
+        && !is_contact_card
         && !has_sticker
         && !is_photo_card
         && !is_file_card
@@ -3926,19 +4073,14 @@ pub(super) fn render_chat_bubble(
             clamp_width(w, 135.0, max_text_width.min(340.0)).ceil()
         }
     } else {
-        let display_str = if msg.text.trim() == "[Tin nhắn đã thu hồi]" {
-            "  Tin nhắn đã được thu hồi".to_string()
-        } else if let Some(stripped) = msg.text.strip_prefix("[Đã thu hồi] ") {
-            strip_markdown_syntax_for_width(stripped)
-        } else {
-            strip_markdown_syntax_for_width(&msg.text)
-        };
-        let emoji_clusters = if msg.text.starts_with("[Đã thu hồi]") {
+        let emoji_clusters = if formatted.is_some() || msg.text.starts_with("[Đã thu hồi]") {
             None
         } else {
             emoji_only_clusters(msg.text.trim())
         };
-        let text_w = if let Some(clusters) = emoji_clusters {
+        let text_w = if let Some(formatted) = &formatted {
+            formatted.width(ui, max_text_width)
+        } else if let Some(clusters) = emoji_clusters {
             // Mirrors `render_emoji_only`: texture cells or glyph advances plus gaps.
             let gaps = (clusters.len().saturating_sub(1)) as f32 * EMOJI_ONLY_GAP;
             let cells: f32 = clusters
@@ -3954,6 +4096,13 @@ pub(super) fn render_chat_bubble(
         }) {
             matches.len() as f32 * EMOJI_ONLY_SIZE + (matches.len() - 1) as f32 * EMOJI_ONLY_GAP
         } else {
+            let display_str = if msg.text.trim() == "[Tin nhắn đã thu hồi]" {
+                "  Tin nhắn đã được thu hồi".to_string()
+            } else if let Some(stripped) = msg.text.strip_prefix("[Đã thu hồi] ") {
+                strip_markdown_syntax_for_width(stripped)
+            } else {
+                strip_markdown_syntax_for_width(&msg.text)
+            };
             ui.fonts(|f| {
                 f.layout(
                     display_str,
@@ -4114,7 +4263,6 @@ pub(super) fn render_chat_bubble(
                                     msg,
                                     thread_name,
                                     pal,
-                                    true,
                                     content_width,
                                     max_text_width,
                                     sticker_textures,
@@ -4122,6 +4270,7 @@ pub(super) fn render_chat_bubble(
                                     failed_message_thumbnails,
                                     emoji_textures,
                                     album,
+                                    formatted.take(),
                                 );
                             }
                             if let Some(act) =
@@ -4292,7 +4441,6 @@ pub(super) fn render_chat_bubble(
                                     msg,
                                     thread_name,
                                     pal,
-                                    false,
                                     content_width,
                                     max_text_width,
                                     sticker_textures,
@@ -4300,6 +4448,7 @@ pub(super) fn render_chat_bubble(
                                     failed_message_thumbnails,
                                     emoji_textures,
                                     album,
+                                    formatted.take(),
                                 );
                             }
                             if let Some(act) =
@@ -5947,6 +6096,80 @@ mod quote_navigation_tests {
         assert!(emoji_only_clusters(&"😀".repeat(EMOJI_ONLY_MAX + 1)).is_none());
         assert_eq!(emoji_texture_key_exact("❤️"), Some("heart"));
         assert_eq!(emoji_texture_key_exact("🐧"), None);
+    }
+
+    #[test]
+    fn formatted_messages_render_prefixes_indent_and_inline_styles() {
+        use crate::chat::{ListKind, TextStyle, TextStyleFormat};
+        let text = "một\nhai\nba\nhttps://example.org @An\nbốn";
+        let numbered_end = text.find("ba").unwrap();
+        let bullet_end = text.find("https://").unwrap();
+        let msg = ChatMessage {
+            text: text.into(),
+            text_styles: vec![
+                TextStyle { start: 0, end: numbered_end, format: TextStyleFormat {
+                    list: Some(ListKind::Numbered), indent: 2, ..Default::default()
+                }},
+                TextStyle { start: 0, end: "một".len(), format: TextStyleFormat {
+                    bold: true, italic: true, underline: true, strike: true,
+                    size: Some(20), color: Some([0xdb, 0x34, 0x2e]), ..Default::default()
+                }},
+                TextStyle { start: numbered_end, end: bullet_end, format: TextStyleFormat {
+                    list: Some(ListKind::Bullet), ..Default::default()
+                }},
+                TextStyle { start: bullet_end, end: text.len(), format: TextStyleFormat {
+                    underline: true, ..Default::default()
+                }},
+            ],
+            ..Default::default()
+        };
+        let pal = ThemePalette::light();
+        let formatted = FormattedMessage::new(&msg, &pal).unwrap();
+        assert_eq!(formatted.lines.iter().map(|line| line.job.text.as_str()).collect::<Vec<_>>(),
+            ["1. một", "2. hai", "• ba", "https://example.org @An", "bốn"]);
+        assert_eq!(formatted.lines[0].job.sections[0].leading_space, 32.0);
+        let styled = &formatted.lines[0].job.sections[1].format;
+        assert_eq!(styled.font_id.size, 20.4);
+        assert!(styled.italics);
+        assert_eq!(styled.color, Color32::from_rgb(0xdb, 0x34, 0x2e));
+        assert_eq!(styled.underline.color, styled.color);
+        assert_eq!(styled.strikethrough.color, styled.color);
+        let links = &formatted.lines[3];
+        assert_eq!(links.link.as_deref(), Some("https://example.org"));
+        assert_eq!(links.job.sections[0].format.color, url_link_color(&pal));
+        assert_eq!(links.job.sections[2].format.color, mention_link_color(&pal));
+        assert_eq!(message_copy_text(&msg), text);
+    }
+
+    #[test]
+    fn formatted_messages_keep_emoticons_and_emoji_whole_across_style_edges() {
+        use crate::chat::{TextStyle, TextStyleFormat};
+        let msg = ChatMessage {
+            text: ":) 👍🏽".into(),
+            text_styles: vec![
+                TextStyle { start: 0, end: 1, format: TextStyleFormat {
+                    bold: true, ..Default::default()
+                }},
+                TextStyle { start: 1, end: 7, format: TextStyleFormat {
+                    bold: true, italic: true, ..Default::default()
+                }},
+            ],
+            ..Default::default()
+        };
+        let formatted = FormattedMessage::new(&msg, &ThemePalette::dark()).unwrap();
+        let line = formatted.lines.into_iter().next().unwrap();
+        let ctx = egui::Context::default();
+        let tex = ctx.load_texture("fixture", egui::ColorImage::example(), Default::default());
+        let textures = HashMap::from([
+            (crate::zalo_emoticons::texture_key(41, 7), tex.clone()),
+            (crate::emoji_raster::texture_key("👍🏽"), tex),
+        ]);
+        let (job, marks) = split_emoji_sections(
+            line.job, &textures, &mut HashSet::new(), &formatted.source, &line.section_offsets,
+        );
+        assert_eq!(job.text, "🙂 👍");
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks[0].shortcut.as_deref(), Some(":)"));
     }
 
     #[test]

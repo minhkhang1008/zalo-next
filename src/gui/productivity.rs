@@ -50,6 +50,7 @@ impl ZaloGuiApp {
         Draft {
             thread_id: self.productivity.bound.clone(),
             text: self.input_message.clone(),
+            text_styles: self.rich_composer.styles.clone(),
             // Assistant messages stay out of Zalo drafts (INV-5).
             reply: self
                 .replying_to
@@ -97,6 +98,7 @@ impl ZaloGuiApp {
             .get(&thread)
             .cloned()
             .unwrap_or_default();
+        self.rich_composer.restore(&draft.text, draft.text_styles);
         self.input_message = draft.text;
         self.replying_to = draft.reply;
         self.composer_mentions = draft
@@ -115,6 +117,7 @@ impl ZaloGuiApp {
                 ..Default::default()
             };
             self.input_message.clear();
+            self.rich_composer.clear();
             self.cancel_reply();
             self.composer_mentions.clear();
         }
@@ -135,6 +138,7 @@ impl ZaloGuiApp {
             .get(self.selected_thread_index)
             .map(|t| t.id.clone())
             .unwrap_or_default();
+        self.rich_composer.sync(&self.input_message, None);
         if self.productivity.bound != selected {
             self.store_current_draft(self.current_draft());
             self.restore_draft(selected);
@@ -142,6 +146,7 @@ impl ZaloGuiApp {
         self.current_draft()
     }
     pub(super) fn local_end(&mut self, before: Draft) {
+        self.rich_composer.sync(&self.input_message, None);
         let selected = self
             .threads
             .get(self.selected_thread_index)

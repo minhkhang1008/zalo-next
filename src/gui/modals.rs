@@ -4740,6 +4740,7 @@ impl ZaloGuiApp {
                 let _ = tx.send(WorkerCmd::SendMessage {
                     to_id: item.thread_id,
                     text: item.text,
+                    text_styles: Vec::new(),
                     is_group: item.is_group,
                     mentions: Vec::new(),
                 });
