@@ -576,6 +576,7 @@ impl MessageStore {
                 let mut wire_fields = std::collections::BTreeMap::new();
                 let mut poll_id = None;
                 let mut contact_card = None;
+                let mut deletes = Vec::new();
                 if !sm.raw_json.is_empty() {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sm.raw_json) {
                         sticker_id = val
@@ -660,6 +661,16 @@ impl MessageStore {
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_owned);
                         wire_fields = restore_render_wire_fields(&val);
+                        deletes = val
+                            .get("deletes")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|ids| {
+                                ids.iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         contact_card = val
                             .get("contact_card")
                             .and_then(|value| ContactCard::deserialize(value).ok());
@@ -698,6 +709,7 @@ impl MessageStore {
                         ..Default::default()
                     },
                     contact_card,
+                    deletes,
 
                     ..Default::default()
                 };
@@ -925,6 +937,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if let Some(poll_id) = &m.poll_id {
             meta.insert("poll_id".into(), serde_json::json!(poll_id));
+        }
+        if !m.deletes.is_empty() {
+            meta.insert("deletes".into(), serde_json::json!(m.deletes));
         }
         if let Some(card) = &m.contact_card {
             meta.insert("contact_card".into(), serde_json::json!(card));

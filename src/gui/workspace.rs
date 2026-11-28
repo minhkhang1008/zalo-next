@@ -226,6 +226,37 @@ impl ZaloGuiApp {
         }
     }
 
+    /// Clear every unread badge and move each thread's read point to its last message. Local only:
+    /// no seen receipts are sent for conversations the user did not open.
+    fn mark_all_read(&mut self, ctx: &egui::Context) {
+        let mut read_points = Vec::new();
+        for tid in self.unread_counts.keys() {
+            if let Some(thread) = self.threads.iter_mut().find(|t| &t.id == tid) {
+                if let Some(last) = thread.messages.last().filter(|m| !m.id.is_empty()) {
+                    thread.unread.last_seen_id = Some(last.id.clone());
+                    read_points.push((tid.clone(), last.id.clone()));
+                }
+            }
+        }
+        let count = self.unread_counts.len();
+        self.unread_counts.clear();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            crate::APP_DISPLAY_NAME.to_string(),
+        ));
+        if !read_points.is_empty() {
+            let uin = self.user_uin.clone();
+            std::thread::spawn(move || {
+                let db = crate::store::db_path_for_account(&uin);
+                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                    for (tid, mid) in read_points {
+                        let _ = store.set_thread_read(&tid, &mid);
+                    }
+                }
+            });
+        }
+        self.show_toast(format!("Đã đánh dấu {count} cuộc trò chuyện là đã đọc"));
+    }
+
     fn open_conversation(&mut self, ctx: &egui::Context, index: usize) {
         let Some(thread) = self.threads.get(index) else {
             return;
@@ -947,6 +978,22 @@ impl ZaloGuiApp {
                                     }
                                 }
                                 self.render_sidebar_label_filter(ui, pal);
+                                if !self.unread_counts.is_empty() {
+                                    let mark_all = ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(lucide::CHECK_CHECK)
+                                                    .size(15.0)
+                                                    .color(pal.text_secondary),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text("Đánh dấu tất cả đã đọc");
+                                    if mark_all.clicked() {
+                                        self.mark_all_read(ctx);
+                                    }
+                                }
                             });
                         }
                     });
@@ -3972,12 +4019,15 @@ impl ZaloGuiApp {
                                                 String::new()
                                             };
                                             let in_chat_folded = fold_vn_search(&in_chat_q);
+                                            let deleted_ids =
+                                                crate::chat::deleted_message_ids(&thread.messages);
                                             let visible_indices: Vec<usize> = thread
                                                 .messages
                                                 .iter()
                                                 .enumerate()
                                                 .filter(|(_, m)| {
-                                                    (!only_starred || m.is_starred)
+                                                    crate::chat::is_visible_message(m, &deleted_ids)
+                                                        && (!only_starred || m.is_starred)
                                                         && (in_chat_q.is_empty()
                                                             || matches_vn_query(
                                                                 &m.text,
@@ -4453,11 +4503,6 @@ impl ZaloGuiApp {
                                             .threads
                                             .iter()
                                             .position(|thread| thread.id == card.uid);
-                                    }
-                                }
-                                BubbleAction::CallContact => {
-                                    if let Some(card) = m.contact_card {
-                                        self.start_voice_call(card.uid, card.name, false);
                                     }
                                 }
                                 BubbleAction::CopyContactPhone => {
