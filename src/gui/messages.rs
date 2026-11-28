@@ -4382,7 +4382,6 @@ pub(super) enum BubbleAction {
         is_video: bool,
     },
     MessageContact,
-    CallContact,
     CopyContactPhone,
     OpenImagePopup {
         /// The photo message, so the viewer opens exactly the clicked one even when two messages
