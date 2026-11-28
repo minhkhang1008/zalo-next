@@ -1584,3 +1584,13 @@ Entry template:
 - Verification: `cargo test --locked --lib` 650 pass; dmg rebuilt. NOT verified: any live call (whether the
   crackle is gone, and whether it was heard by the owner or the friend — acoustic echo without AEC is
   another possible source), auto-read behaviour in the real GUI.
+
+## 2026-11-28 — Read-point write race (last Codex finding)  (agent: Claude Code, claude-opus-5-5)
+- Request: fix the remaining review finding: read points written on a detached thread can be overwritten by
+  an earlier-queued `PersistThreads` snapshot, so read messages count as unread after a restart.
+- Changes: `WorkerCmd::SaveReadPoints(Vec<(thread, msg)>)` handled in the worker's sequential loop next to
+  `PersistThreads` (same DB); `open_conversation` and `mark_all_read` send it instead of spawning threads.
+  `upsert_thread` and `set_thread_read` keep the newer numeric read point (length, then lexicographic, as
+  `unread::compare_ids`); empty keeps the old one; non-numeric ids are taken as written. Test
+  `numeric_read_points_never_move_backwards`.
+- Verification: `cargo test --locked --lib` 651 pass; dmg rebuilt. NOT verified live (restart after reading).
