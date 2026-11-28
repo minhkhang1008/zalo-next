@@ -1446,3 +1446,14 @@ Entry template:
 - NOT verified: anything live (list/add/edit/delete/send against Zalo, how the phone shows the card, logos),
   received bank cards are NOT rendered yet (zinstant layout, no sample; waits for the owner's BrowserSkill).
 - Pending: mandatory adversarial review of feature/bank-cards (Codex quota resets 16:08).
+
+## 2026-11-28 — Owner feedback round 2 (partial) and session handoff  (agent: Claude Code, claude-opus-5-5)
+- Done on `feature/owner-feedback-2` (../zalo-next-fb, not yet merged into test/upstream-port): voice/video
+  incoming call detection by extendData.callType (d668ced), fresh-only notifications (9e9c714), mark all read +
+  chat.delete handling + blank rows hidden (43fda1a), contact card without call button (89396bc). 596 tests pass.
+- App Lock: Touch ID prompt only on click, app activated before asking (56fdd35, merged into test branch).
+- Zalo Web inspected via BrowserSkill (Bo's chat only, nothing sent): received bank card = zinstant.bankcard,
+  data at zinst-stc.zadn.vn (re-notes/54, redacted fixture). Formatting toolbar layout confirmed.
+- NOT done / pending: received bank card rendering, add-account redesign, call popup + optional video,
+  phone-number cards, rich text, bank-cards adversarial review. Full plan in
+  `.agents/handoff/HANDOFF-2026-11-28.md` (briefs saved next to it).
