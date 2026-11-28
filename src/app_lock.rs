@@ -32,7 +32,8 @@ const FREE_ATTEMPTS: u32 = 5;
 const FIRST_LOCKOUT_SECS: i64 = 30;
 const MAX_LOCKOUT_SECS: i64 = 15 * 60;
 /// A wall-clock jump this much larger than the monotonic clock means the machine slept.
-pub const SLEEP_JUMP: Duration = Duration::from_secs(45);
+/// Clock adjustments under 15 seconds are ignored.
+pub const SLEEP_JUMP: Duration = Duration::from_secs(15);
 /// Idle timeouts offered in Settings, in minutes (0 = only manual and sleep).
 pub const IDLE_CHOICES_MIN: [u32; 4] = [0, 5, 15, 30];
 
@@ -429,7 +430,7 @@ mod tests {
         let ten_min = Duration::from_secs(600);
         assert!(auto.tick(&config, start + ten_min, wall + ten_min));
 
-        // Sleep: the wall clock jumps an hour while the monotonic clock barely moves.
+        // Distinguish small clock adjustments from a short sleep.
         let mut auto = AutoLock::new(start);
         let no_idle = Config {
             idle_minutes: 0,
@@ -437,7 +438,12 @@ mod tests {
         };
         assert!(!auto.tick(&no_idle, start, wall));
         let one_sec = Duration::from_secs(1);
-        assert!(auto.tick(&no_idle, start + one_sec, wall + Duration::from_secs(3600)));
+        assert!(!auto.tick(&no_idle, start + one_sec, wall + Duration::from_secs(15)));
+        assert!(auto.tick(
+            &no_idle,
+            start + one_sec * 2,
+            wall + Duration::from_secs(32)
+        ));
 
         // Disabled config never locks.
         let off = Config::default();

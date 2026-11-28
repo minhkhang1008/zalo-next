@@ -474,6 +474,7 @@ struct ActiveCallOverlay {
     mic_muted: bool,
     cam_enabled: bool,
     is_incoming_ringing: bool,
+    is_connected: bool,
     error_code: Option<i64>,
     error_reason: Option<String>,
     speaker_view: bool,
@@ -1297,7 +1298,12 @@ impl ZaloGuiApp {
         let mut loaded_settings = AppSettings::load();
         let (lock_config, lock_load_status) = match app_lock::load(std::path::Path::new(".")) {
             Ok(config) => (config, None),
-            Err(_) => (app_lock::Config::default(), Some(app_lock_ui::LOAD_ERROR)),
+            Err(_) => {
+                let mut config = app_lock::Config::default();
+                // Only macOS can unlock without a readable passcode hash, via system authentication.
+                config.enabled = cfg!(target_os = "macos");
+                (config, Some(app_lock_ui::LOAD_ERROR))
+            }
         };
         app_lock::set_locked(lock_config.usable());
         setup_custom_fonts_with_choice(&cc.egui_ctx, &loaded_settings.font_family);
@@ -2777,9 +2783,13 @@ impl ZaloGuiApp {
                         self.sticker_textures.remove("call_local_video");
                         if !has_error {
                             self.active_call = None;
+                        } else if let Some(call) = &mut self.active_call {
+                            call.is_connected = false;
                         }
                     } else if let Some(ref mut call) = self.active_call {
-                        if state == "incall" || state == "connected" {
+                        call.is_connected = matches!(state.as_str(), "incall" | "connected")
+                            && call.error_reason.is_none();
+                        if call.is_connected {
                             call.is_incoming_ringing = false;
                         }
                         if call.error_reason.is_none() {
@@ -2825,6 +2835,7 @@ impl ZaloGuiApp {
                         mic_muted: false,
                         cam_enabled: is_video,
                         is_incoming_ringing: true,
+                        is_connected: false,
                         error_code: None,
                         error_reason: None,
                         speaker_view: false,
@@ -2841,6 +2852,7 @@ impl ZaloGuiApp {
                 GuiEvent::CallRejected { code, reason } => {
                     self.status_msg = format!("⚠️ Từ chối cuộc gọi (mã {code}): {reason}");
                     if let Some(ref mut call) = self.active_call {
+                        call.is_connected = false;
                         call.state_label = "Không thể thực hiện cuộc gọi".into();
                         call.error_code = Some(code);
                         call.error_reason = Some(reason);
@@ -3930,8 +3942,8 @@ impl ZaloGuiApp {
         ui.vertical_centered(|ui| {
             let avail_h = ui.available_height();
             ui.add_space((avail_h * 0.08).max(20.0));
-            if self.app_lock.settings_error.as_deref() == Some(app_lock_ui::LOAD_ERROR) {
-                ui.label(RichText::new(app_lock_ui::LOAD_ERROR).color(pal.danger));
+            if let Some(error) = self.app_lock.load_error {
+                ui.label(RichText::new(error).color(pal.danger));
             }
             if let Some(tex) = &self.app_logo_texture {
                 ui.image((tex.id(), Vec2::new(64.0, 64.0)));
