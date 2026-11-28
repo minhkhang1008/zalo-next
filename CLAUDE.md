@@ -69,7 +69,8 @@ scripts/codex.sh status | result <job-id> | cancel <job-id>
   and hangs.
 - Parallel work: only for **disjoint** file sets. If Claude must keep editing nearby, give Codex a worktree
   (`git worktree add ../zalo-next-<topic> -b <branch>`), run with `--cwd ../zalo-next-<topic>`, and merge it
-  back yourself. A new worktree has its own `target/`, so the first build is a full build.
+  back yourself. A new worktree has its own `target/` (a full build, several GB), so use as few as possible
+  and, once merged, remove the worktree and delete its branch immediately (AGENTS.md §5, cleanup rule).
 - Leave model and effort at the defaults (`~/.codex/config.toml`) unless the owner asks for something else.
 - Keep the stop-time review gate **off** (`/codex:setup --disable-review-gate`). It reviews every turn, has no
   cap on iterations, and burns usage.

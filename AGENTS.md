@@ -120,9 +120,15 @@ With CMake 4.x, export `CMAKE_POLICY_VERSION_MINIMUM=3.5` before building (`opus
 - **Commit freely, push only with approval.** Agents may create local commits on the current branch without
   asking: Conventional Commits, one logical change each, staging **explicit paths only** (never `git add -A`).
   **Pushing, tagging, releasing, force-pushing, rewriting published history, or deleting branches always needs
-  the owner's explicit OK** in the current conversation.
+  the owner's explicit OK** in the current conversation. The one exception is the cleanup rule below.
 - Work happens on `main` by default. Use a short-lived branch (`feature/…`, `fix/…`, `core/…`) for risky or
   multi-session work: protocol, schema, crypto, release packaging.
+- **Clean up as soon as a piece of work is done** (owner, 2026-11-28; the disk is small and every worktree
+  builds its own multi-GB `target/`). Keep worktrees to a minimum: prefer the current checkout, and add a
+  worktree only when parallel work really needs one. When a branch an agent created is merged, the agent
+  removes its worktree (`git worktree remove`) and deletes the local branch (`git branch -d`) right away,
+  without asking. This covers only local branches the agent created and that are fully merged. Remote
+  branches, unmerged branches and branches the agent did not create still need the owner's OK.
 - Never commit: `log.txt`, `call_trace.log`, `voip.log`, `skills/`, anything under `target/`, `dist/`,
   `dump/`, `accounts/`, or data files in the repo root. `.gitignore` covers most of them, so check anyway.
 - The owner often has large uncommitted edits. Don't stage, revert, stash or reformat files you did not change.
