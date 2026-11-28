@@ -38,6 +38,13 @@ pub(crate) fn available() -> bool {
 /// Show the system prompt with `reason`. `done(true)` once the owner is verified, `done(false)`
 /// on cancel or failure. `done` runs on a system queue, at most once.
 pub(crate) fn authenticate(reason: &str, done: impl FnOnce(bool) + Send + 'static) {
+    // The system prompt belongs to the frontmost app. Make sure that is us right before asking;
+    // otherwise (seen with an unbundled `cargo run` binary) the prompt can wait in the background
+    // until the user switches apps.
+    if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
+        #[allow(deprecated)]
+        objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
     // SAFETY: as in `available`.
     let context: Retained<AnyObject> =
         unsafe { msg_send_id![msg_send_id![class!(LAContext), alloc], init] };

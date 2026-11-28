@@ -32,8 +32,6 @@ pub(super) struct State {
     pub(super) load_error: Option<&'static str>,
     settings_error: Option<String>,
     pending_save: Option<Config>,
-    #[cfg(target_os = "macos")]
-    system_prompt_started: bool,
     #[cfg(not(target_os = "macos"))]
     passcode_setup: bool,
     #[cfg(not(target_os = "macos"))]
@@ -64,8 +62,6 @@ impl State {
             load_error,
             settings_error: None,
             pending_save: None,
-            #[cfg(target_os = "macos")]
-            system_prompt_started: false,
             #[cfg(not(target_os = "macos"))]
             passcode_setup: false,
             #[cfg(not(target_os = "macos"))]
@@ -182,10 +178,6 @@ impl ZaloGuiApp {
         self.app_lock.focus_passcode = true;
         self.app_lock.unlock_retry_at = None;
         self.app_lock.unlock_error = None;
-        #[cfg(target_os = "macos")]
-        {
-            self.app_lock.system_prompt_started = false;
-        }
         #[cfg(not(target_os = "macos"))]
         self.app_lock.clear_passcode_setup();
         ctx.memory_mut(|memory| {
@@ -384,10 +376,11 @@ impl ZaloGuiApp {
         #[cfg(target_os = "macos")]
         if self.app_lock.config.method == Method::System
             && can_unlock
-            && (unlock_clicked || !self.app_lock.system_prompt_started)
+            // Only an explicit click starts the system prompt (owner's request): locking, waking or
+            // bringing the window back never pops Touch ID by itself.
+            && unlock_clicked
             && system_auth_window_is_active(ctx)
         {
-            self.app_lock.system_prompt_started = true;
             self.app_lock.unlock_pending = true;
             self.app_lock.unlock_error = None;
             let repaint_ctx = ctx.clone();
