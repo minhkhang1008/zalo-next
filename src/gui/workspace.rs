@@ -223,6 +223,63 @@ impl ZaloGuiApp {
         }
     }
 
+    fn open_conversation(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(thread) = self.threads.get(index) else {
+            return;
+        };
+        let tid = thread.id.clone();
+        let is_group = thread.is_group;
+        let is_cloud = thread.name.contains("Cloud của tôi");
+        let last_mid = thread.messages.last().map(|last| last.id.clone());
+        if self.selected_thread_index != index {
+            self.cancel_reply();
+            self.filter_starred_only = false;
+            self.force_scroll_to_bottom = true;
+            self.chat_render_window = (tid.clone(), CHAT_RENDER_STEP);
+            ctx.request_repaint();
+        }
+        self.selected_thread_index = index;
+        if self.unread_counts.remove(&tid).is_some() {
+            let total_unread: usize = self.unread_counts.values().sum();
+            let title = if total_unread > 0 {
+                format!("({total_unread}) {}", crate::APP_DISPLAY_NAME)
+            } else {
+                crate::APP_DISPLAY_NAME.to_string()
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+        // Persist the read-point so reopening the app does not recount read messages (#119).
+        if let Some(last_mid) = last_mid {
+            self.threads[index].unread.last_seen_id = Some(last_mid.clone());
+            let mid = last_mid.clone();
+            let tid_c = tid.clone();
+            let uin_c = self.user_uin.clone();
+            std::thread::spawn(move || {
+                let db = crate::store::db_path_for_account(&uin_c);
+                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                    let _ = store.set_thread_read(&tid_c, &mid);
+                }
+            });
+            if !self.settings.block_seen && !last_mid.is_empty() {
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.send(WorkerCmd::SendSeen {
+                        thread_id: tid,
+                        is_group,
+                        last_msg_id: last_mid,
+                    });
+                }
+            }
+        } else if is_group || is_cloud {
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::LoadGroupHistory {
+                    group_id: tid,
+                    is_group,
+                    have: 0,
+                });
+            }
+        }
+    }
+
     pub(super) fn render_chat_workspace(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         // Responsive breakpoints based on live viewport width
         // -------------------------------------------------------------------
@@ -1066,7 +1123,7 @@ impl ZaloGuiApp {
                     }
                 };
 
-                let mut clicked_thread: Option<(usize, String, bool)> = None;
+                let mut clicked_thread: Option<(usize, String)> = None;
                 let mut clicked_msg_hit: Option<(usize, String)> = None;
                 #[derive(Clone)]
                 enum ThreadCtxAction {
@@ -1646,7 +1703,7 @@ impl ZaloGuiApp {
                             });
 
                             if row_resp.clicked() {
-                                clicked_thread = Some((i, t.id.clone(), t.is_group));
+                                clicked_thread = Some((i, t.id.clone()));
                             }
                         }
 
@@ -1746,74 +1803,9 @@ impl ZaloGuiApp {
                     self.in_chat_search_focus_pending = true;
                     self.in_chat_search_query = q_str;
                 }
-                if let Some((idx, tid, is_group)) = clicked_thread {
-                    let resolved_idx = self.threads.iter().position(|t| t.id == tid).unwrap_or(idx);
-                    if self.selected_thread_index != resolved_idx {
-                        self.cancel_reply();
-                        self.filter_starred_only = false;
-                        self.force_scroll_to_bottom = true;
-                        self.chat_render_window = (tid.clone(), CHAT_RENDER_STEP);
-                    }
-                    self.selected_thread_index = resolved_idx;
-                    if self.unread_counts.remove(&tid).is_some() {
-                        let total_unread: usize = self.unread_counts.values().sum();
-                        let title = if total_unread > 0 {
-                            format!("({total_unread}) {}", crate::APP_DISPLAY_NAME)
-                        } else {
-                            crate::APP_DISPLAY_NAME.to_string()
-                        };
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
-                    }
-                    // Persist the read-point so reopening the app does not recount read messages (#119).
-                    if let Some(t) = self.threads.get_mut(resolved_idx) {
-                        if let Some(last) = t.messages.last() {
-                            let mid = last.id.clone();
-                            t.unread.last_seen_id = Some(mid.clone());
-                            let tid_c = tid.clone();
-                            let uin_c = self.user_uin.clone();
-                            std::thread::spawn(move || {
-                                let db = crate::store::db_path_for_account(&uin_c);
-                                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
-                                    let _ = store.set_thread_read(&tid_c, &mid);
-                                }
-                            });
-                        }
-                    }
-                    if !self.settings.block_seen {
-                        let last_mid = self
-                            .threads
-                            .get(resolved_idx)
-                            .and_then(|t| t.messages.last())
-                            .map(|m| m.id.clone())
-                            .unwrap_or_default();
-                        if !last_mid.is_empty() {
-                            if let Some(tx) = WORKER_TX.get() {
-                                let _ = tx.send(WorkerCmd::SendSeen {
-                                    thread_id: tid.clone(),
-                                    is_group,
-                                    last_msg_id: last_mid,
-                                });
-                            }
-                        }
-                    }
-                    let is_cloud = self
-                        .threads
-                        .get(resolved_idx)
-                        .map(|t| t.name.contains("Cloud của tôi"))
-                        .unwrap_or(false);
-                    let needs_history = self
-                        .threads
-                        .get(resolved_idx)
-                        .map_or(true, |t| t.messages.is_empty());
-                    if (is_group || is_cloud) && needs_history {
-                        if let Some(tx) = WORKER_TX.get() {
-                            let _ = tx.send(WorkerCmd::LoadGroupHistory {
-                                group_id: tid,
-                                is_group,
-                                have: 0,
-                            });
-                        }
-                    }
+                if let Some((idx, tid)) = clicked_thread {
+                    let index = self.threads.iter().position(|t| t.id == tid).unwrap_or(idx);
+                    self.open_conversation(ctx, index);
                 }
                 if let Some(act) = pending_ctx_action {
                     match act {
@@ -4466,10 +4458,9 @@ impl ZaloGuiApp {
                                 }
                                 BubbleAction::CopyContactPhone => {
                                     if let Some(phone) = m.contact_card.and_then(|card| card.phone) {
-                                        let digits: String =
-                                            phone.chars().filter(char::is_ascii_digit).collect();
-                                        if !digits.is_empty() {
-                                            ctx.copy_text(digits);
+                                        let number = super::contact_card::phone_for_clipboard(&phone);
+                                        if number.bytes().any(|byte| byte.is_ascii_digit()) {
+                                            ctx.copy_text(number);
                                             self.show_toast("Đã sao chép số điện thoại vào bộ nhớ tạm");
                                         }
                                     }
@@ -5957,13 +5948,7 @@ impl ZaloGuiApp {
             });
 
         if let Some(index) = open_contact_thread {
-            if index != self.selected_thread_index {
-                self.cancel_reply();
-                self.filter_starred_only = false;
-                self.force_scroll_to_bottom = true;
-                self.selected_thread_index = index;
-                ctx.request_repaint();
-            }
+            self.open_conversation(ctx, index);
         }
 
         self.render_profile_popover(ctx, pal);

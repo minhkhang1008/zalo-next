@@ -1,6 +1,6 @@
 //! Zalo Web's text shortcuts and their pinned colour sprite (re-notes/51).
 
-use crate::zalo_emoticon_table::EMOTICONS;
+use crate::{endpoints::ZALO_EMOTICON_SPRITE, zalo_emoticon_table::EMOTICONS};
 use anyhow::{ensure, Context, Result};
 use image::RgbaImage;
 use sha2::{Digest, Sha256};
@@ -97,8 +97,6 @@ pub(crate) fn texture_key(col: u8, row: u8) -> String {
     format!("emoji_zemo_{col}_{row}")
 }
 
-const SPRITE_URL: &str =
-    "https://zalo-chat-static.zadn.vn/v1/assets/emoji.1e7786c93c8a0c1773f165e2de2fd129.png";
 const SPRITE_SHA256: &str = "39e30cb3dda96560788ff4af83bdfa48d0d550dd307b017e5bb435c1eb72c6dc";
 const SPRITE_CACHE: &str = "stickers_cache/zalo_emoji_sprite.png";
 const SPRITE_LIMIT: usize = 4 * 1024 * 1024;
@@ -129,7 +127,7 @@ async fn load_sprite() -> Result<RgbaImage> {
     }
 
     ensure!(
-        crate::session::is_trusted_zalo_url(SPRITE_URL),
+        crate::session::is_trusted_zalo_url(ZALO_EMOTICON_SPRITE),
         "Untrusted Zalo emoji sprite URL"
     );
     let http = reqwest::Client::builder()
@@ -138,7 +136,7 @@ async fn load_sprite() -> Result<RgbaImage> {
         .retry(reqwest::retry::never())
         .timeout(Duration::from_secs(30))
         .build()?;
-    let response = http.get(SPRITE_URL).send().await?;
+    let response = http.get(ZALO_EMOTICON_SPRITE).send().await?;
     let bytes = crate::media_resources::read_bounded_response(response, SPRITE_LIMIT).await?;
     tokio::task::spawn_blocking(move || {
         let sprite = decode_sprite(&bytes)?;

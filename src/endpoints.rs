@@ -69,3 +69,7 @@ pub const ZPROTO_RUNTIME: &str =
 
 /// Public asset origin used as the runtime request referer, without credentials.
 pub const ZPROTO_PUBLIC_ORIGIN: &str = "https://chat.zalo.me/";
+
+/// Zalo Web's public emoticon sprite, fetched without session credentials and pinned by digest.
+pub const ZALO_EMOTICON_SPRITE: &str =
+    "https://zalo-chat-static.zadn.vn/v1/assets/emoji.1e7786c93c8a0c1773f165e2de2fd129.png";
