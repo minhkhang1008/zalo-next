@@ -2,7 +2,7 @@
 //!
 //! v1: captures mic, encodes Opus, sends RTP to `rtp_addr`; receives RTP,
 //! decodes Opus, plays to speaker. Simple blocking loop with 20 ms frames.
-//! No jitter buffer / resampling / echo cancellation yet.
+//! No jitter buffer / echo cancellation yet; sample-rate conversion is in `crate::resample`.
 
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -1669,22 +1669,20 @@ fn run_media_loop(
         Arc::new(Mutex::new(Vec::with_capacity(FRAME_SAMPLES * 8)));
     let ib = input_buf.clone();
 
-    // Input stream: downmix stereo -> mono and downsample `in_rate` -> 16000 Hz
+    // Input stream: downmix to mono, then band-limit and resample `in_rate` -> 16000 Hz with a
+    // resampler that keeps its phase between callbacks (src/resample.rs).
+    let mut in_resampler = crate::resample::StreamResampler::new(in_rate, SAMPLE_RATE);
+    let mut in_mono: Vec<f32> = Vec::with_capacity(4096);
     let input_stream = match input_dev.build_input_stream(
         &in_cfg.into(),
         move |data: &[f32], _| {
+            in_mono.clear();
+            in_mono.extend(
+                data.chunks(in_channels)
+                    .map(|frame| frame.iter().sum::<f32>() / in_channels as f32),
+            );
             if let Ok(mut b) = ib.lock() {
-                let total_frames = data.len() / in_channels;
-                let step = (in_rate as f32 / SAMPLE_RATE as f32).max(1.0);
-                let out_frames = (total_frames as f32 / step) as usize;
-                for i in 0..out_frames {
-                    let src_idx = ((i as f32 * step) as usize).min(total_frames.saturating_sub(1));
-                    let mut sum = 0.0_f32;
-                    for ch in 0..in_channels {
-                        sum += data[src_idx * in_channels + ch];
-                    }
-                    b.push(sum / in_channels as f32);
-                }
+                in_resampler.process(&in_mono, &mut b);
                 if b.len() > FRAME_SAMPLES * 25 {
                     let drop_n = b.len() - FRAME_SAMPLES * 25;
                     b.drain(0..drop_n);
@@ -1704,31 +1702,20 @@ fn run_media_loop(
         eprintln!("media: play input err {e}");
     }
 
-    // Output stream: upsample 16000 Hz mono -> `out_rate` and duplicate across `out_channels`
+    // Output stream: `output_buf` already holds mono audio at `out_rate` (resampled where the
+    // decoded frames are queued); copy it to every channel and pad an underrun with silence.
     let ob2 = output_buf.clone();
     let output_stream = match output_dev.build_output_stream(
         &out_cfg.into(),
         move |data: &mut [f32], _| {
             if let Ok(mut b) = ob2.lock() {
                 let out_frames = data.len() / out_channels;
-                let step = SAMPLE_RATE as f32 / out_rate as f32;
-                let mut consumed = 0usize;
-                for i in 0..out_frames {
-                    let src_idx = (i as f32 * step) as usize;
-                    let sample = if src_idx < b.len() {
-                        consumed = consumed.max(src_idx + 1);
-                        b[src_idx]
-                    } else {
-                        0.0
-                    };
-                    for ch in 0..out_channels {
-                        data[i * out_channels + ch] = sample;
-                    }
+                let available = out_frames.min(b.len());
+                for (i, frame) in data.chunks_mut(out_channels).enumerate() {
+                    let sample = if i < available { b[i] } else { 0.0 };
+                    frame.fill(sample);
                 }
-                if consumed > 0 {
-                    let drain_n = consumed.min(b.len());
-                    b.drain(0..drain_n);
-                }
+                b.drain(0..available);
             } else {
                 for s in data.iter_mut() {
                     *s = 0.0;
@@ -1764,6 +1751,7 @@ fn run_media_loop(
         }
     };
 
+    let mut out_resampler = crate::resample::StreamResampler::new(SAMPLE_RATE, out_rate);
     let mut seq: u16 = 0;
     let mut ts: u32 = 0;
     let ssrc = if from_uid_u32 != 0 {
@@ -2330,7 +2318,15 @@ fn run_media_loop(
                             REMOTE_AUDIO_ACTIVE.store(r_peak > 0.025, Ordering::Relaxed);
                             push_peer_bridge_audio(slot_idx, &pcm);
                             if let Ok(mut b) = output_buf.lock() {
-                                b.extend_from_slice(&pcm);
+                                out_resampler.process(&pcm, &mut b);
+                                // Bursty delivery must not build up delay: past ~400 ms queued,
+                                // keep the newest ~120 ms.
+                                let max_queue = out_rate as usize * 2 / 5;
+                                if b.len() > max_queue {
+                                    let keep = out_rate as usize * 3 / 25;
+                                    let drop_n = b.len() - keep;
+                                    b.drain(0..drop_n);
+                                }
                             }
                         }
                     }

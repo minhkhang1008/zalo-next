@@ -1115,6 +1115,11 @@ pub struct ZaloGuiApp {
     /// Where the own avatar was drawn this frame: the account menu opens beside it, and a click
     /// on it must not count as a click outside the menu.
     profile_avatar_rect: egui::Rect,
+    /// Last keyboard / pointer / scroll input in the main window. Backs up egui's focus flag,
+    /// which macOS does not always report after the app is re-activated.
+    last_user_activity: Option<std::time::Instant>,
+    /// The open conversation is scrolled to (near) its newest message.
+    chat_near_bottom: bool,
     /// "Xoá dữ liệu tin nhắn cục bộ" is pending confirmation (#21).
     wipe_confirm_open: bool,
     toast_notice: Option<(String, std::time::Instant)>,
@@ -1562,6 +1567,8 @@ impl ZaloGuiApp {
             info_drawer_open: loaded_settings.info_drawer_open,
             profile_menu_open: false,
             profile_avatar_rect: egui::Rect::NOTHING,
+            last_user_activity: None,
+            chat_near_bottom: true,
             wipe_confirm_open: false,
             toast_notice: lock_load_status.map(|text| (text.into(), std::time::Instant::now())),
             phone_modal_open: false,
@@ -2014,7 +2021,7 @@ impl ZaloGuiApp {
                             .as_ref()
                             .map(|t| t.id.clone())
                             .unwrap_or_default();
-                        let is_focused = ctx.input(|i| i.focused);
+                        let is_focused = self.user_is_present(ctx);
                         let mut new_incoming_alert = false;
 
                         let now_ts = crate::login::unix_now() as i64;
@@ -3536,6 +3543,27 @@ impl eframe::App for ZaloGuiApp {
         // may not get those wake-ups reliably, so it keeps a 500 ms heartbeat to drain messages,
         // calls and notifications; a focused window only needs a slow safety net (it used to
         // redraw the whole UI twice a second while idle).
+        if ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+        }) {
+            // Leaving the app ends "present" at once, not 15 s later.
+            self.last_user_activity = None;
+        } else if ctx.input(|i| {
+            i.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key { .. }
+                        | egui::Event::Text(_)
+                        | egui::Event::PointerButton { .. }
+                        | egui::Event::PointerMoved(_)
+                        | egui::Event::MouseWheel { .. }
+                )
+            })
+        }) {
+            self.last_user_activity = Some(std::time::Instant::now());
+        }
         let heartbeat_ms = if ctx.input(|i| i.focused) { 3000 } else { 500 };
         ctx.request_repaint_after(std::time::Duration::from_millis(heartbeat_ms));
         self.check_events(ctx);

@@ -257,6 +257,51 @@ impl ZaloGuiApp {
         self.show_toast(format!("Đã đánh dấu {count} cuộc trò chuyện là đã đọc"));
     }
 
+    /// The user is at the app: its window has focus, or they used keyboard / mouse in it during the
+    /// last 15 s (egui's focus flag can stay false on macOS after the app is re-activated).
+    pub(super) fn user_is_present(&self, ctx: &egui::Context) -> bool {
+        ctx.input(|i| i.focused)
+            || self
+                .last_user_activity
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(15))
+    }
+
+    /// New messages in the conversation on screen are read while the user is at the app and the
+    /// list shows its newest messages (no search / starred filter, scrolled to the bottom): clear
+    /// the badge, move the read point and send the seen receipt, as opening it does. A manual
+    /// "Đánh dấu chưa đọc" stays until another message arrives.
+    fn mark_open_conversation_read(&mut self, ctx: &egui::Context) {
+        if self.contacts_view_open
+            || self.filter_starred_only
+            || !self.in_chat_search_query.is_empty()
+            || !self.chat_near_bottom
+            || !self.user_is_present(ctx)
+        {
+            return;
+        }
+        let index = self.selected_thread_index;
+        let Some(thread) = self.threads.get(index) else {
+            return;
+        };
+        let seen = thread.unread.last_seen_id.as_deref();
+        let unseen_incoming = thread
+            .messages
+            .iter()
+            .rev()
+            .find(|m| !m.is_outgoing && !m.id.is_empty())
+            .is_some_and(|newest| match seen {
+                None => true,
+                // Only forward: an older row exposed by a deletion is not "new".
+                Some(seen) => matches!(
+                    crate::unread::compare_ids(&newest.id, seen),
+                    Some(std::cmp::Ordering::Greater)
+                ),
+            });
+        if unseen_incoming {
+            self.open_conversation(ctx, index);
+        }
+    }
+
     fn open_conversation(&mut self, ctx: &egui::Context, index: usize) {
         let Some(thread) = self.threads.get(index) else {
             return;
@@ -315,6 +360,7 @@ impl ZaloGuiApp {
     }
 
     pub(super) fn render_chat_workspace(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        self.mark_open_conversation_read(ctx);
         // Responsive breakpoints based on live viewport width
         // -------------------------------------------------------------------
         let screen_rect = ctx.screen_rect();
@@ -4309,6 +4355,7 @@ impl ZaloGuiApp {
                     let dist_from_bottom = (chat_scroll_out.content_size.y
                         - (chat_scroll_out.state.offset.y + chat_scroll_out.inner_rect.height()))
                         .max(0.0);
+                    self.chat_near_bottom = dist_from_bottom < 120.0;
                     if dist_from_bottom > 180.0 {
                         let btn_size = 36.0;
                         let btn_pos = Pos2::new(

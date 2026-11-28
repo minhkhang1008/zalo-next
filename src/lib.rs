@@ -22,6 +22,7 @@ pub mod history_sync;
 pub mod logger;
 pub mod login;
 pub mod media;
+pub mod resample;
 pub mod message_model;
 /// Exact quoted-message references in loaded conversations.
 pub mod message_navigation;

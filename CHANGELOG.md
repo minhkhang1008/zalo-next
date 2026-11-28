@@ -35,6 +35,8 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Thông báo trên Windows:** tin nhắn mới, nhắc hẹn, bản cập nhật và cuộc gọi đến hiện thông báo của Windows, kèm ảnh đại diện người gửi. Chưa kiểm thử trên máy thật (đặc biệt với bản portable).
 
 ### Fixed (Sửa lỗi)
+- **Tin nhắn mới trong cuộc trò chuyện đang mở được tính là đã đọc** khi bạn đang dùng app và đang xem tin mới nhất (không còn chấm đỏ phải bấm lại vào danh sách). Đang cuộn lên xem tin cũ, đang tìm trong cuộc trò chuyện hoặc lọc tin đánh dấu thì vẫn giữ là chưa đọc. Chưa kiểm thử trên giao diện thật.
+- **Âm thanh cuộc gọi bị rè:** chuyển đổi tần số lấy mẫu giữa micro/loa (ví dụ micro 44,1 kHz) và âm thanh cuộc gọi 16 kHz giờ có lọc chống răng cưa và liền mạch giữa các khối âm thanh (trước đây lấy mẫu gần nhất và bị giật ở mỗi khối, gây tiếng rè). Hàng đợi phát không còn tích trễ quá ~0,4 giây. Chưa kiểm chứng với cuộc gọi thật.
 - **"Mở lại thông báo" không có tác dụng:** app gửi sai mã thao tác nên máy chủ Zalo bỏ qua và hội thoại bị tắt thông báo lại ngay. Giờ gửi đúng mã như Zalo Web; nếu máy chủ từ chối thì báo lỗi. Chưa kiểm chứng với máy chủ thật.
 - Biểu tượng tắt thông báo trong danh sách hội thoại to và rõ hơn (chuông gạch chéo); các mục trong menu chuột phải của hội thoại thẳng hàng.
 - **Bấm avatar của bạn** giờ luôn mở menu tài khoản (trước đây phần lớn cú bấm bị đóng lại ngay).
